@@ -1,0 +1,18 @@
+{
+  "name": "@kama/gpu",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "description": "The safe WebGPU binding: wgpu handles as RAII resources and a typed surface acquire, growing toward the whole of webgpu.h",
+  "repository": "https://github.com/cosmic-canopy/kama-gpu",
+  "keywords": ["webgpu", "gpu", "wgpu", "graphics"],
+  "kind": "library",
+  "kama": ">=0.9.831",
+  "publish": {
+    "exclude": [
+      ".claude/", "AGENTS.md", "AGENTS.package.md", "AGENTS.gpu.md", "CLAUDE.md", "KAMA_GAPS.md"
+    ]
+  },
+  "modules": {
+    ".": { "visibility": "public" }
+  }
+}
