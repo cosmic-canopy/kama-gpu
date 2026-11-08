@@ -1,0 +1,5 @@
+# LF in the repository AND in the worktree, on every platform, as in kama, kyoten and the peer games. Without it a
+# Windows checkout obeys `core.autocrlf` and lands every text file as CRLF, which breaks wherever bytes are compared
+# rather than executed: tools/check-bindings.sh compares src/native/webgpu.gen.kama byte for byte with what the
+# generator writes. Binary files are left alone.
+* text=auto eol=lf
