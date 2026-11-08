@@ -1,0 +1,283 @@
+// gpuseam.c: the seam's bodies, for both legs (gpuseam.h says why it exists).
+//
+// Every slot's state is one atomic: PENDING, READY, FAILED, or ABANDONED (its owner dropped it while a callback was
+// still owed). A callback writes its results and then publishes the state with a release-store, or, finding the slot
+// abandoned, cleans it up itself; a poll reads the state with an acquire-load before touching anything else.
+#include "gpuseam.h"
+
+#include <stdatomic.h>
+#include <stdlib.h>
+#include <string.h>
+#ifndef __EMSCRIPTEN__
+#include <webgpu/wgpu.h>
+#endif
+
+#define GPUSEAM_ABANDONED 3
+#define GPUSEAM_MESSAGE_BYTES 512
+
+// A message's bytes into a slot's buffer, cut at its size. WGPU_STRLEN means NUL-terminated.
+static int32_t keep_message(WGPUStringView v, char *dst) {
+    if (v.data == NULL) return 0;
+    size_t n = v.length;
+    if (n == WGPU_STRLEN) n = strlen(v.data);
+    if (n > GPUSEAM_MESSAGE_BYTES) n = GPUSEAM_MESSAGE_BYTES;
+    memcpy(dst, v.data, n);
+    return (int32_t)n;
+}
+
+static int32_t keep_text(const char *text, char *dst) {
+    size_t n = strlen(text);
+    if (n > GPUSEAM_MESSAGE_BYTES) n = GPUSEAM_MESSAGE_BYTES;
+    memcpy(dst, text, n);
+    return (int32_t)n;
+}
+
+static int32_t copy_out(const char *src, int32_t length, uint8_t *dst, int32_t capacity) {
+    int32_t n = length < capacity ? length : capacity;
+    if (n > 0) memcpy(dst, src, (size_t)n);
+    return n;
+}
+
+// ---- errors, process-wide ----------------------------------------------------------------------------------------
+
+static atomic_llong g_errors;
+static atomic_llong g_lost;
+static atomic_flag g_error_lock = ATOMIC_FLAG_INIT;
+static char g_last_error[GPUSEAM_MESSAGE_BYTES];
+static int32_t g_last_error_length;
+
+static void on_uncaptured_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringView message, void *u1, void *u2) {
+    (void)device; (void)type; (void)u1; (void)u2;
+    while (atomic_flag_test_and_set_explicit(&g_error_lock, memory_order_acquire)) { }
+    g_last_error_length = keep_message(message, g_last_error);
+    atomic_flag_clear_explicit(&g_error_lock, memory_order_release);
+    atomic_fetch_add_explicit(&g_errors, 1, memory_order_release);
+}
+
+static void on_device_lost(WGPUDevice const *device, WGPUDeviceLostReason reason, WGPUStringView message, void *u1, void *u2) {
+    (void)device; (void)u1; (void)u2;
+    // released on purpose, or its instance gone first: not a loss anyone must handle
+    if (reason == WGPUDeviceLostReason_Destroyed || reason == WGPUDeviceLostReason_CallbackCancelled) return;
+    while (atomic_flag_test_and_set_explicit(&g_error_lock, memory_order_acquire)) { }
+    g_last_error_length = keep_message(message, g_last_error);
+    atomic_flag_clear_explicit(&g_error_lock, memory_order_release);
+    atomic_fetch_add_explicit(&g_lost, 1, memory_order_release);
+}
+
+int64_t gpuseam_error_count(void) { return (int64_t)atomic_load_explicit(&g_errors, memory_order_acquire); }
+int64_t gpuseam_lost_count(void) { return (int64_t)atomic_load_explicit(&g_lost, memory_order_acquire); }
+
+int32_t gpuseam_last_error(uint8_t *dst, int32_t capacity) {
+    while (atomic_flag_test_and_set_explicit(&g_error_lock, memory_order_acquire)) { }
+    int32_t n = copy_out(g_last_error, g_last_error_length, dst, capacity);
+    atomic_flag_clear_explicit(&g_error_lock, memory_order_release);
+    return n;
+}
+
+// ---- a device on its way up ------------------------------------------------------------------------------------------
+
+struct gpuseam_device_request {
+    atomic_int state;
+    WGPUInstance instance;   // a reference held while the slot lives, for its events
+    WGPUAdapter adapter;
+    WGPUDevice device;
+    char message[GPUSEAM_MESSAGE_BYTES];
+    int32_t message_length;
+};
+
+static void request_free(gpuseam_device_request *r) {
+    if (r->device != NULL) wgpuDeviceRelease(r->device);
+    if (r->adapter != NULL) wgpuAdapterRelease(r->adapter);
+    if (r->instance != NULL) wgpuInstanceRelease(r->instance);
+    free(r);
+}
+
+// Publish `outcome`, unless the owner has gone: then the slot is the callback's to free.
+static void request_settle(gpuseam_device_request *r, int outcome) {
+    int expected = GPUSEAM_PENDING;
+    if (!atomic_compare_exchange_strong_explicit(&r->state, &expected, outcome, memory_order_acq_rel, memory_order_acquire)) {
+        request_free(r);   // ABANDONED
+    }
+}
+
+static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView message, void *u1, void *u2) {
+    (void)u2;
+    gpuseam_device_request *r = (gpuseam_device_request *)u1;
+    if (status != WGPURequestDeviceStatus_Success || device == NULL) {
+        r->message_length = keep_message(message, r->message);
+        if (r->message_length == 0) r->message_length = keep_text("the adapter gave no device", r->message);
+        request_settle(r, GPUSEAM_FAILED);
+        return;
+    }
+    r->device = device;
+    request_settle(r, GPUSEAM_READY);
+}
+
+static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView message, void *u1, void *u2) {
+    (void)u2;
+    gpuseam_device_request *r = (gpuseam_device_request *)u1;
+    if (status != WGPURequestAdapterStatus_Success || adapter == NULL) {
+        r->message_length = keep_message(message, r->message);
+        if (r->message_length == 0) r->message_length = keep_text("WebGPU offered no adapter", r->message);
+        request_settle(r, GPUSEAM_FAILED);
+        return;
+    }
+    r->adapter = adapter;
+    if (atomic_load_explicit(&r->state, memory_order_acquire) == GPUSEAM_ABANDONED) {
+        request_free(r);
+        return;
+    }
+    WGPUDeviceDescriptor dd;
+    memset(&dd, 0, sizeof dd);
+    dd.deviceLostCallbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
+    dd.deviceLostCallbackInfo.callback = on_device_lost;
+    dd.uncapturedErrorCallbackInfo.callback = on_uncaptured_error;
+    WGPURequestDeviceCallbackInfo ci;
+    memset(&ci, 0, sizeof ci);
+    ci.mode = WGPUCallbackMode_AllowSpontaneous;
+    ci.callback = on_device;
+    ci.userdata1 = r;
+    wgpuAdapterRequestDevice(adapter, &dd, ci);
+}
+
+gpuseam_device_request *gpuseam_request_device(WGPUInstance instance, WGPUSurface compatible, int32_t power) {
+    gpuseam_device_request *r = (gpuseam_device_request *)calloc(1, sizeof *r);
+    if (r == NULL) return NULL;
+    atomic_init(&r->state, GPUSEAM_PENDING);
+    wgpuInstanceAddRef(instance);
+    r->instance = instance;
+    WGPURequestAdapterOptions opts;
+    memset(&opts, 0, sizeof opts);
+    opts.powerPreference = (WGPUPowerPreference)power;
+    opts.compatibleSurface = compatible;
+    WGPURequestAdapterCallbackInfo ci;
+    memset(&ci, 0, sizeof ci);
+    ci.mode = WGPUCallbackMode_AllowSpontaneous;
+    ci.callback = on_adapter;
+    ci.userdata1 = r;
+    wgpuInstanceRequestAdapter(instance, &opts, ci);
+    return r;
+}
+
+int32_t gpuseam_device_request_poll(gpuseam_device_request *r) {
+    int state = atomic_load_explicit(&r->state, memory_order_acquire);
+    if (state == GPUSEAM_PENDING) {
+        wgpuInstanceProcessEvents(r->instance);
+        state = atomic_load_explicit(&r->state, memory_order_acquire);
+    }
+    return (int32_t)state;
+}
+
+WGPUAdapter gpuseam_device_request_take_adapter(gpuseam_device_request *r) {
+    if (atomic_load_explicit(&r->state, memory_order_acquire) != GPUSEAM_READY) return NULL;
+    WGPUAdapter a = r->adapter;
+    r->adapter = NULL;
+    return a;
+}
+
+WGPUDevice gpuseam_device_request_take_device(gpuseam_device_request *r) {
+    if (atomic_load_explicit(&r->state, memory_order_acquire) != GPUSEAM_READY) return NULL;
+    WGPUDevice d = r->device;
+    r->device = NULL;
+    return d;
+}
+
+int32_t gpuseam_device_request_message(gpuseam_device_request *r, uint8_t *dst, int32_t capacity) {
+    if (atomic_load_explicit(&r->state, memory_order_acquire) != GPUSEAM_FAILED) return 0;
+    return copy_out(r->message, r->message_length, dst, capacity);
+}
+
+void gpuseam_device_request_drop(gpuseam_device_request *r) {
+    if (r == NULL) return;
+    int expected = GPUSEAM_PENDING;
+    if (atomic_compare_exchange_strong_explicit(&r->state, &expected, GPUSEAM_ABANDONED, memory_order_acq_rel, memory_order_acquire)) {
+        return;   // a callback is still owed, and frees the slot when it fires
+    }
+    request_free(r);
+}
+
+// ---- a buffer map ----------------------------------------------------------------------------------------------------
+
+struct gpuseam_map {
+    atomic_int state;
+    WGPUBuffer buffer;   // a reference held while the slot lives
+    size_t offset;
+    size_t size;
+    char message[GPUSEAM_MESSAGE_BYTES];
+    int32_t message_length;
+};
+
+static void map_free(gpuseam_map *m) {
+    wgpuBufferRelease(m->buffer);
+    free(m);
+}
+
+static void on_mapped(WGPUMapAsyncStatus status, WGPUStringView message, void *u1, void *u2) {
+    (void)u2;
+    gpuseam_map *m = (gpuseam_map *)u1;
+    int outcome = GPUSEAM_READY;
+    if (status != WGPUMapAsyncStatus_Success) {
+        m->message_length = keep_message(message, m->message);
+        if (m->message_length == 0) m->message_length = keep_text("the buffer could not be mapped", m->message);
+        outcome = GPUSEAM_FAILED;
+    }
+    int expected = GPUSEAM_PENDING;
+    if (!atomic_compare_exchange_strong_explicit(&m->state, &expected, outcome, memory_order_acq_rel, memory_order_acquire)) {
+        if (outcome == GPUSEAM_READY) wgpuBufferUnmap(m->buffer);
+        map_free(m);   // ABANDONED
+    }
+}
+
+gpuseam_map *gpuseam_map_async(WGPUBuffer buffer, uint64_t mode, size_t offset, size_t size) {
+    gpuseam_map *m = (gpuseam_map *)calloc(1, sizeof *m);
+    if (m == NULL) return NULL;
+    atomic_init(&m->state, GPUSEAM_PENDING);
+    wgpuBufferAddRef(buffer);
+    m->buffer = buffer;
+    m->offset = offset;
+    m->size = size;
+    WGPUBufferMapCallbackInfo ci;
+    memset(&ci, 0, sizeof ci);
+    ci.mode = WGPUCallbackMode_AllowSpontaneous;
+    ci.callback = on_mapped;
+    ci.userdata1 = m;
+    wgpuBufferMapAsync(buffer, (WGPUMapMode)mode, offset, size, ci);
+    return m;
+}
+
+int32_t gpuseam_map_poll(gpuseam_map *m) { return (int32_t)atomic_load_explicit(&m->state, memory_order_acquire); }
+
+int32_t gpuseam_map_message(gpuseam_map *m, uint8_t *dst, int32_t capacity) {
+    if (atomic_load_explicit(&m->state, memory_order_acquire) != GPUSEAM_FAILED) return 0;
+    return copy_out(m->message, m->message_length, dst, capacity);
+}
+
+const uint8_t *gpuseam_map_bytes(gpuseam_map *m) {
+    if (atomic_load_explicit(&m->state, memory_order_acquire) != GPUSEAM_READY) return NULL;
+    return (const uint8_t *)wgpuBufferGetConstMappedRange(m->buffer, m->offset, m->size);
+}
+
+void gpuseam_map_drop(gpuseam_map *m) {
+    if (m == NULL) return;
+    int expected = GPUSEAM_PENDING;
+    if (atomic_compare_exchange_strong_explicit(&m->state, &expected, GPUSEAM_ABANDONED, memory_order_acq_rel, memory_order_acquire)) {
+        return;   // the map's callback is still owed, and frees the slot when it fires
+    }
+    if (expected == GPUSEAM_READY) wgpuBufferUnmap(m->buffer);
+    map_free(m);
+}
+
+// ---- driving the callbacks -------------------------------------------------------------------------------------------
+
+void gpuseam_device_poll(WGPUDevice device, int32_t wait) {
+#ifndef __EMSCRIPTEN__
+    wgpuDevicePoll(device, wait ? 1u : 0u, NULL);
+#else
+    (void)device; (void)wait;
+#endif
+}
+
+// ---- numbers the kama side writes, held to the header ---------------------------------------------------------------
+
+// A 2D color attachment's depthSlice is WGPU_DEPTH_SLICE_UNDEFINED, a #define the generated bindings never see.
+_Static_assert(WGPU_DEPTH_SLICE_UNDEFINED == 0xFFFFFFFFu, "gpu.kama's DEPTH_SLICE_UNDEFINED");

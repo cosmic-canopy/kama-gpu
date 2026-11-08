@@ -192,8 +192,6 @@ export {
     WGPUXlibDisplayHandle,
     WGPUXcbDisplayHandle,
     WGPUWaylandDisplayHandle,
-    WGPUNativeDisplayHandle,
-    WGPUInstanceExtras,
     WGPUDeviceExtras,
     WGPUNativeLimits,
     WGPUShaderDefine,
@@ -2171,30 +2169,6 @@ type extern value WGPURenderPipelineDescriptor {
 @compileFor(!ARCH_WASM32) @generate(zero)
 @compileFor(!ARCH_WASM32) type extern value WGPUWaylandDisplayHandle {
     public UnsafePtr display;
-}
-
-@compileFor(!ARCH_WASM32) @generate(zero)
-@compileFor(!ARCH_WASM32) type extern value WGPUNativeDisplayHandle {
-    public int32 type;
-    public WGPUXlibDisplayHandle xlib;
-    public WGPUXcbDisplayHandle xcb;
-    public WGPUWaylandDisplayHandle wayland;
-}
-
-@compileFor(!ARCH_WASM32) @generate(zero)
-@compileFor(!ARCH_WASM32) type extern value WGPUInstanceExtras {
-    public WGPUChainedStruct chain;
-    public uint64 backends;
-    public uint64 flags;
-    public int32 dx12ShaderCompiler;
-    public int32 gles3MinorVersion;
-    public int32 glFenceBehaviour;
-    public WGPUStringView dxcPath;
-    public int32 dxcMaxShaderModel;
-    public int32 dx12PresentationSystem;
-    public UnsafePtr budgetForDeviceCreation;
-    public UnsafePtr budgetForDeviceLoss;
-    public WGPUNativeDisplayHandle displayHandle;
 }
 
 @compileFor(!ARCH_WASM32) @generate(zero)

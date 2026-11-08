@@ -1,0 +1,6 @@
+{
+  "lockVersion": 1,
+  "packages": {
+    "@kama/gpu": { "source": "path", "path": "../../..", "dependencies": [] }
+  }
+}

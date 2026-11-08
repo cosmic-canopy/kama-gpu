@@ -6,14 +6,16 @@
   "repository": "https://github.com/cosmic-canopy/kama-gpu",
   "keywords": ["webgpu", "gpu", "wgpu", "graphics"],
   "kind": "library",
-  "kama": ">=0.9.831",
+  "kama": ">=0.9.874",
   "publish": {
     "exclude": [
-      ".claude/", "AGENTS.md", "AGENTS.package.md", "AGENTS.gpu.md", "CLAUDE.md", "KAMA_GAPS.md"
+      ".claude/", "AGENTS.md", "AGENTS.package.md", "AGENTS.gpu.md", "CLAUDE.md", "KAMA_GAPS.md", "tools/", "third_party/"
     ]
   },
   "modules": {
     ".": { "visibility": "public" },
     "native": { "visibility": "internal" }
-  }
+  },
+  "cincludes": ["csrc"],
+  "csources": ["csrc/gpuseam.c"]
 }

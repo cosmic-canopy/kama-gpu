@@ -1,0 +1,10 @@
+// Must not compile: `finish()` consumes the encoder, so a second `finish()` is a use after move.
+import { gpu::Device, gpu::CommandEncoder, gpu::CommandBuffer };
+
+unsafe fn void misuse(ref Device device) {
+    CommandEncoder encoder = device.createCommandEncoder();
+    CommandBuffer first = give encoder.finish();
+    CommandBuffer second = give encoder.finish();
+}
+
+fn uint8 main() { return 0; }

@@ -1,0 +1,56 @@
+// The C seam (csrc/gpuseam.h), as kama: the asynchronous slots and the process-wide error count. An extern never leaves
+// its file, so each is published through a wrapper, as the generated bindings are.
+
+export {
+    SEAM_PENDING, SEAM_READY, SEAM_FAILED,
+    requestDevice, deviceRequestPoll, deviceRequestTakeAdapter, deviceRequestTakeDevice, deviceRequestMessage,
+    deviceRequestDrop,
+    mapAsync, mapPoll, mapMessage, mapDrop, mapBytes,
+    errorCount, lastError, lostCount, pollDevice,
+};
+
+extern "gpuseam.h";
+
+comptime int32 SEAM_PENDING = 0;
+comptime int32 SEAM_READY = 1;
+comptime int32 SEAM_FAILED = 2;
+
+extern fn UnsafePtr gpuseam_request_device(UnsafePtr instance, UnsafePtr compatible, int32 power);
+extern fn int32 gpuseam_device_request_poll(UnsafePtr request);
+extern fn UnsafePtr gpuseam_device_request_take_adapter(UnsafePtr request);
+extern fn UnsafePtr gpuseam_device_request_take_device(UnsafePtr request);
+extern fn int32 gpuseam_device_request_message(UnsafePtr request, UnsafePtr<uint8> dst, int32 capacity);
+extern fn void gpuseam_device_request_drop(UnsafePtr request);
+extern fn UnsafePtr gpuseam_map_async(UnsafePtr buffer, uint64 mode, usize offset, usize size);
+extern fn int32 gpuseam_map_poll(UnsafePtr map);
+extern fn int32 gpuseam_map_message(UnsafePtr map, UnsafePtr<uint8> dst, int32 capacity);
+extern fn void gpuseam_map_drop(UnsafePtr map);
+extern fn UnsafeConstPtr<uint8> gpuseam_map_bytes(UnsafePtr map);
+extern fn int64 gpuseam_error_count();
+extern fn int32 gpuseam_last_error(UnsafePtr<uint8> dst, int32 capacity);
+extern fn int64 gpuseam_lost_count();
+extern fn void gpuseam_device_poll(UnsafePtr device, int32 wait);
+
+unsafe fn UnsafePtr requestDevice(UnsafePtr instance, UnsafePtr compatible, int32 power) {
+    return gpuseam_request_device(instance: instance, compatible: compatible, power: power);
+}
+unsafe fn int32 deviceRequestPoll(UnsafePtr request) { return gpuseam_device_request_poll(request: request); }
+unsafe fn UnsafePtr deviceRequestTakeAdapter(UnsafePtr request) { return gpuseam_device_request_take_adapter(request: request); }
+unsafe fn UnsafePtr deviceRequestTakeDevice(UnsafePtr request) { return gpuseam_device_request_take_device(request: request); }
+unsafe fn int32 deviceRequestMessage(UnsafePtr request, UnsafePtr<uint8> dst, int32 capacity) {
+    return gpuseam_device_request_message(request: request, dst: dst, capacity: capacity);
+}
+unsafe fn void deviceRequestDrop(UnsafePtr request) { gpuseam_device_request_drop(request: request); }
+unsafe fn UnsafePtr mapAsync(UnsafePtr buffer, uint64 mode, usize offset, usize size) {
+    return gpuseam_map_async(buffer: buffer, mode: mode, offset: offset, size: size);
+}
+unsafe fn int32 mapPoll(UnsafePtr map) { return gpuseam_map_poll(map: map); }
+unsafe fn int32 mapMessage(UnsafePtr map, UnsafePtr<uint8> dst, int32 capacity) {
+    return gpuseam_map_message(map: map, dst: dst, capacity: capacity);
+}
+unsafe fn void mapDrop(UnsafePtr map) { gpuseam_map_drop(map: map); }
+unsafe fn UnsafeConstPtr<uint8> mapBytes(UnsafePtr map) { return gpuseam_map_bytes(map: map); }
+unsafe fn int64 errorCount() { return gpuseam_error_count(); }
+unsafe fn int32 lastError(UnsafePtr<uint8> dst, int32 capacity) { return gpuseam_last_error(dst: dst, capacity: capacity); }
+unsafe fn int64 lostCount() { return gpuseam_lost_count(); }
+unsafe fn void pollDevice(UnsafePtr device, int32 wait) { gpuseam_device_poll(device: device, wait: wait); }

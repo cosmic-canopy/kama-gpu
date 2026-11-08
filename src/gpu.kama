@@ -1,14 +1,455 @@
-// The library surface. This file sits at the top of `source`, so it is in the project's ROOT module —
-// the one `kama.json`'s `name` names — and `export` is what importers can see:
-// `import { gpu::answer };`
+// @kama/gpu: the safe WebGPU binding. The design is kama's (ROADMAP_DETAIL.md § 8, s8-gpu-wrapper, KR-25):
 //
-// To add a module, make a folder under `source` and list it in `modules`. A folder with no entry is not
-// a module: its files belong to the nearest listed folder above them, so nothing joins your API by
-// accident.
+// - One `type resource` per WebGPU handle. Each owns one reference and releases it in its destructor, so no caller
+//   writes a `wgpu*Release`. A copy is another reference (`AddRef`), webgpu.h's own model; a bare hand-off moves.
+//   Handles are independent: releasing a device turns its children invalid, which WebGPU defines, rather than
+//   dangling.
+// - The once-in-order steps are moves: `encoder.finish()` consumes the encoder, `pass.end()` the pass, and
+//   `queue.submit(commands:)` the command buffer.
+// - The asynchronous steps are polled, never called back into kama: `instance.requestDevice(…)` gives a
+//   `DeviceRequest` whose `poll()` says Pending, Ready (with the device and its queue) or Failed; `buffer.mapRead(…)`
+//   gives a `BufferRead` the same way. Natively `device.poll(wait:)` drives them; on the web the browser's event loop
+//   does, between frames.
+// - `adopt` and `raw` on every handle let a program bind more of webgpu.h with its own externs.
+//
+// It starts at what an offscreen clear and its readback touch, and grows toward the whole of webgpu.h.
 
-export { answer };
+import {
+    std::collections::DynamicArray,
+    std::encoding::utf8::decode, std::encoding::utf8::Utf8Error,
+    gpu::native::createInstance, gpu::native::instanceAddRef, gpu::native::instanceRelease,
+    gpu::native::adapterAddRef, gpu::native::adapterRelease,
+    gpu::native::deviceAddRef, gpu::native::deviceRelease, gpu::native::deviceGetQueue,
+    gpu::native::deviceCreateBuffer, gpu::native::deviceCreateTexture, gpu::native::deviceCreateCommandEncoder,
+    gpu::native::queueAddRef, gpu::native::queueRelease, gpu::native::queueSubmit,
+    gpu::native::bufferAddRef, gpu::native::bufferRelease, gpu::native::bufferGetSize,
+    gpu::native::textureAddRef, gpu::native::textureRelease, gpu::native::textureCreateView,
+    gpu::native::textureViewAddRef, gpu::native::textureViewRelease,
+    gpu::native::commandEncoderAddRef, gpu::native::commandEncoderRelease, gpu::native::commandEncoderBeginRenderPass,
+    gpu::native::commandEncoderFinish, gpu::native::commandEncoderCopyTextureToBuffer,
+    gpu::native::renderPassEncoderAddRef, gpu::native::renderPassEncoderRelease, gpu::native::renderPassEncoderEnd,
+    gpu::native::commandBufferAddRef, gpu::native::commandBufferRelease,
+    gpu::native::WGPUBufferDescriptor, gpu::native::WGPUTextureDescriptor, gpu::native::WGPURenderPassDescriptor,
+    gpu::native::WGPURenderPassColorAttachment, gpu::native::WGPUTexelCopyTextureInfo,
+    gpu::native::WGPUTexelCopyBufferInfo, gpu::native::WGPUExtent3D,
+    gpu::native::WGPUBufferUsage, gpu::native::WGPUTextureUsage, gpu::native::WGPUMapMode,
+    gpu::native::WGPUTextureFormat, gpu::native::WGPUTextureDimension, gpu::native::WGPULoadOp,
+    gpu::native::WGPUStoreOp, gpu::native::WGPUTextureAspect, gpu::native::WGPUPowerPreference,
+    gpu::native::SEAM_PENDING, gpu::native::SEAM_FAILED,
+    gpu::native::requestDevice, gpu::native::deviceRequestPoll, gpu::native::deviceRequestTakeAdapter,
+    gpu::native::deviceRequestTakeDevice, gpu::native::deviceRequestMessage, gpu::native::deviceRequestDrop,
+    gpu::native::mapAsync, gpu::native::mapPoll, gpu::native::mapMessage, gpu::native::mapDrop, gpu::native::mapBytes,
+    gpu::native::errorCount, gpu::native::lastError, gpu::native::lostCount, gpu::native::pollDevice,
+};
 
-fn int32 answer()
-{
-    return 42;
+export {
+    Instance, Adapter, Device, Queue, DeviceRequest, DeviceStatus, GpuError, PowerPreference,
+    Buffer, BufferUsage, BufferRead, ReadStatus,
+    Texture, TextureFormat, TextureUsage, TextureView,
+    CommandEncoder, RenderPass, CommandBuffer, Color,
+    uncapturedErrors, lastErrorMessage, lostDevices,
+};
+
+comptime int32 MESSAGE_BYTES = 512;
+// webgpu.h's WGPU_DEPTH_SLICE_UNDEFINED, a #define the bindings never see; csrc/gpuseam.c asserts it is this.
+comptime uint32 DEPTH_SLICE_UNDEFINED = 0xFFFFFFFF;
+
+// ---- errors ----------------------------------------------------------------------------------------------------------
+
+type enum GpuError implements Error {
+    NoInstance,             // WebGPU gave no instance
+    Refused(string words),  // the adapter, the device or a map was refused, in the implementation's words
+    Taken;                  // a request's device was handed over already
+
+    public const fn string message() {
+        return match (this) {
+            case NoInstance: "WebGPU gave no instance";
+            case Refused(words: w): copy w;
+            case Taken: "the device was already taken from this request";
+        };
+    }
+}
+
+// The bytes a seam call copied out, as text.
+unsafe fn string textOf(const ref InlineArray<uint8>#(512) buf, int32 length) {
+    DynamicArray<uint8> bytes = DynamicArray.empty();
+    isize i = 0;
+    while (i < cast<isize>(length)) { bytes.add(item: buf[i]); i = i + 1; }
+    Result<string, Utf8Error> r = decode(bytes: bytes.view());
+    match (give r) {
+        case Ok(value: s): { return give s; }
+        case Err(error: e): { return "(not UTF-8)"; }
+    };
+}
+
+// Uncaptured errors (validation, out of memory) since the program started, on every device.
+unsafe fn int64 uncapturedErrors() { return errorCount(); }
+
+// The last uncaptured error's or lost device's words.
+unsafe fn string lastErrorMessage() {
+    InlineArray<uint8>#(512) buf = [0; 512];
+    int32 n = lastError(dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
+    return textOf(buf: buf, length: n);
+}
+
+// Devices lost for a reason other than their release, since the program started.
+unsafe fn int64 lostDevices() { return lostCount(); }
+
+// ---- plain data ------------------------------------------------------------------------------------------------------
+
+type enum PowerPreference { Default, LowPower, HighPerformance }
+
+fn int32 powerValue(PowerPreference p) {
+    return match (p) {
+        case Default: WGPUPowerPreference::Undefined;
+        case LowPower: WGPUPowerPreference::LowPower;
+        case HighPerformance: WGPUPowerPreference::HighPerformance;
+    };
+}
+
+// A texel format. The set grows as the package does; `Texture.adopt` takes any.
+type enum TextureFormat { RGBA8Unorm, RGBA8UnormSrgb, BGRA8Unorm, BGRA8UnormSrgb, RGBA16Float, Depth24Plus, Depth32Float }
+
+fn int32 formatValue(TextureFormat f) {
+    return match (f) {
+        case RGBA8Unorm: WGPUTextureFormat::RGBA8Unorm;
+        case RGBA8UnormSrgb: WGPUTextureFormat::RGBA8UnormSrgb;
+        case BGRA8Unorm: WGPUTextureFormat::BGRA8Unorm;
+        case BGRA8UnormSrgb: WGPUTextureFormat::BGRA8UnormSrgb;
+        case RGBA16Float: WGPUTextureFormat::RGBA16Float;
+        case Depth24Plus: WGPUTextureFormat::Depth24Plus;
+        case Depth32Float: WGPUTextureFormat::Depth32Float;
+    };
+}
+
+// Usage flags, OR'd together: `BufferUsage::MapRead | BufferUsage::CopyDst`.
+type value BufferUsage {
+    public comptime uint64 MapRead = WGPUBufferUsage::MapRead;
+    public comptime uint64 MapWrite = WGPUBufferUsage::MapWrite;
+    public comptime uint64 CopySrc = WGPUBufferUsage::CopySrc;
+    public comptime uint64 CopyDst = WGPUBufferUsage::CopyDst;
+    public comptime uint64 Index = WGPUBufferUsage::Index;
+    public comptime uint64 Vertex = WGPUBufferUsage::Vertex;
+    public comptime uint64 Uniform = WGPUBufferUsage::Uniform;
+    public comptime uint64 Storage = WGPUBufferUsage::Storage;
+    public comptime uint64 Indirect = WGPUBufferUsage::Indirect;
+}
+
+type value TextureUsage {
+    public comptime uint64 CopySrc = WGPUTextureUsage::CopySrc;
+    public comptime uint64 CopyDst = WGPUTextureUsage::CopyDst;
+    public comptime uint64 TextureBinding = WGPUTextureUsage::TextureBinding;
+    public comptime uint64 StorageBinding = WGPUTextureUsage::StorageBinding;
+    public comptime uint64 RenderAttachment = WGPUTextureUsage::RenderAttachment;
+}
+
+type value Color {
+    public float64 r;
+    public float64 g;
+    public float64 b;
+    public float64 a;
+
+    public ctor rgba(float64 r, float64 g, float64 b, float64 a) { this.r = r; this.g = g; this.b = b; this.a = a; }
+}
+
+// ---- the instance and the device -------------------------------------------------------------------------------------
+
+type resource Instance implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+
+    public unsafe ctor Result<Instance, GpuError> create() {
+        UnsafePtr h = createInstance(descriptor: null);
+        if (h == null) { return Result::Err(error: GpuError::NoInstance); }
+        return Result::Ok(value: Instance.adopt(raw: h));
+    }
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor copy(ref Instance source) { this.handle = source.handle; instanceAddRef(instance: this.handle); }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    // Ask for an adapter, then a device on it with WebGPU's default limits; `poll()` the request until it settles.
+    public unsafe fn DeviceRequest requestDevice(PowerPreference power) {
+        return DeviceRequest.start(instance: this.handle, compatible: null, power: powerValue(p: power));
+    }
+
+    unsafe ~Instance() { if (this.handle != null) { instanceRelease(instance: this.handle); } }
+}
+
+type resource Adapter implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor copy(ref Adapter source) { this.handle = source.handle; adapterAddRef(adapter: this.handle); }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    unsafe ~Adapter() { if (this.handle != null) { adapterRelease(adapter: this.handle); } }
+}
+
+type enum DeviceStatus { Pending, Ready(Device device, Queue queue), Failed(GpuError error) }
+
+// A device on its way up. Dropping it while it is still pending is safe: the seam frees it when its callback fires.
+type resource DeviceRequest {
+    UnsafePtr slot;
+
+    friend Instance::requestDevice[start];
+
+    unsafe ctor start(UnsafePtr instance, UnsafePtr compatible, int32 power) {
+        this.slot = requestDevice(instance: instance, compatible: compatible, power: power);
+    }
+
+    // Pending until the adapter and the device have answered; then Ready once, handing the device and its queue over,
+    // or Failed with the implementation's words. A poll after Ready is Failed(Taken).
+    public unsafe const fn DeviceStatus poll() {
+        if (this.slot == null) { return DeviceStatus::Failed(error: GpuError::Refused(words: "out of memory for the request")); }
+        int32 s = deviceRequestPoll(request: this.slot);
+        if (s == SEAM_PENDING) { return DeviceStatus::Pending; }
+        if (s == SEAM_FAILED) {
+            InlineArray<uint8>#(512) buf = [0; 512];
+            int32 n = deviceRequestMessage(request: this.slot, dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
+            string words = textOf(buf: buf, length: n);
+            return DeviceStatus::Failed(error: GpuError::Refused(words: give words));
+        }
+        UnsafePtr adapter = deviceRequestTakeAdapter(request: this.slot);
+        if (adapter != null) { adapterRelease(adapter: adapter); }   // the device keeps what it needs of it
+        UnsafePtr device = deviceRequestTakeDevice(request: this.slot);
+        if (device == null) { return DeviceStatus::Failed(error: GpuError::Taken); }
+        UnsafePtr queue = deviceGetQueue(device: device);
+        return DeviceStatus::Ready(device: Device.adopt(raw: device), queue: Queue.adopt(raw: queue));
+    }
+
+    unsafe ~DeviceRequest() { deviceRequestDrop(request: this.slot); }
+}
+
+type resource Device implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor copy(ref Device source) { this.handle = source.handle; deviceAddRef(device: this.handle); }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    // A buffer of `size` bytes for `usage` (BufferUsage flags OR'd together).
+    public unsafe fn Buffer createBuffer(uint64 size, uint64 usage) {
+        WGPUBufferDescriptor d = WGPUBufferDescriptor.zero();
+        d.size = size;
+        d.usage = usage;
+        return Buffer.adopt(raw: deviceCreateBuffer(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))));
+    }
+
+    // A 2D texture, one mip level, one sample.
+    public unsafe fn Texture createTexture(uint32 width, uint32 height, TextureFormat format, uint64 usage) {
+        WGPUTextureDescriptor d = WGPUTextureDescriptor.zero();
+        d.usage = usage;
+        d.dimension = WGPUTextureDimension::N2D;
+        d.size.width = width;
+        d.size.height = height;
+        d.size.depthOrArrayLayers = 1;
+        d.format = formatValue(f: format);
+        d.mipLevelCount = 1;
+        d.sampleCount = 1;
+        return Texture.adopt(raw: deviceCreateTexture(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))));
+    }
+
+    public unsafe fn CommandEncoder createCommandEncoder() {
+        return CommandEncoder.adopt(raw: deviceCreateCommandEncoder(device: this.handle, descriptor: null));
+    }
+
+    // Natively, finish what the device can and fire its callbacks; `wait` blocks until its queue is empty. On the web
+    // the browser's event loop does this between frames, so it does nothing.
+    public unsafe const fn void poll(bool wait) {
+        int32 w = 0;
+        if (wait) { w = 1; }
+        pollDevice(device: this.handle, wait: w);
+    }
+
+    unsafe ~Device() { if (this.handle != null) { deviceRelease(device: this.handle); } }
+}
+
+type resource Queue implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor copy(ref Queue source) { this.handle = source.handle; queueAddRef(queue: this.handle); }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    // Hand `commands` to the GPU; the command buffer is spent.
+    public unsafe fn void submit(CommandBuffer commands) {
+        UnsafePtr one = commands.raw();
+        queueSubmit(queue: this.handle, commandCount: 1, commands: cast<UnsafePtr>(addr(of: one)));
+    }
+
+    unsafe ~Queue() { if (this.handle != null) { queueRelease(queue: this.handle); } }
+}
+
+// ---- buffers ---------------------------------------------------------------------------------------------------------
+
+type resource Buffer implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor copy(ref Buffer source) { this.handle = source.handle; bufferAddRef(buffer: this.handle); }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+    public unsafe const fn uint64 size() { return bufferGetSize(buffer: this.handle); }
+
+    // Map `size` bytes from `offset` for reading (a MapRead buffer); `poll()` the read until it is Ready.
+    public unsafe fn BufferRead mapRead(uint64 offset, uint64 size) {
+        return BufferRead.start(buffer: this.handle, offset: offset, size: size);
+    }
+
+    unsafe ~Buffer() { if (this.handle != null) { bufferRelease(buffer: this.handle); } }
+}
+
+type enum ReadStatus { Pending, Ready, Failed(GpuError error) }
+
+// A buffer's bytes on their way to the CPU. Dropping it unmaps the buffer, or, while the map is still pending, leaves
+// the seam to free it when its callback fires.
+type resource BufferRead {
+    UnsafePtr slot;
+    uint64 length;
+
+    friend Buffer::mapRead[start];
+
+    unsafe ctor start(UnsafePtr buffer, uint64 offset, uint64 size) {
+        this.length = size;
+        this.slot = mapAsync(buffer: buffer, mode: WGPUMapMode::Read, offset: cast<usize>(offset), size: cast<usize>(size));
+    }
+
+    public unsafe const fn ReadStatus poll() {
+        if (this.slot == null) { return ReadStatus::Failed(error: GpuError::Refused(words: "out of memory for the map")); }
+        int32 s = mapPoll(map: this.slot);
+        if (s == SEAM_PENDING) { return ReadStatus::Pending; }
+        if (s == SEAM_FAILED) {
+            InlineArray<uint8>#(512) buf = [0; 512];
+            int32 n = mapMessage(map: this.slot, dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
+            string words = textOf(buf: buf, length: n);
+            return ReadStatus::Failed(error: GpuError::Refused(words: give words));
+        }
+        return ReadStatus::Ready;
+    }
+
+    // The mapped bytes, copied out; empty until Ready.
+    public unsafe const fn DynamicArray<uint8> bytes() {
+        DynamicArray<uint8> acc = DynamicArray.empty();
+        if (this.slot == null) { return acc; }
+        UnsafeConstPtr<uint8> p = mapBytes(map: this.slot);
+        if (p == null) { return acc; }
+        isize n = cast<isize>(this.length);
+        acc.reserve(n: n);
+        isize i = 0;
+        while (i < n) { acc.add(item: p[i]); i = i + 1; }
+        return acc;
+    }
+
+    unsafe ~BufferRead() { mapDrop(map: this.slot); }
+}
+
+// ---- textures --------------------------------------------------------------------------------------------------------
+
+type resource Texture implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor copy(ref Texture source) { this.handle = source.handle; textureAddRef(texture: this.handle); }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    // A view of the whole texture.
+    public unsafe fn TextureView createView() {
+        return TextureView.adopt(raw: textureCreateView(texture: this.handle, descriptor: null));
+    }
+
+    unsafe ~Texture() { if (this.handle != null) { textureRelease(texture: this.handle); } }
+}
+
+type resource TextureView implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor copy(ref TextureView source) { this.handle = source.handle; textureViewAddRef(textureView: this.handle); }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    unsafe ~TextureView() { if (this.handle != null) { textureViewRelease(textureView: this.handle); } }
+}
+
+// ---- recording -------------------------------------------------------------------------------------------------------
+
+type resource CommandEncoder implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor copy(ref CommandEncoder source) {
+        this.handle = source.handle;
+        commandEncoderAddRef(commandEncoder: this.handle);
+    }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    // A render pass into one color target, cleared to `clear` and stored. `end()` it before `finish()`.
+    public unsafe fn RenderPass beginRenderPass(const ref TextureView target, Color clear) {
+        WGPURenderPassColorAttachment att = WGPURenderPassColorAttachment.zero();
+        att.view = target.raw();
+        att.depthSlice = DEPTH_SLICE_UNDEFINED;
+        att.loadOp = WGPULoadOp::Clear;
+        att.storeOp = WGPUStoreOp::Store;
+        att.clearValue.r = clear.r;
+        att.clearValue.g = clear.g;
+        att.clearValue.b = clear.b;
+        att.clearValue.a = clear.a;
+        WGPURenderPassDescriptor d = WGPURenderPassDescriptor.zero();
+        d.colorAttachmentCount = 1;
+        d.colorAttachments = cast<UnsafePtr>(addr(of: att));
+        return RenderPass.adopt(raw: commandEncoderBeginRenderPass(commandEncoder: this.handle,
+                                                                   descriptor: cast<UnsafePtr>(addr(of: d))));
+    }
+
+    // Copy a `width` × `height` region of `texture`'s first level into `buffer`, `bytesPerRow` apart (a multiple of 256).
+    public unsafe fn void copyTextureToBuffer(const ref Texture texture, const ref Buffer buffer, uint32 width,
+                                              uint32 height, uint32 bytesPerRow) {
+        WGPUTexelCopyTextureInfo src = WGPUTexelCopyTextureInfo.zero();
+        src.texture = texture.raw();
+        src.aspect = WGPUTextureAspect::All;
+        WGPUTexelCopyBufferInfo dst = WGPUTexelCopyBufferInfo.zero();
+        dst.buffer = buffer.raw();
+        dst.layout.bytesPerRow = bytesPerRow;
+        dst.layout.rowsPerImage = height;
+        WGPUExtent3D ext = WGPUExtent3D.zero();
+        ext.width = width;
+        ext.height = height;
+        ext.depthOrArrayLayers = 1;
+        commandEncoderCopyTextureToBuffer(commandEncoder: this.handle, source: cast<UnsafePtr>(addr(of: src)),
+                                          destination: cast<UnsafePtr>(addr(of: dst)),
+                                          copySize: cast<UnsafePtr>(addr(of: ext)));
+    }
+
+    // The recorded commands; the encoder is spent.
+    public unsafe give fn CommandBuffer finish() {
+        return CommandBuffer.adopt(raw: commandEncoderFinish(commandEncoder: this.handle, descriptor: null));
+    }
+
+    unsafe ~CommandEncoder() { if (this.handle != null) { commandEncoderRelease(commandEncoder: this.handle); } }
+}
+
+type resource RenderPass implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor copy(ref RenderPass source) {
+        this.handle = source.handle;
+        renderPassEncoderAddRef(renderPassEncoder: this.handle);
+    }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    // The pass is over; it is spent.
+    public unsafe give fn void end() { renderPassEncoderEnd(renderPassEncoder: this.handle); }
+
+    unsafe ~RenderPass() { if (this.handle != null) { renderPassEncoderRelease(renderPassEncoder: this.handle); } }
+}
+
+type resource CommandBuffer implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor copy(ref CommandBuffer source) {
+        this.handle = source.handle;
+        commandBufferAddRef(commandBuffer: this.handle);
+    }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    unsafe ~CommandBuffer() { if (this.handle != null) { commandBufferRelease(commandBuffer: this.handle); } }
 }

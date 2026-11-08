@@ -133,6 +133,9 @@ unsafe fn string squeeze(const ref string s) {
     return bytesToString(b: buf);
 }
 
+// A struct body that stands for "holds a nested union or struct" (no real body is a single line like it).
+fn string unionMarker() { return "(a nested union or struct)\n"; }
+
 // Everything after the first '_': `WGPUTextureFormat_R8Unorm` -> `R8Unorm`.
 fn string afterFirstUnderscore(const ref string s) {
     Optional<isize> at = s.find(substring: "_");
@@ -422,22 +425,36 @@ type resource Header {
                 i = j + 1;
                 continue;
             }
-            // `typedef struct WGPUFoo {` … `} WGPUFoo …;`: its fields, a squeezed `type name` line each. The `{` line
-            // of a brace-on-the-next-line struct holds no `;`, so the field loop passes over it.
+            // `typedef struct WGPUFoo {` … `} WGPUFoo …;`: its fields, a squeezed `type name` line each. A nested
+            // `union` or `struct` (wgpu.h's tagged WGPUNativeDisplayHandle) has no kama spelling, so the struct's body
+            // becomes unionMarker() and it is left out, reported; braces are counted so its `}` ends nothing early.
             bool braceLater = braceNext && !ln.contains(substring: "*") && !ln.contains(substring: ";");
             if (ln.startsWith(prefix: "typedef struct") && (ln.contains(substring: "{") || braceLater)) {
                 string sq = squeeze(s: ln);
                 string name = firstWgpuToken(squeezed: sq);
                 isize j = i + 1;
+                if (braceLater) { j = i + 2; }   // past the struct's own `{` line
                 string fields = "";
-                while (j < n && !lines[j].startsWith(prefix: "}")) {
-                    if (lines[j].contains(substring: ";")) {
-                        string noSemi = lines[j].replace(old: ";", with: "");
+                isize depth = 0;
+                bool nested = false;
+                while (j < n) {
+                    string lj = copy lines[j];
+                    if (lj.startsWith(prefix: "}")) {
+                        if (depth == 0) { break; }
+                        depth = depth - 1;
+                    } else if ((lj.startsWith(prefix: "union") || lj.startsWith(prefix: "struct")) && !lj.contains(substring: ";")) {
+                        nested = true;
+                        if (lj.contains(substring: "{")) { depth = depth + 1; }
+                    } else if (lj.startsWith(prefix: "{")) {
+                        depth = depth + 1;
+                    } else if (depth == 0 && lj.contains(substring: ";")) {
+                        string noSemi = lj.replace(old: ";", with: "");
                         string fsq = squeeze(s: noSemi);
                         if (!fsq.isEmpty()) { fields = "${fields}${fsq}\n"; }
                     }
                     j = j + 1;
                 }
+                if (nested) { fields = unionMarker(); }
                 if (!name.isEmpty()) { this.structs.put(name: name, body: fields); }
                 i = j + 1;
                 continue;
@@ -833,6 +850,8 @@ unsafe fn void emitCallbacks(ref DynamicArray<uint8> dst, ref DynamicArray<strin
 unsafe fn void emitStructs(ref DynamicArray<uint8> dst, ref DynamicArray<string> exports, ref Report report,
                            const ref Names names, const ref Header native, const ref Header web) {
     DynamicArray<string> all = mergedNames(native: native.structDecls(), web: web.structDecls());
+    // structs left out, so a struct holding one by value is left out too (header order is dependency order)
+    DynamicArray<string> leftOut = DynamicArray.empty();
     isize i = 0;
     while (i < all.length()) {
         string name = copy all[i];
@@ -842,11 +861,19 @@ unsafe fn void emitStructs(ref DynamicArray<uint8> dst, ref DynamicArray<string>
         if (name.startsWith(prefix: "WGPUINTERNAL")) {
             string why = "struct ${name}: the header's internal marker";
             report.skip(why: why);
+            leftOut.add(item: copy name);
             i = i + 1;
             continue;
         }
         string nbody = native.structDecls().bodyOf(name: name);
         string wbody = web.structDecls().bodyOf(name: name);
+        if (nbody == unionMarker() || wbody == unionMarker()) {
+            string why = "struct ${name}: a nested union or struct, which kama has no spelling for";
+            report.skip(why: why);
+            leftOut.add(item: copy name);
+            i = i + 1;
+            continue;
+        }
         DynamicArray<string> fields = linesOf(body: nbody);
         if (!inNative) { fields = linesOf(body: wbody); }
         DynamicArray<string> others = linesOf(body: wbody);
@@ -864,6 +891,12 @@ unsafe fn void emitStructs(ref DynamicArray<uint8> dst, ref DynamicArray<string>
                 continue;
             }
             string ktype = names.kamaType(constPtrOk: false, ctypeRaw: ctype);
+            if (hasName(xs: leftOut, name: ktype)) {
+                ok = false;
+                string why = "struct ${name}: field ${fname} holds ${ktype}, which is left out";
+                report.skip(why: why);
+                break;
+            }
             if (ktype.isEmpty() || fname.isEmpty()) {
                 ok = false;
                 string why = "struct ${name}: field ${fname} of type ${ctype}";
@@ -907,6 +940,8 @@ unsafe fn void emitStructs(ref DynamicArray<uint8> dst, ref DynamicArray<string>
             while (r < rows.length()) { appendLine(dst: dst, s: rows[r]); r = r + 1; }
             emit(dst: dst, s: "}");
             addUnique(xs: exports, name: name);
+        } else {
+            leftOut.add(item: copy name);
         }
         i = i + 1;
     }

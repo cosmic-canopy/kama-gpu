@@ -1,0 +1,15 @@
+{
+  "name": "encoder_after_finish",
+  "version": "0.1.0",
+  "kind": "executable",
+  "kama": ">=0.9.874",
+  "description": "Must not compile: an encoder used after finish() consumed it",
+  "entry": "src/main.kama",
+  "webgpu": true,
+  "modules": {
+    ".": { "visibility": "internal" }
+  },
+  "dependencies": {
+    "@kama/gpu": { "path": "../../.." }
+  }
+}
