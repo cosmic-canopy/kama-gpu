@@ -33,11 +33,9 @@ in; *as an engine renderer* they stay out.
 Next: the triangle's set (shader module, pipeline, bind group), then the web leg: a canvas surface once
 `@kama/window` has its web half, and the offscreen test run in a browser with WebGPU.
 
-**`std::app` is changing under `tests/` (2026-11-08).** kama's uncommitted KR-283 work (a binary reporting
-`0.9.876+g546dd54e`) replaces `run(tick:, state:)` and `TickFn` with `run(app: Owned<App>)`, an `App` having `tick()`
-and `lifecycle(event:)`. On that binary `tests/` does not compile; the bindings, the package's check, the 60-frame
-window and the xfail still pass. `tests/` stays on the committed API until kama commits the change, then moves to an
-`App`. The surface's lifetime follows the same lifecycle: a surface is dropped on `SurfaceLost`.
+**`tests/` runs as a `std::app` `App`** (2026-11-08, kama 0.9.876, `1a969a1e` on kama's `dev`), which replaced
+`run(tick:, state:)` with `run(app: Owned<App>)`. `tests/kama.json` asks for 0.9.876; the package itself does not use
+`std::app`. A surface's lifetime follows the same lifecycle: it is dropped on `SurfaceLost`.
 
 **Not published yet.** kama's floor for a first publish is `tests/` green on every target the package claims, and the
 web leg has not run. The stopgaps below change the API, so they are fixed first.
@@ -51,10 +49,19 @@ the example each list it beside `@kama/gpu`. That ends when `@kama/window` is pu
 **The package is standalone and held to production grade, and its first consumer drives what that means** (the
 owner, 2026-11-08: "The bar is production grade general solutions"). kama's design is where it started. Each departure
 is recorded here with its reason, and the owner relays them to kama. **Kept** marks the production answer. A
-**stopgap** is fixed before the first publish, and says what replaces it.
+**stopgap** is fixed before the first publish, and says what replaces it. kama reviewed this list on 2026-11-08
+(`../kama-notes-for-kyoten.md`); its points are folded in below.
 
-1. **Kept: `instance.requestDevice(power:)`** for an offscreen device. The design names `requestDevice(surface:)`;
-   kama has no optional parameters, so the surface form is a second method (item 6).
+1. **Stopgap: `instance.requestDevice(power:)`, one request for adapter and device.** The design names
+   `requestDevice(surface:)`; kama has no optional parameters, so the surface form became a second method (item 6).
+   kama's review: items 1, 6 and 8 have one cause, the hidden adapter. **The production answer is WebGPU's own two
+   steps,** which the browser's API is, and which this package is designed against:
+   - `instance.requestAdapter(options:)` is polled to an `Adapter`. `AdapterOptions` holds the power preference and,
+     when a surface is to be presented, a copy of that surface (a copy is an `AddRef`): two ctors, `make(power:)` and
+     `forSurface(surface:, power:)`, in place of two request methods, as WebGPU's `GPURequestAdapterOptions` does;
+   - `adapter.requestDevice(...)` is polled to the device and its queue, with the limits and features it requires
+     (item 3);
+   - the adapter answers its info, limits and features, and a surface's capabilities (item 8).
 2. **Stopgap: errors are counted process-wide** (`uncapturedErrors()`, `lastErrorMessage()`, `lostDevices()`). The
    design names no channel for them. **The production answer is per device:** a device's uncaptured errors and its
    loss reach that device's holders through a state block the seam keeps per device, counted with the device's own
@@ -65,20 +72,27 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
    requires in the request, which fails when the adapter lacks them, as WebGPU's `requiredLimits` does.
 4. **Kept: the numbers are generated and asserted, not bound by name.** The design says to take enum numbers from the
    header. The bindings carry them as `comptime` constants generated from both headers, and a `_Static_assert` per
-   constant holds each to each leg's header, rather than `type extern enum` and `extern const`.
+   constant holds each to each leg's header, rather than `type extern enum` and `extern const`. The shape follows
+   cosmic-forge's generator; no kama gap stood in the way. **To grow** (kama's review): one `comptime` value cannot
+   hold a constant whose value differs between the legs. Today such a drift fails one leg's assert at build time, so it
+   cannot pass silently; when one appears, the generator emits a value per leg under `@compileFor`.
 5. **Kept: the polls are `const fn`** (`DeviceRequest.poll`, `BufferRead.poll`, `Device.poll`). The slot they read is
    the seam's memory, not the kama value's, so a borrowed handle can be polled.
-6. **Kept: the surface form of the request is `requestDeviceFor(surface:, power:)`,** a second method (item 1).
+6. **Stopgap: the surface form of the request is `requestDeviceFor(surface:, power:)`,** a second method. It goes
+   with item 1's two steps.
 7. **Kept: `SurfaceError::Error` is spelled `Failed`,** since the type implements `Error`. **Stopgap:**
    `OutOfMemory` is still there, though neither leg's `webgpu.h` reports it any more; it goes.
 8. **Stopgap: `configure` takes a format, and presents with Fifo only** (`examples/clear` uses BGRA8Unorm). Choosing
    from the surface's capabilities needs the adapter, which `DeviceStatus::Ready(device, queue)` does not hand over.
-   **The production answer:** `Ready` carries the adapter too, `surface.capabilities(adapter:)` answers the formats,
-   present modes and alpha modes, and `configure` takes a choice among them: the preferred format first, Fifo by
-   default, and Mailbox or Immediate where the surface offers them.
+   BGRA8 is not guaranteed: Android's Vulkan surfaces typically offer RGBA8 (kama's review, from general knowledge,
+   untested), which matters for Quest. **The production answer:** with the adapter in hand (item 1),
+   `surface.capabilities(adapter:)` answers the formats, present modes and alpha modes, and `configure` takes a choice
+   among them: the preferred format first, Fifo by default, and Mailbox or Immediate where the surface offers them.
 9. **Stopgap: the surface must be dropped before its window** (documented on `Surface`), because a `Window` is not
-   reference-counted. **The production answer:** `@kama/window` counts references to a window's native record, and a
-   surface holds one, so the two drop safely in either order.
+   reference-counted, so a lifetime rule lives only in documentation, in a safe API. **The production answer:**
+   `@kama/window` counts references to a window's native record and destroys it on the last release, and a surface
+   holds one, so the two drop safely in either order. On Android the OS takes the window at `SurfaceLost` whatever is
+   counted: `std::app` says so first, and the surface is dropped in that call.
 
 ## Where the truth is
 
@@ -95,6 +109,10 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
   and the kama version.
 - **Name no engine.** Nothing here names kyoten or a game: a tool, an editor and a game use it alike.
 - **Verify, don't trust.** Compile the snippet, run it, read the emitted C. A doc is not evidence, including this one.
+- **Test-driven** (the owner, 2026-11-08). A change starts with a test that fails without it, and a bug is fixed only
+  after a test reproduces it. `tools/test.sh` passes before every commit.
+- **Dependencies are injected** (the owner, 2026-11-08). Code takes what it depends on as a parameter or a contract,
+  so a test hands it a fake.
 - **Commit on the branch, and push only when the owner asks.**
 
 ## Build

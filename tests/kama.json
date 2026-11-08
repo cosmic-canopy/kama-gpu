@@ -2,7 +2,7 @@
   "name": "gputests",
   "version": "0.1.0",
   "kind": "executable",
-  "kama": ">=0.9.874",
+  "kama": ">=0.9.876",
   "description": "@kama/gpu's tests: an offscreen clear read back, every handle released by its destructor",
   "entry": "src/main.kama",
   "webgpu": true,

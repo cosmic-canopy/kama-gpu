@@ -5,6 +5,8 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- `tests/` runs as a `std::app` `App` (2026-11-08, kama 0.9.876), which replaced `run(tick:, state:)`.
+
 - A window (2026-11-07, kama 0.9.874): `Surface.create(instance:, window:)` on an `@kama/window` window (Win32 so
   far), `configure`, the typed `acquire() -> Result<SurfaceTexture, SurfaceError>` (natively, Occluded sleeps 32 ms
   before answering), `present()` as a move, and `instance.requestDeviceFor(surface:, power:)`. `examples/clear`

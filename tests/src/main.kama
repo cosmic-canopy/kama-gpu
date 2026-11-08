@@ -1,7 +1,7 @@
 // @kama/gpu's tests, one program (AGENTS.package.md): a device brought up, a 64×64 texture cleared to a known colour,
 // copied to a buffer, mapped and read back, with every handle released by its destructor and no uncaptured error.
 //
-// It is a state machine stepped by std::app::run, because on the web the device and the map are answered by the
+// It is a state machine, an `App` that std::app::run ticks, because on the web the device and the map are answered by the
 // browser's event loop, between ticks. Natively the ticks run back to back, faster than the GPU clears and copies
 // (measured: 600 non-blocking polls pass before a 64×64 clear's map completes), so it waits on the device there with
 // `poll(wait: true)`, which the web leg ignores; the timeout is the clock's, not a tick count.
@@ -9,7 +9,7 @@
 
 import {
     core::println,
-    std::app::run, std::app::TickFn, std::app::quit,
+    std::app::App, std::app::Lifecycle, std::app::run, std::app::quit,
     std::collections::DynamicArray,
     std::memory::Owned, std::memory::replace,
     std::time::Instant, std::time::monotonicNow,
@@ -33,7 +33,7 @@ fn bool near(uint8 got, int32 want) {
     return g >= want - 1 && g <= want + 1;
 }
 
-type resource Check {
+type resource Check implements App {
     Optional<Instance> instance = Optional::None;
     Optional<DeviceRequest> request = Optional::None;
     Optional<Device> device = Optional::None;
@@ -72,7 +72,13 @@ type resource Check {
         }
     }
 
-    public unsafe fn int32 tick() {
+    // One frame of the loop: false once every check has run.
+    public fn bool tick() { return this.step() != 0; }
+
+    // The host's lifecycle: nothing here holds a surface, so there is nothing to drop on `SurfaceLost`.
+    public fn void lifecycle(Lifecycle event) { }
+
+    unsafe fn int32 step() {
         if (this.stage < 2 && this.began.elapsed().asMillis() > TIMEOUT_MS) {
             int64 lost = lostDevices();
             string last = lastErrorMessage();
@@ -204,31 +210,27 @@ type resource Check {
             this.verdict(name: "no uncaptured WebGPU error", why: "${errors}, the last: ${last}");
         }
         println(s: "gpu tests: ${this.runs} cases, ${this.failures} failed");
+        exitStatus = this.failures > 0 ? 1 : 0;
         endOnTheWeb(failed: this.failures > 0);
         return 0;
     }
 }
 
+// The status `main` returns natively, set by `finish`: the loop owns the app and drops it when `run` returns.
+static int32 exitStatus = 1;
+
 // On the web `run` never returns, so the program ends here; natively `run` returns and `main` gives the status.
 @compileFor(ARCH_WASM32)
-unsafe fn void endOnTheWeb(bool failed) { if (failed) { quit(code: 1); } else { quit(code: 0); } }
+fn void endOnTheWeb(bool failed) { if (failed) { quit(code: 1); } else { quit(code: 0); } }
 @compileFor(!ARCH_WASM32)
-unsafe fn void endOnTheWeb(bool failed) { }
+fn void endOnTheWeb(bool failed) { }
 
-unsafe fn int32 tick(UnsafePtr state) {
-    UnsafePtr<Check> check = cast<UnsafePtr<Check>>(state);
-    return tickOnce(check: check[0]);
+unsafe fn void runChecks() {
+    Owned<App> app = new Check.make();
+    run(app: give app);
 }
 
-unsafe fn int32 tickOnce(ref Check check) { return check.tick(); }
-
-unsafe fn uint8 appMain() {
-    Owned<Check> boxed = new Check.make();
-    UnsafePtr<Check> check = boxed.release();   // the run loop owns it from here
-    TickFn t = tick;
-    run(tick: t, state: cast<UnsafePtr>(check));
-    if (check[0].failed() > 0) { return 1; }
-    return 0;
+fn uint8 main() {
+    runChecks();
+    return cast<uint8>(exitStatus);
 }
-
-fn uint8 main() { return appMain(); }
