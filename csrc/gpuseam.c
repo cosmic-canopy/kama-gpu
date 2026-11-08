@@ -281,3 +281,88 @@ void gpuseam_device_poll(WGPUDevice device, int32_t wait) {
 
 // A 2D color attachment's depthSlice is WGPU_DEPTH_SLICE_UNDEFINED, a #define the generated bindings never see.
 _Static_assert(WGPU_DEPTH_SLICE_UNDEFINED == 0xFFFFFFFFu, "gpu.kama's DEPTH_SLICE_UNDEFINED");
+
+// ---- a surface -------------------------------------------------------------------------------------------------------
+
+WGPUSurface gpuseam_create_surface(WGPUInstance instance, int32_t kind, void *display, void *window) {
+    WGPUSurfaceDescriptor d;
+    memset(&d, 0, sizeof d);
+#if defined(__EMSCRIPTEN__)
+    (void)display;
+    if (kind != 5 || window == NULL) return NULL;
+    WGPUEmscriptenSurfaceSourceCanvasHTMLSelector canvas;
+    memset(&canvas, 0, sizeof canvas);
+    canvas.chain.sType = WGPUSType_EmscriptenSurfaceSourceCanvasHTMLSelector;
+    canvas.selector.data = (const char *)window;
+    canvas.selector.length = WGPU_STRLEN;
+    d.nextInChain = &canvas.chain;
+    return wgpuInstanceCreateSurface(instance, &d);
+#elif defined(_WIN32)
+    if (kind != 1 || window == NULL) return NULL;
+    WGPUSurfaceSourceWindowsHWND hwnd;
+    memset(&hwnd, 0, sizeof hwnd);
+    hwnd.chain.sType = WGPUSType_SurfaceSourceWindowsHWND;
+    hwnd.hinstance = display;
+    hwnd.hwnd = window;
+    d.nextInChain = &hwnd.chain;
+    return wgpuInstanceCreateSurface(instance, &d);
+#else
+    (void)instance; (void)kind; (void)display; (void)window;
+    return NULL;   // X11, Wayland and Metal come with their legs
+#endif
+}
+
+#ifndef __EMSCRIPTEN__
+#include <time.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+static void sleep_ms(int32_t ms) {
+#if defined(_WIN32)
+    Sleep((DWORD)ms);
+#else
+    struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
+    nanosleep(&ts, NULL);
+#endif
+}
+#endif
+
+int32_t gpuseam_surface_acquire(WGPUSurface surface, void **texture, int32_t *suboptimal) {
+    WGPUSurfaceTexture st;
+    memset(&st, 0, sizeof st);
+    wgpuSurfaceGetCurrentTexture(surface, &st);
+    *texture = NULL;
+    *suboptimal = 0;
+    switch ((int)st.status) {
+        case WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal:
+        case WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal:
+            *texture = (void *)st.texture;
+            *suboptimal = st.status == WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal;
+            return GPUSEAM_SURFACE_OK;
+        case WGPUSurfaceGetCurrentTextureStatus_Timeout:
+            if (st.texture != NULL) wgpuTextureRelease(st.texture);
+            return GPUSEAM_SURFACE_TIMEOUT;
+        case WGPUSurfaceGetCurrentTextureStatus_Outdated:
+            if (st.texture != NULL) wgpuTextureRelease(st.texture);
+            return GPUSEAM_SURFACE_OUTDATED;
+        case WGPUSurfaceGetCurrentTextureStatus_Lost:
+            if (st.texture != NULL) wgpuTextureRelease(st.texture);
+            return GPUSEAM_SURFACE_LOST;
+#ifndef __EMSCRIPTEN__
+        case WGPUSurfaceGetCurrentTextureStatus_Occluded:
+            sleep_ms(32);
+            return GPUSEAM_SURFACE_OCCLUDED;
+#endif
+        default:
+            if (st.texture != NULL) wgpuTextureRelease(st.texture);
+            return GPUSEAM_SURFACE_ERROR;
+    }
+}
+
+void gpuseam_surface_present(WGPUSurface surface) {
+#ifndef __EMSCRIPTEN__
+    wgpuSurfacePresent(surface);
+#else
+    (void)surface;
+#endif
+}

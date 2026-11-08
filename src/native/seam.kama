@@ -7,6 +7,8 @@ export {
     deviceRequestDrop,
     mapAsync, mapPoll, mapMessage, mapDrop, mapBytes,
     errorCount, lastError, lostCount, pollDevice,
+    SURFACE_OK, SURFACE_OCCLUDED, SURFACE_OUTDATED, SURFACE_LOST, SURFACE_TIMEOUT,
+    createSurface, acquireSurface, presentSurface,
 };
 
 extern "gpuseam.h";
@@ -14,6 +16,12 @@ extern "gpuseam.h";
 comptime int32 SEAM_PENDING = 0;
 comptime int32 SEAM_READY = 1;
 comptime int32 SEAM_FAILED = 2;
+
+comptime int32 SURFACE_OK = 0;
+comptime int32 SURFACE_OCCLUDED = 1;
+comptime int32 SURFACE_OUTDATED = 2;
+comptime int32 SURFACE_LOST = 3;
+comptime int32 SURFACE_TIMEOUT = 4;
 
 extern fn UnsafePtr gpuseam_request_device(UnsafePtr instance, UnsafePtr compatible, int32 power);
 extern fn int32 gpuseam_device_request_poll(UnsafePtr request);
@@ -54,3 +62,15 @@ unsafe fn int64 errorCount() { return gpuseam_error_count(); }
 unsafe fn int32 lastError(UnsafePtr<uint8> dst, int32 capacity) { return gpuseam_last_error(dst: dst, capacity: capacity); }
 unsafe fn int64 lostCount() { return gpuseam_lost_count(); }
 unsafe fn void pollDevice(UnsafePtr device, int32 wait) { gpuseam_device_poll(device: device, wait: wait); }
+
+extern fn UnsafePtr gpuseam_create_surface(UnsafePtr instance, int32 kind, UnsafePtr display, UnsafePtr window);
+extern fn int32 gpuseam_surface_acquire(UnsafePtr surface, UnsafePtr<UnsafePtr> texture, UnsafePtr<int32> suboptimal);
+extern fn void gpuseam_surface_present(UnsafePtr surface);
+
+unsafe fn UnsafePtr createSurface(UnsafePtr instance, int32 kind, UnsafePtr display, UnsafePtr window) {
+    return gpuseam_create_surface(instance: instance, kind: kind, display: display, window: window);
+}
+unsafe fn int32 acquireSurface(UnsafePtr surface, UnsafePtr<UnsafePtr> texture, UnsafePtr<int32> suboptimal) {
+    return gpuseam_surface_acquire(surface: surface, texture: texture, suboptimal: suboptimal);
+}
+unsafe fn void presentSurface(UnsafePtr surface) { gpuseam_surface_present(surface: surface); }

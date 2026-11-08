@@ -5,6 +5,11 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- A window (2026-11-07, kama 0.9.874): `Surface.create(instance:, window:)` on an `@kama/window` window (Win32 so
+  far), `configure`, the typed `acquire() -> Result<SurfaceTexture, SurfaceError>` (natively, Occluded sleeps 32 ms
+  before answering), `present()` as a move, and `instance.requestDeviceFor(surface:, power:)`. `examples/clear`
+  clears a window every frame, quits on Escape and reconfigures on resize; `tools/test.sh` runs it for 60 frames.
+  Depends on `@kama/window` by path until it is published.
 - The safe API, offscreen (2026-11-07, kama 0.9.874): Instance, Adapter, Device, Queue, Buffer, Texture, TextureView,
   CommandEncoder, RenderPass and CommandBuffer as resources that release in their destructors and copy as `AddRef`;
   `encoder.finish()`, `pass.end()` and `queue.submit(commands:)` consume; the device request and a buffer's map are

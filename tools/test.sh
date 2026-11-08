@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# tools/test.sh — @kama/gpu's gate: the tests program built debug and release and run natively, the xfail refused, the
+# tools/test.sh — @kama/gpu's gate: the tests program built debug and release and run natively, a window cleared for
+# 60 frames (skipped when KAMA_WINDOW_NO_DISPLAY is set), the xfail refused, the
 # wasm leg built, and the bindings checked against the headers.
 #
 #   tools/test.sh
@@ -50,6 +51,19 @@ for mode in debug release; do
         failed=1
     fi
 done
+
+step "a window cleared for 60 frames (examples/clear)"
+if [ -n "${KAMA_WINDOW_NO_DISPLAY:-}" ]; then
+    echo "skip KAMA_WINDOW_NO_DISPLAY is set"
+else
+    "$KAMA" pkg install examples/clear/kama.json > /dev/null
+    if "$KAMA" build examples/clear/kama.json -o "tests/out/clear$EXE" > tests/out/build-clear.log 2>&1; then
+        "tests/out/clear$EXE" --frames 60 || failed=1
+    else
+        tail -20 tests/out/build-clear.log
+        failed=1
+    fi
+fi
 
 step "xfail: a moved-from encoder"
 xf=tests/xfail/encoder_after_finish

@@ -72,4 +72,25 @@ int64_t gpuseam_lost_count(void);
 // the browser's event loop does that between frames, so it does nothing.
 void gpuseam_device_poll(WGPUDevice device, int32_t wait);
 
+
+// ---- a surface ----
+
+// The outcome of an acquire. OK leaves the texture in *texture, and *suboptimal says whether to reconfigure soon.
+#define GPUSEAM_SURFACE_OK 0
+#define GPUSEAM_SURFACE_OCCLUDED 1
+#define GPUSEAM_SURFACE_OUTDATED 2
+#define GPUSEAM_SURFACE_LOST 3
+#define GPUSEAM_SURFACE_TIMEOUT 4
+#define GPUSEAM_SURFACE_ERROR 5
+
+// A surface on a system window, from @kama/window's native handle: `kind` 1 is Win32 (HINSTANCE, HWND), 5 a canvas
+// selector (NULL, the selector's C string). NULL for a kind this leg cannot make a surface from.
+WGPUSurface gpuseam_create_surface(WGPUInstance instance, int32_t kind, void *display, void *window);
+// The next texture to draw into. Natively, an occluded window sleeps 32 ms before answering OCCLUDED, the way a
+// browser throttles a hidden page (kama's design, decision 4); the web never reports it.
+int32_t gpuseam_surface_acquire(WGPUSurface surface, void **texture, int32_t *suboptimal);
+// Show what was drawn. On the web the browser presents when the frame returns (emdawnwebgpu aborts on an explicit
+// present), so it does nothing there.
+void gpuseam_surface_present(WGPUSurface surface);
+
 #endif

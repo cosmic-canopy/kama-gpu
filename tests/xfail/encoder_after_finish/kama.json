@@ -10,6 +10,7 @@
     ".": { "visibility": "internal" }
   },
   "dependencies": {
-    "@kama/gpu": { "path": "../../.." }
+    "@kama/gpu": { "path": "../../.." },
+    "@kama/window": { "path": "../../../../kama-window" }
   }
 }

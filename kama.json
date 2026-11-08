@@ -17,5 +17,8 @@
     "native": { "visibility": "internal" }
   },
   "cincludes": ["csrc"],
-  "csources": ["csrc/gpuseam.c"]
+  "csources": ["csrc/gpuseam.c"],
+  "dependencies": {
+    "@kama/window": { "path": "../kama-window" }
+  }
 }

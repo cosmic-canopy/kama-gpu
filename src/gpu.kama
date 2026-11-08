@@ -40,6 +40,11 @@ import {
     gpu::native::deviceRequestTakeDevice, gpu::native::deviceRequestMessage, gpu::native::deviceRequestDrop,
     gpu::native::mapAsync, gpu::native::mapPoll, gpu::native::mapMessage, gpu::native::mapDrop, gpu::native::mapBytes,
     gpu::native::errorCount, gpu::native::lastError, gpu::native::lostCount, gpu::native::pollDevice,
+    gpu::native::SURFACE_OK, gpu::native::SURFACE_OCCLUDED, gpu::native::SURFACE_OUTDATED, gpu::native::SURFACE_LOST,
+    gpu::native::SURFACE_TIMEOUT, gpu::native::createSurface, gpu::native::acquireSurface, gpu::native::presentSurface,
+    gpu::native::surfaceAddRef, gpu::native::surfaceRelease, gpu::native::surfaceConfigure,
+    gpu::native::WGPUSurfaceConfiguration, gpu::native::WGPUCompositeAlphaMode, gpu::native::WGPUPresentMode,
+    window::Window, window::NativeWindow, window::NativeKind,
 };
 
 export {
@@ -47,6 +52,7 @@ export {
     Buffer, BufferUsage, BufferRead, ReadStatus,
     Texture, TextureFormat, TextureUsage, TextureView,
     CommandEncoder, RenderPass, CommandBuffer, Color,
+    Surface, SurfaceTexture, SurfaceError,
     uncapturedErrors, lastErrorMessage, lostDevices,
 };
 
@@ -171,6 +177,11 @@ type resource Instance implements Copyable<This>(bare: give) {
         return DeviceRequest.start(instance: this.handle, compatible: null, power: powerValue(p: power));
     }
 
+    // The same, for an adapter that can present to `surface`.
+    public unsafe fn DeviceRequest requestDeviceFor(const ref Surface surface, PowerPreference power) {
+        return DeviceRequest.start(instance: this.handle, compatible: surface.raw(), power: powerValue(p: power));
+    }
+
     unsafe ~Instance() { if (this.handle != null) { instanceRelease(instance: this.handle); } }
 }
 
@@ -191,6 +202,7 @@ type resource DeviceRequest {
     UnsafePtr slot;
 
     friend Instance::requestDevice[start];
+    friend Instance::requestDeviceFor[start];
 
     unsafe ctor start(UnsafePtr instance, UnsafePtr compatible, int32 power) {
         this.slot = requestDevice(instance: instance, compatible: compatible, power: power);
@@ -452,4 +464,110 @@ type resource CommandBuffer implements Copyable<This>(bare: give) {
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
     unsafe ~CommandBuffer() { if (this.handle != null) { commandBufferRelease(commandBuffer: this.handle); } }
+}
+
+// ---- presenting to a window ------------------------------------------------------------------------------------------
+
+// Why an acquire gave no texture. Occluded: the window is hidden or minimised; natively the acquire slept 32 ms first,
+// so a loop that skips the frame does not spin. Outdated or Lost: configure again (at the window's new size). Timeout:
+// try the next frame. OutOfMemory is the design's; the webgpu.h both legs build against no longer reports it.
+type enum SurfaceError implements Error {
+    Occluded, Outdated, Lost, Timeout, OutOfMemory, Failed;
+
+    public const fn string message() {
+        return match (this) {
+            case Occluded: "the window is occluded";
+            case Outdated: "the surface is out of date: configure it again";
+            case Lost: "the surface was lost: configure it again";
+            case Timeout: "no texture came in time";
+            case OutOfMemory: "out of memory for a surface texture";
+            case Failed: "the surface failed";
+        };
+    }
+}
+
+// A surface on a window, which WebGPU presents into. Drop it before the window it was made on.
+type resource Surface implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+
+    public unsafe ctor Result<Surface, GpuError> create(const ref Instance instance, const ref Window window) {
+        NativeWindow n = window.nativeHandle();
+        int32 kind = match (n.kind) {
+            case None: 0;
+            case Win32: 1;
+            case X11: 2;
+            case Wayland: 3;
+            case Cocoa: 4;
+            case Canvas: 5;
+        };
+        UnsafePtr h = createSurface(instance: instance.raw(), kind: kind, display: n.display, window: n.window);
+        if (h == null) { return Result::Err(error: GpuError::Refused(words: "no surface for this window on this system")); }
+        return Result::Ok(value: Surface.adopt(raw: h));
+    }
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor copy(ref Surface source) { this.handle = source.handle; surfaceAddRef(surface: this.handle); }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    // Draw into it with `device`, `width` × `height` pixels (the window's framebuffer size) in `format`, presented in
+    // step with the display. Configure again when an acquire says Outdated or Lost, or the window is resized.
+    public unsafe fn void configure(const ref Device device, uint32 width, uint32 height, TextureFormat format) {
+        WGPUSurfaceConfiguration c = WGPUSurfaceConfiguration.zero();
+        c.device = device.raw();
+        c.format = formatValue(f: format);
+        c.usage = WGPUTextureUsage::RenderAttachment;
+        c.width = width;
+        c.height = height;
+        c.alphaMode = WGPUCompositeAlphaMode::Auto;
+        c.presentMode = WGPUPresentMode::Fifo;
+        surfaceConfigure(surface: this.handle, config: cast<UnsafePtr>(addr(of: c)));
+    }
+
+    // The next texture to draw into, or why there is none.
+    public unsafe fn Result<SurfaceTexture, SurfaceError> acquire() {
+        UnsafePtr texture = null;
+        int32 suboptimal = 0;
+        int32 s = acquireSurface(surface: this.handle, texture: addr(of: texture), suboptimal: addr(of: suboptimal));
+        if (s == SURFACE_OK) {
+            return Result::Ok(value: SurfaceTexture.make(texture: texture, surface: this.handle, suboptimal: suboptimal != 0));
+        }
+        if (s == SURFACE_OCCLUDED) { return Result::Err(error: SurfaceError::Occluded); }
+        if (s == SURFACE_OUTDATED) { return Result::Err(error: SurfaceError::Outdated); }
+        if (s == SURFACE_LOST) { return Result::Err(error: SurfaceError::Lost); }
+        if (s == SURFACE_TIMEOUT) { return Result::Err(error: SurfaceError::Timeout); }
+        return Result::Err(error: SurfaceError::Failed);
+    }
+
+    unsafe ~Surface() { if (this.handle != null) { surfaceRelease(surface: this.handle); } }
+}
+
+// One frame's texture. `present()` shows it and spends it; a frame dropped without presenting is skipped.
+type resource SurfaceTexture {
+    UnsafePtr texture;
+    UnsafePtr surface;   // a reference held while the frame lives, for its present
+    bool late;
+
+    friend Surface::acquire[make];
+
+    unsafe ctor make(UnsafePtr texture, UnsafePtr surface, bool suboptimal) {
+        this.texture = texture;
+        this.surface = surface;
+        this.late = suboptimal;
+        surfaceAddRef(surface: surface);
+    }
+
+    // The surface still works but no longer matches the window: configure it again soon.
+    public const fn bool suboptimal() { return this.late; }
+
+    // A view to render into.
+    public unsafe fn TextureView view() {
+        return TextureView.adopt(raw: textureCreateView(texture: this.texture, descriptor: null));
+    }
+
+    // Show the frame; it is spent, and its texture released after the present.
+    public unsafe give fn void present() { presentSurface(surface: this.surface); }
+
+    unsafe ~SurfaceTexture() {
+        if (this.texture != null) { textureRelease(texture: this.texture); }
+        surfaceRelease(surface: this.surface);
+    }
 }

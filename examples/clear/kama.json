@@ -1,0 +1,16 @@
+{
+  "name": "clear",
+  "version": "0.1.0",
+  "kind": "executable",
+  "kama": ">=0.9.874",
+  "description": "A window cleared to a slowly changing colour each frame, on @kama/gpu and @kama/window: Escape quits, a resize reconfigures",
+  "entry": "src/main.kama",
+  "webgpu": true,
+  "modules": {
+    ".": { "visibility": "internal" }
+  },
+  "dependencies": {
+    "@kama/gpu": { "path": "../.." },
+    "@kama/window": { "path": "../../../kama-window" }
+  }
+}
