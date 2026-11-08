@@ -33,6 +33,15 @@ in; *as an engine renderer* they stay out.
 Next: the triangle's set (shader module, pipeline, bind group), then the web leg: a canvas surface once
 `@kama/window` has its web half, and the offscreen test run in a browser with WebGPU.
 
+**`std::app` is changing under `tests/` (2026-11-08).** kama's uncommitted KR-283 work (a binary reporting
+`0.9.876+g546dd54e`) replaces `run(tick:, state:)` and `TickFn` with `run(app: Owned<App>)`, an `App` having `tick()`
+and `lifecycle(event:)`. On that binary `tests/` does not compile; the bindings, the package's check, the 60-frame
+window and the xfail still pass. `tests/` stays on the committed API until kama commits the change, then moves to an
+`App`. The surface's lifetime follows the same lifecycle: a surface is dropped on `SurfaceLost`.
+
+**Not published yet.** kama's floor for a first publish is `tests/` green on every target the package claims, and the
+web leg has not run. kama has not ruled the amendments below, some of which change the API.
+
 **A consumer names `@kama/window` too, for now.** `@kama/gpu` depends on it by path (`../kama-window`), and kama
 allows a path dependency only in the root project or between members of one workspace, so `tests/`, the xfail and
 the example each list it beside `@kama/gpu`. That ends when `@kama/window` is published and this depends on a version.
