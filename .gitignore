@@ -6,3 +6,6 @@ out/
 
 # Per-machine manifest override (deep-merges over kama.json). Yours, not the project's.
 kama.local.json
+
+# The native WebGPU SDK, fetched per platform by ../kama/tools/fetch-webgpu.sh (KAMA_WGPU_DIR points here).
+third_party/

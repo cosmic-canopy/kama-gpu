@@ -1,0 +1,1118 @@
+// wgpugen: @kama/gpu's WebGPU bindings (src/native/webgpu.gen.kama), written from the C headers its two legs compile
+// against: wgpu-native's webgpu.h and wgpu.h (the native leg, from the SDK tools/fetch-webgpu.sh fetches) and
+// emscripten's emdawnwebgpu port's webgpu.h (the web leg).
+//
+//   wgpugen <wgpu-native webgpu.h> <wgpu-native wgpu.h> <emdawnwebgpu webgpu.h> <output .kama> [<output .c>]
+//
+// tools/check-bindings.sh runs it and compares its output with the committed file; the file's banner carries each
+// header's sha256, so a header that moves (an SDK or emsdk update) shows as a difference rather than as a wrong
+// constant. A header is hashed with its line endings made LF: wgpu-native's release zip ships CRLF, and a checkout may
+// convert, so the raw bytes' hash would depend on where they came from rather than on what they say.
+//
+// The optional `.c` output is one `_Static_assert` per enum and flag constant, each gated to the legs whose header has
+// it. kama never sees a header's enum, only the number read out of it here, so compiling that file against each leg's
+// real header (tools/check-bindings.sh) is what proves the numbers (after friendly-fire-department's
+// tools/check-wgpu-constants).
+//
+// Ported from cosmic-forge@render/tools/wgpugen (itself from the-mallow-man@45f15d4 and friendly-fire-department@f8a4265),
+// whose parser, type map and merge it keeps. What changed here: wgpu.h, wgpu-native's own extensions, is read as part
+// of the native leg. Its declarations are gated native-only like any other the web's header lacks; a function both
+// it and emdawnwebgpu's header declare, but declare differently (`MultiDrawIndirect`), is left out and reported
+// rather than failing the run, since the two are different extensions under one name. Its structs open their brace
+// on the next line, its functions carry no `WGPU_EXPORT`, and it has a scalar typedef (`WGPUSubmissionIndex`); the
+// parser takes each of those. What cosmic-forge's took over from its own ancestors:
+//   * A declaration both headers have is emitted ungated. One only wgpu-native's has is gated
+//     `@compileFor(!ARCH_WASM32)`, one only emdawnwebgpu's `@compileFor(ARCH_WASM32)`.
+//   * A function both have must be declared the same in both; a constant both have must have the same value in both.
+//     Either difference fails the run (a drifted constant is a black screen, not a build error).
+//   * A struct both have keeps the fields both declare alike. kama assigns an extern struct's fields by name, so a
+//     partial declaration is valid for every field it names; the others are listed in a comment.
+//   * An enum or flag set takes every member either header has, each one-header member commented: a `comptime` member
+//     binds to no C symbol, so it compiles on both legs.
+//
+// The parser is line-based and deliberately dumb, because webgpu.h is machine-generated and regular: no unions, no
+// bitfields, no array fields, one field per line, every `WGPU_EXPORT` on one line, every enum member carrying an
+// explicit value. It strips comments first and then pattern-matches. If a future header breaks that, it should fail
+// loudly rather than grow into a C parser.
+//
+// Why wrappers: kama emits no C prototype for an `extern`, and calls are lowered by named argument, so two hand-written
+// declarations of one symbol differing only in parameter order would silently reorder one file's arguments. This file
+// is the one place that declares each WebGPU function, and the rest of the package calls the de-prefixed wrapper
+// (`wgpuDeviceCreateBuffer` -> `deviceCreateBuffer`); a release build folds the wrapper away.
+
+import {
+    core::env::Args,
+    core::env::args,
+    core::println,
+    std::fs::readFile,
+    std::fs::writeFile,
+    std::io::IoError,
+    std::collections::DynamicArray,
+    std::digest::sha256::Sha256,
+};
+
+// The runtime string constructor; must match std::io::streams' declaration exactly (one C symbol).
+extern fn string kama_string_from_raw(UnsafeConstPtr<uint8> src, isize start, isize len);
+
+// ---- small helpers ----------------------------------------------------------------------------
+
+unsafe fn string bytesToString(const ref DynamicArray<uint8> b) {
+    isize n = b.length();
+    if (n == 0) { return ""; }
+    UnsafeConstPtr<uint8> p = b.dataPtr();
+    return kama_string_from_raw(src: p, start: 0, len: n);
+}
+
+fn void appendStr(ref DynamicArray<uint8> dst, const ref string s) {
+    isize n = s.length();
+    isize i = 0;
+    while (i < n) { dst.add(item: s[i]); i = i + 1; }
+}
+
+fn void appendLine(ref DynamicArray<uint8> dst, const ref string s) {
+    appendStr(dst: dst, s: s);
+    dst.add(item: 10ui8);
+}
+
+// The literal-argument form: a string literal is a temporary, so it moves.
+fn void emit(ref DynamicArray<uint8> dst, string s) {
+    appendStr(dst: dst, s: s);
+    dst.add(item: 10ui8);
+}
+
+fn bool hasName(const ref DynamicArray<string> xs, const ref string name) {
+    isize i = 0;
+    while (i < xs.length()) {
+        if (xs[i] == name) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
+
+fn void addUnique(ref DynamicArray<string> xs, const ref string name) {
+    if (hasName(xs: xs, name: name)) { return; }
+    xs.add(item: copy name);
+}
+
+// Lowercase hex of a 32-byte digest.
+fn string hexOf(const ref InlineArray<uint8>#(32) d) {
+    string digits = "0123456789abcdef";
+    string acc = "";
+    isize i = 0;
+    while (i < 32) {
+        uint8 b = d[i];
+        isize hi = cast<isize>(b >> 4ui8);
+        isize lo = cast<isize>(b & 15ui8);
+        string h = digits.substring(start: hi, end: hi + 1);
+        string l = digits.substring(start: lo, end: lo + 1);
+        acc = "${acc}${h}${l}";
+        i = i + 1;
+    }
+    return acc;
+}
+
+// Collapse every run of whitespace to a single space, and trim.
+unsafe fn string squeeze(const ref string s) {
+    DynamicArray<uint8> buf = DynamicArray.empty();
+    isize n = s.length();
+    isize i = 0;
+    bool pendingSpace = false;
+    bool any = false;
+    while (i < n) {
+        uint8 c = s[i];
+        bool isSpace = c == 32ui8 || c == 9ui8 || c == 13ui8 || c == 10ui8;
+        if (isSpace) {
+            if (any) { pendingSpace = true; }
+        } else {
+            if (pendingSpace) { buf.add(item: 32ui8); pendingSpace = false; }
+            buf.add(item: c);
+            any = true;
+        }
+        i = i + 1;
+    }
+    return bytesToString(b: buf);
+}
+
+// Everything after the first '_': `WGPUTextureFormat_R8Unorm` -> `R8Unorm`.
+fn string afterFirstUnderscore(const ref string s) {
+    Optional<isize> at = s.find(substring: "_");
+    string result = "";
+    match (at) {
+        case None: { result = copy s; }
+        case Some(value: p): {
+            isize cut = p + 1;
+            result = s.substring(start: cut, end: s.length());
+        }
+    };
+    return result;
+}
+
+fn string lowerFirst(const ref string s) {
+    if (s.isEmpty()) { return copy s; }
+    string head = s.substring(start: 0, end: 1);
+    string tail = s.substring(start: 1, end: s.length());
+    string lo = head.toLower();
+    return lo.concat(other: tail);
+}
+
+// `wgpuDeviceCreateBuffer` -> `deviceCreateBuffer`.
+fn string wrapperName(const ref string cname) {
+    if (!cname.startsWith(prefix: "wgpu")) { return copy cname; }
+    string rest = cname.substring(start: 4, end: cname.length());
+    return lowerFirst(s: rest);
+}
+
+// A kama identifier may not begin with a digit (`WGPUTextureDimension_1D`): prefixed `N`.
+fn string safeMember(const ref string m) {
+    if (m.isEmpty()) { return copy m; }
+    uint8 c0 = m[0];
+    if (c0 >= 48ui8 && c0 <= 57ui8) { return "N${m}"; }
+    return copy m;
+}
+
+// Reserved words cannot name anything, a field of a `type extern value` included, and kama has no raw-identifier
+// escape. `type` is contextual and may name a field or a parameter, so it is not here.
+fn bool isReserved(const ref string w) {
+    if (w == "enum" || w == "match" || w == "case" || w == "new" || w == "ref" || w == "out" || w == "in") { return true; }
+    if (w == "slot" || w == "this" || w == "base" || w == "operator" || w == "extends" || w == "implements") { return true; }
+    if (w == "fn" || w == "import" || w == "export" || w == "extern" || w == "comptime" || w == "static") { return true; }
+    if (w == "public" || w == "private" || w == "unsafe" || w == "const" || w == "return" || w == "if") { return true; }
+    if (w == "else" || w == "while" || w == "for" || w == "foreach" || w == "do" || w == "break") { return true; }
+    if (w == "continue" || w == "give" || w == "copy" || w == "cast" || w == "truncate" || w == "try") { return true; }
+    if (w == "null" || w == "true" || w == "false" || w == "string" || w == "void" || w == "char" || w == "bool") { return true; }
+    if (w == "default" || w == "as" || w == "drop" || w == "scope" || w == "long" || w == "short") { return true; }
+    return false;
+}
+
+// A parameter name is kama's own label, not a C name, so a reserved one is renamed. `slot` is WebGPU's vertex-buffer
+// slot, which its spec calls the slot index.
+fn string safeParam(const ref string p) {
+    if (!isReserved(w: p)) { return copy p; }
+    if (p == "slot") { return "slotIndex"; }
+    return "${p}Arg";
+}
+
+// The first token that looks like a WGPU type name, ignoring the all-caps attribute macros.
+fn string firstWgpuToken(const ref string squeezed) {
+    string found = "";
+    foreach (string tok in squeezed.split(separator: " ")) {
+        string a = tok.replace(old: ";", with: "");
+        string b = a.replace(old: "{", with: "");
+        if (b.startsWith(prefix: "WGPU") && !b.contains(substring: "ATTRIBUTE")) {
+            found = give b;
+            break;
+        }
+    }
+    return found;
+}
+
+// Offset of the last ' ' in `s`, or -1: a C declarator's name is always its last word.
+fn isize lastSpace(const ref string s) {
+    isize i = s.length() - 1;
+    while (i >= 0) {
+        if (s[i] == 32ui8) { return i; }
+        i = i - 1;
+    }
+    return 0 - 1;
+}
+
+// `WGPUChainedStruct * nextInChain` -> `nextInChain`; stars bind to the type wherever the header put the space.
+unsafe fn string declName(const ref string squeezed) {
+    isize at = lastSpace(s: squeezed);
+    if (at < 0) { return ""; }
+    string name = squeezed.substring(start: at + 1, end: squeezed.length());
+    return name.replace(old: "*", with: "");
+}
+
+unsafe fn string declType(const ref string squeezed) {
+    isize at = lastSpace(s: squeezed);
+    if (at < 0) { return copy squeezed; }
+    string head = squeezed.substring(start: 0, end: at);
+    string name = squeezed.substring(start: at + 1, end: squeezed.length());
+    if (name.startsWith(prefix: "*")) { return head.concat(other: " *"); }
+    return head;
+}
+
+// ---- reading ----------------------------------------------------------------------------------
+
+// Strip C comments in one byte pass, keeping newlines so the line structure survives.
+unsafe fn string stripComments(const ref string src) {
+    DynamicArray<uint8> buf = DynamicArray.empty();
+    isize n = src.length();
+    isize i = 0;
+    while (i < n) {
+        uint8 c = src[i];
+        if (c == 47ui8 && i + 1 < n) {
+            uint8 d = src[i + 1];
+            if (d == 42ui8) {
+                i = i + 2;
+                bool closed = false;
+                while (i + 1 < n) {
+                    uint8 a = src[i];
+                    uint8 b = src[i + 1];
+                    if (a == 42ui8 && b == 47ui8) { i = i + 2; closed = true; break; }
+                    if (a == 10ui8) { buf.add(item: 10ui8); }
+                    i = i + 1;
+                }
+                if (!closed) { i = n; }
+                continue;
+            }
+            if (d == 47ui8) {
+                while (i < n) {
+                    if (src[i] == 10ui8) { break; }
+                    i = i + 1;
+                }
+                continue;
+            }
+        }
+        buf.add(item: c);
+        i = i + 1;
+    }
+    return bytesToString(b: buf);
+}
+
+// Named declarations of one kind, in header order: each a name and a body (its text, or its members a line each).
+type resource Decls {
+    DynamicArray<string> names = DynamicArray.empty();
+    DynamicArray<string> bodies = DynamicArray.empty();
+
+    public ctor make() { }
+
+    public const fn isize count() { return this.names.length(); }
+    public const fn string nameAt(isize i) { return copy this.names[i]; }
+    public const fn string bodyAt(isize i) { return copy this.bodies[i]; }
+    public const fn isize find(const ref string name) {
+        isize i = 0;
+        while (i < this.names.length()) {
+            if (this.names[i] == name) { return i; }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+    public const fn bool has(const ref string name) { return this.find(name: name) >= 0; }
+    public const fn string bodyOf(const ref string name) {
+        isize i = this.find(name: name);
+        if (i < 0) { return ""; }
+        return copy this.bodies[i];
+    }
+    public const fn DynamicArray<string> nameList() { return copy this.names; }
+
+    // `name`'s body set, or the declaration added.
+    public unsafe fn void put(const ref string name, const ref string body) {
+        isize i = this.find(name: name);
+        if (i >= 0) { this.bodies[i] = copy body; return; }
+        this.names.add(item: copy name);
+        this.bodies.add(item: copy body);
+    }
+
+    // A line added to `name`'s body (a member), the declaration added first when it is new.
+    public unsafe fn void append(const ref string name, const ref string line) {
+        isize i = this.find(name: name);
+        if (i < 0) {
+            this.names.add(item: copy name);
+            this.bodies.add(item: "");
+            i = this.names.length() - 1;
+        }
+        string was = copy this.bodies[i];
+        this.bodies[i] = "${was}${line}\n";
+    }
+}
+
+// One leg's headers, read: their declarations by kind, each header's sha256 (LF line endings), and which functions
+// came from an extensions header (wgpu.h).
+type resource Header {
+    Decls handles = Decls.make();
+    Decls enums = Decls.make();
+    Decls flags = Decls.make();
+    Decls structs = Decls.make();
+    Decls callbacks = Decls.make();
+    Decls functions = Decls.make();
+    Decls typedefs = Decls.make();
+    DynamicArray<string> extraFns = DynamicArray.empty();
+    DynamicArray<string> digests = DynamicArray.empty();
+
+    public ctor make() { }
+
+    public const fn string sha(isize at) { return copy this.digests[at]; }
+    public const fn bool isExtra(const ref string fname) { return hasName(xs: this.extraFns, name: fname); }
+    public const fn const ref Decls handleDecls() { return this.handles; }
+    public const fn const ref Decls enumDecls() { return this.enums; }
+    public const fn const ref Decls flagDecls() { return this.flags; }
+    public const fn const ref Decls structDecls() { return this.structs; }
+    public const fn const ref Decls callbackDecls() { return this.callbacks; }
+    public const fn const ref Decls functionDecls() { return this.functions; }
+    public const fn const ref Decls typedefDecls() { return this.typedefs; }
+
+    // Read `path` into this leg: false when it cannot be read. `extras`: an extensions header, whose functions are
+    // bare prototypes rather than `WGPU_EXPORT` lines.
+    public unsafe fn bool read(const ref string path, bool extras) {
+        Result<DynamicArray<uint8>, IoError> r = readFile(path: path);
+        DynamicArray<uint8> raw = match (give r) {
+            case Ok(value: b): give b;
+            case Err(error: e): { return false; }
+        };
+        // CRLF -> LF, so the hash names the text and not the line endings it travelled with
+        DynamicArray<uint8> bytes = DynamicArray.empty();
+        bytes.reserve(n: raw.length());
+        foreach (uint8 c in raw) {
+            if (c != 13ui8) { bytes.add(item: c); }
+        }
+        Sha256 h = Sha256.make();
+        h.update(bytes: bytes.view());
+        InlineArray<uint8>#(32) d = h.finish();
+        string hex = hexOf(d: d);
+        this.digests.add(item: give hex);
+        string all = bytesToString(b: bytes);
+        string text = stripComments(src: all);
+        DynamicArray<string> lines = DynamicArray.empty();
+        foreach (string piece in text.split(separator: "\n")) {
+            string t = piece.trim();
+            lines.add(item: give t);
+        }
+        this.parse(lines: lines, extras: extras);
+        return true;
+    }
+
+    unsafe fn void parse(const ref DynamicArray<string> lines, bool extras) {
+        isize n = lines.length();
+        isize i = 0;
+        while (i < n) {
+            string ln = copy lines[i];
+            // wgpu.h opens a struct's brace on the next line: `typedef struct WGPUInstanceExtras` then `{`.
+            bool braceNext = false;
+            if (i + 1 < n) { braceNext = lines[i + 1].startsWith(prefix: "{"); }
+            // `typedef struct WGPUAdapterImpl* WGPUAdapter WGPU_OBJECT_ATTRIBUTE;`: an opaque handle.
+            if (ln.startsWith(prefix: "typedef struct ") && ln.contains(substring: "*") && !ln.contains(substring: "{")) {
+                Optional<isize> star = ln.find(substring: "*");
+                match (star) {
+                    case None: { }
+                    case Some(value: p): {
+                        string tail = ln.substring(start: p + 1, end: ln.length());
+                        string sq = squeeze(s: tail);
+                        string name = firstWgpuToken(squeezed: sq);
+                        if (!name.isEmpty()) { this.handles.put(name: name, body: ""); }
+                    }
+                };
+                i = i + 1;
+                continue;
+            }
+            // `typedef enum WGPUFoo {` … `} WGPUFoo WGPU_ENUM_ATTRIBUTE;`: its members `lhs=value`, a line each.
+            if (ln.startsWith(prefix: "typedef enum")) {
+                string sq = squeeze(s: ln);
+                string name = firstWgpuToken(squeezed: sq);
+                isize j = i + 1;
+                string members = "";
+                while (j < n && !lines[j].startsWith(prefix: "}")) {
+                    if (lines[j].contains(substring: "=")) {
+                        string msq = squeeze(s: lines[j]);
+                        Optional<isize> eq = msq.find(substring: "=");
+                        match (eq) {
+                            case None: { }
+                            case Some(value: cut): {
+                                string lhs = msq.substring(start: 0, end: cut).trim();
+                                string rhsA = msq.substring(start: cut + 1, end: msq.length()).replace(old: ",", with: "");
+                                string value = rhsA.replace(old: ";", with: "").trim();
+                                if (!lhs.isEmpty() && !value.isEmpty()) { members = "${members}${lhs}=${value}\n"; }
+                            }
+                        };
+                    }
+                    j = j + 1;
+                }
+                if (!name.isEmpty()) { this.enums.put(name: name, body: members); }
+                i = j + 1;
+                continue;
+            }
+            // `typedef struct WGPUFoo {` … `} WGPUFoo …;`: its fields, a squeezed `type name` line each. The `{` line
+            // of a brace-on-the-next-line struct holds no `;`, so the field loop passes over it.
+            bool braceLater = braceNext && !ln.contains(substring: "*") && !ln.contains(substring: ";");
+            if (ln.startsWith(prefix: "typedef struct") && (ln.contains(substring: "{") || braceLater)) {
+                string sq = squeeze(s: ln);
+                string name = firstWgpuToken(squeezed: sq);
+                isize j = i + 1;
+                string fields = "";
+                while (j < n && !lines[j].startsWith(prefix: "}")) {
+                    if (lines[j].contains(substring: ";")) {
+                        string noSemi = lines[j].replace(old: ";", with: "");
+                        string fsq = squeeze(s: noSemi);
+                        if (!fsq.isEmpty()) { fields = "${fields}${fsq}\n"; }
+                    }
+                    j = j + 1;
+                }
+                if (!name.isEmpty()) { this.structs.put(name: name, body: fields); }
+                i = j + 1;
+                continue;
+            }
+            // `typedef void (*WGPURequestAdapterCallback)(…);`: a callback's parameters.
+            if (ln.startsWith(prefix: "typedef void (*WGPU")) {
+                Optional<isize> mid = ln.find(substring: ")(");
+                match (mid) {
+                    case None: { }
+                    case Some(value: midi): {
+                        string name = ln.substring(start: 15, end: midi).trim();
+                        string tailRaw = ln.substring(start: midi + 2, end: ln.length());
+                        string a = tailRaw.replace(old: "WGPU_FUNCTION_ATTRIBUTE", with: " ");
+                        string b = a.replace(old: ";", with: " ");
+                        string c = b.replace(old: ")", with: " ");
+                        string params = squeeze(s: c);
+                        if (name.endsWith(suffix: "Callback")) { this.callbacks.put(name: name, body: params); }
+                    }
+                };
+                i = i + 1;
+                continue;
+            }
+            // `typedef WGPUFlags WGPUTextureUsage;`: a flag set, whose members are `static const` lines.
+            if (ln.startsWith(prefix: "typedef WGPUFlags WGPU")) {
+                string sq = squeeze(s: ln);
+                foreach (string tok in sq.split(separator: " ")) {
+                    string clean = tok.replace(old: ";", with: "");
+                    if (clean.startsWith(prefix: "WGPU") && clean != "WGPUFlags") {
+                        if (!this.flags.has(name: clean)) { this.flags.put(name: clean, body: ""); }
+                        break;
+                    }
+                }
+                i = i + 1;
+                continue;
+            }
+            // `static const WGPUTextureUsage WGPUTextureUsage_RenderAttachment = 0x…;`
+            if (ln.startsWith(prefix: "static const WGPU")) {
+                string sq = squeeze(s: ln);
+                Optional<isize> eq = sq.find(substring: "=");
+                match (eq) {
+                    case None: { }
+                    case Some(value: cut): {
+                        string lhs = sq.substring(start: 0, end: cut).trim();
+                        string value = sq.substring(start: cut + 1, end: sq.length()).replace(old: ";", with: "").trim();
+                        // `static const <set> <member>`
+                        string setName = firstWgpuToken(squeezed: lhs);
+                        string member = declName(squeezed: lhs);
+                        if (!setName.isEmpty() && !member.isEmpty() && !value.isEmpty()) {
+                            string row = "${member}=${value}";
+                            this.flags.append(name: setName, line: row);
+                        }
+                    }
+                };
+                i = i + 1;
+                continue;
+            }
+            // `typedef uint64_t WGPUSubmissionIndex;`: a scalar under another name.
+            if (ln.startsWith(prefix: "typedef ") && !ln.contains(substring: "(") && !ln.contains(substring: "{")) {
+                string sq = squeeze(s: ln.replace(old: ";", with: " "));
+                DynamicArray<string> toks = DynamicArray.empty();
+                foreach (string tok in sq.split(separator: " ")) { toks.add(item: give tok); }
+                if (toks.length() == 3 && toks[1] != "struct" && toks[1] != "enum" && toks[2].startsWith(prefix: "WGPU")) {
+                    this.typedefs.put(name: toks[2], body: toks[1]);
+                }
+                i = i + 1;
+                continue;
+            }
+            // `WGPU_EXPORT WGPUBuffer wgpuDeviceCreateBuffer(…) WGPU_FUNCTION_ATTRIBUTE;`, or, in an extensions header,
+            // the same prototype bare: `WGPUBool wgpuDevicePoll(…);`.
+            bool exported = ln.startsWith(prefix: "WGPU_EXPORT ");
+            bool bare = extras && ln.endsWith(suffix: ";") && ln.contains(substring: "wgpu") && ln.contains(substring: "(")
+                && !ln.startsWith(prefix: "typedef") && !ln.startsWith(prefix: "static") && !ln.startsWith(prefix: "#");
+            if (exported || bare) {
+                string a = ln.replace(old: "WGPU_EXPORT", with: " ");
+                string b = a.replace(old: "WGPU_FUNCTION_ATTRIBUTE", with: " ");
+                string c = b.replace(old: ";", with: " ");
+                string decl = squeeze(s: c);
+                Optional<isize> lp = decl.find(substring: "(");
+                match (lp) {
+                    case None: { }
+                    case Some(value: p): {
+                        string head = squeeze(s: decl.substring(start: 0, end: p));
+                        string cname = declName(squeezed: head);
+                        if (cname.startsWith(prefix: "wgpu")) {
+                            this.functions.put(name: cname, body: decl);
+                            if (extras) { addUnique(xs: this.extraFns, name: cname); }
+                        }
+                    }
+                };
+            }
+            i = i + 1;
+        }
+    }
+}
+
+// ---- the C -> kama type map -------------------------------------------------------------------
+
+// Every type name either header declares, by kind: what the type map consults.
+type resource Names {
+    DynamicArray<string> handles = DynamicArray.empty();
+    DynamicArray<string> enums = DynamicArray.empty();
+    DynamicArray<string> flags = DynamicArray.empty();
+    DynamicArray<string> structs = DynamicArray.empty();
+    DynamicArray<string> callbacks = DynamicArray.empty();
+    Decls typedefs = Decls.make();
+
+    public ctor make() { }
+
+    public unsafe fn void take(const ref Header h) {
+        addAll(into: this.handles, from: h.handleDecls());
+        addAll(into: this.enums, from: h.enumDecls());
+        addAll(into: this.flags, from: h.flagDecls());
+        addAll(into: this.structs, from: h.structDecls());
+        addAll(into: this.callbacks, from: h.callbackDecls());
+        isize i = 0;
+        while (i < h.typedefDecls().count()) {
+            string name = h.typedefDecls().nameAt(i: i);
+            string body = h.typedefDecls().bodyAt(i: i);
+            this.typedefs.put(name: name, body: body);
+            i = i + 1;
+        }
+    }
+
+    // The kama spelling of C type `ctypeRaw`, or "" for one this generator will not guess at (the declaration is then
+    // skipped and reported, never emitted quietly wrong). `constPtrOk`: a `const` pointer may be `UnsafeConstPtr`
+    // (returns only: a `void*` passed where C wants `const void*` is a legal conversion, so parameters stay `UnsafePtr`).
+    public unsafe const fn string kamaType(bool constPtrOk, const ref string ctypeRaw) {
+        string a = ctypeRaw.replace(old: "WGPU_NULLABLE", with: " ");
+        string b = a.replace(old: "WGPU_FUNCTION_ATTRIBUTE", with: " ");
+        string c = b.replace(old: "WGPU_STRUCTURE_ATTRIBUTE", with: " ");
+        string d = c.replace(old: "WGPU_ENUM_ATTRIBUTE", with: " ");
+        string e = d.replace(old: "WGPU_OBJECT_ATTRIBUTE", with: " ");
+        bool wasConst = e.contains(substring: "const");
+        string f = e.replace(old: "const", with: " ");
+        string t = squeeze(s: f);
+        if (t.contains(substring: "*")) {
+            // A C string is typed (`WGPUStringView.data` takes `string.cstr()`); every other pointer is opaque.
+            if (t.startsWith(prefix: "char")) {
+                if (wasConst) { return "UnsafeConstPtr<cchar>"; }
+                return "UnsafePtr<cchar>";
+            }
+            if (wasConst && constPtrOk) { return "UnsafeConstPtr"; }
+            return "UnsafePtr";
+        }
+        if (t == "void") { return "void"; }
+        if (t == "size_t") { return "usize"; }
+        if (t == "uint64_t") { return "uint64"; }
+        if (t == "uint32_t") { return "uint32"; }
+        if (t == "uint16_t") { return "uint16"; }
+        if (t == "uint8_t") { return "uint8"; }
+        if (t == "int64_t") { return "int64"; }
+        if (t == "int32_t") { return "int32"; }
+        if (t == "int16_t") { return "int16"; }
+        if (t == "int8_t") { return "int8"; }
+        // C's `int` (wgpu.h's X11 `screen`) is 32 bits on every target kama builds for, and kama `_Static_assert`s
+        // each `type extern value` field against the header at build, so a target where it is not fails there.
+        if (t == "int") { return "int32"; }
+        if (t == "float") { return "float32"; }
+        if (t == "double") { return "float64"; }
+        if (t == "WGPUBool") { return "uint32"; }
+        if (t == "WGPUFlags") { return "uint64"; }
+        // A proc-pointer typedef is held as an opaque pointer; a callback typedef is a real `fnptr`.
+        if (t.startsWith(prefix: "WGPUProc")) { return "UnsafePtr"; }
+        if (hasName(xs: this.callbacks, name: t)) { return copy t; }
+        if (hasName(xs: this.handles, name: t)) { return "UnsafePtr"; }
+        if (hasName(xs: this.enums, name: t)) { return "int32"; }
+        if (hasName(xs: this.flags, name: t)) { return "uint64"; }
+        if (hasName(xs: this.structs, name: t)) { return copy t; }
+        // a scalar typedef (`WGPUSubmissionIndex`) is its scalar
+        if (this.typedefs.has(name: t)) {
+            string under = this.typedefs.bodyOf(name: t);
+            if (under != t) { return this.kamaType(constPtrOk: constPtrOk, ctypeRaw: under); }
+        }
+        return "";
+    }
+}
+
+fn void addAll(ref DynamicArray<string> into, const ref Decls from) {
+    isize i = 0;
+    while (i < from.count()) {
+        string name = from.nameAt(i: i);
+        addUnique(xs: into, name: name);
+        i = i + 1;
+    }
+}
+
+// ---- merging ----------------------------------------------------------------------------------
+
+// The gate a declaration takes by where it is: "" in both headers, else the leg that has it.
+fn string gateOf(bool inNative, bool inWeb) {
+    if (inNative && inWeb) { return ""; }
+    if (inNative) { return "@compileFor(!ARCH_WASM32) "; }
+    return "@compileFor(ARCH_WASM32) ";
+}
+
+// Every name of a kind, wgpu-native's order first, then the ones only emdawnwebgpu's has.
+fn DynamicArray<string> mergedNames(const ref Decls native, const ref Decls web) {
+    DynamicArray<string> names = native.nameList();
+    isize i = 0;
+    while (i < web.count()) {
+        string name = web.nameAt(i: i);
+        addUnique(xs: names, name: name);
+        i = i + 1;
+    }
+    return names;
+}
+
+// A body's lines, the empty ones left out.
+fn DynamicArray<string> linesOf(const ref string body) {
+    DynamicArray<string> acc = DynamicArray.empty();
+    foreach (string piece in body.split(separator: "\n")) {
+        if (!piece.isEmpty()) { acc.add(item: copy piece); }
+    }
+    return acc;
+}
+
+// The part of `member=value` before or after its '='.
+fn string memberName(const ref string row) {
+    Optional<isize> eq = row.find(substring: "=");
+    match (eq) {
+        case Some(value: p): { return row.substring(start: 0, end: p); }
+        case None: { return copy row; }
+    };
+}
+
+fn string memberValue(const ref string row) {
+    Optional<isize> eq = row.find(substring: "=");
+    match (eq) {
+        case Some(value: p): { return row.substring(start: p + 1, end: row.length()); }
+        case None: { return ""; }
+    };
+}
+
+// `rows` (`member=value` lines) as a map's two halves.
+fn isize rowIndex(const ref DynamicArray<string> rows, const ref string member) {
+    isize i = 0;
+    while (i < rows.length()) {
+        string m = memberName(row: rows[i]);
+        if (m == member) { return i; }
+        i = i + 1;
+    }
+    return 0 - 1;
+}
+
+// What the run found wrong (it fails) and what it left out (it reports).
+type resource Report {
+    DynamicArray<string> problems = DynamicArray.empty();
+    DynamicArray<string> skipped = DynamicArray.empty();
+
+    public ctor make() { }
+
+    public fn void problem(const ref string why) { this.problems.add(item: copy why); }
+    public fn void skip(const ref string why) { addUnique(xs: this.skipped, name: why); }
+    public const fn isize problemCount() { return this.problems.length(); }
+    public const fn isize skipCount() { return this.skipped.length(); }
+    public const fn string problemAt(isize i) { return copy this.problems[i]; }
+    public const fn string skippedAt(isize i) { return copy this.skipped[i]; }
+}
+
+// The members of a constant block (an enum's `int32`s or a flag set's `uint64`s), merged: every member either header
+// has, a one-header member commented, a value the two disagree on a problem.
+unsafe fn void emitMembers(ref DynamicArray<uint8> dst, ref DynamicArray<uint8> cdst, ref Report report,
+                           const ref string setName, const ref string nativeBody, const ref string webBody,
+                           const ref string kind, bool flagSet, bool inNative, bool inWeb) {
+    DynamicArray<string> nrows = linesOf(body: nativeBody);
+    DynamicArray<string> wrows = linesOf(body: webBody);
+    DynamicArray<string> order = DynamicArray.empty();
+    isize i = 0;
+    while (i < nrows.length()) { string m = memberName(row: nrows[i]); order.add(item: give m); i = i + 1; }
+    i = 0;
+    while (i < wrows.length()) { string m = memberName(row: wrows[i]); addUnique(xs: order, name: m); i = i + 1; }
+    i = 0;
+    while (i < order.length()) {
+        string cname = copy order[i];
+        isize ni = rowIndex(rows: nrows, member: cname);
+        isize wi = rowIndex(rows: wrows, member: cname);
+        string value = "";
+        string note = "";
+        if (ni >= 0) { value = memberValue(row: nrows[ni]); }
+        if (wi >= 0) {
+            string wv = memberValue(row: wrows[wi]);
+            if (ni >= 0 && wv != value) {
+                string why = "${setName}: ${cname} is ${value} in wgpu-native's header and ${wv} in emdawnwebgpu's";
+                report.problem(why: why);
+            }
+            if (ni < 0) { value = copy wv; }
+        }
+        // a member of a declaration both have, that only one has
+        if (inNative && inWeb && ni < 0) { note = "   // emdawnwebgpu's header only"; }
+        if (inNative && inWeb && wi < 0) { note = "   // wgpu-native's header only"; }
+        string member0 = afterFirstUnderscore(s: cname);
+        string member = safeMember(m: member0);
+        string row = "    public comptime ${kind} ${member} = ${value};${note}";
+        appendLine(dst: dst, s: row);
+        // the C check: this constant against the header of each leg that has it
+        string check = "_Static_assert(${cname} == (${value}), \"${cname}\");";
+        if (ni >= 0 && wi < 0) { emit(dst: cdst, s: "#ifndef __EMSCRIPTEN__"); }
+        if (ni < 0 && wi >= 0) { emit(dst: cdst, s: "#ifdef __EMSCRIPTEN__"); }
+        appendLine(dst: cdst, s: check);
+        if (ni < 0 || wi < 0) { emit(dst: cdst, s: "#endif"); }
+        i = i + 1;
+    }
+}
+
+unsafe fn void emitConstants(ref DynamicArray<uint8> dst, ref DynamicArray<uint8> cdst, ref DynamicArray<string> exports,
+                             ref Report report, const ref Decls native, const ref Decls web, const ref string kind,
+                             bool flagSet) {
+    DynamicArray<string> names = mergedNames(native: native, web: web);
+    isize i = 0;
+    while (i < names.length()) {
+        string name = copy names[i];
+        bool inNative = native.has(name: name);
+        bool inWeb = web.has(name: name);
+        emit(dst: dst, s: "");
+        string only = "";
+        if (!inWeb) { only = "   // wgpu-native's header only"; }
+        if (!inNative) { only = "   // emdawnwebgpu's header only"; }
+        string head = "type value ${name} {${only}";
+        appendLine(dst: dst, s: head);
+        string nb = native.bodyOf(name: name);
+        string wb = web.bodyOf(name: name);
+        emitMembers(dst: dst, cdst: cdst, report: report, setName: name, nativeBody: nb, webBody: wb, kind: kind,
+                    flagSet: flagSet, inNative: inNative, inWeb: inWeb);
+        emit(dst: dst, s: "}");
+        addUnique(xs: exports, name: name);
+        i = i + 1;
+    }
+}
+
+// A parameter list (`WGPUStatus status, WGPUAdapter adapter, …`) as kama declarations and as a named-argument call;
+// false when a parameter cannot be mapped.
+unsafe fn bool paramsOf(const ref Names names, const ref string paramsRaw, ref string decls, ref string calls,
+                        ref string missed) {
+    string trimmed = paramsRaw.trim();
+    if (trimmed.isEmpty() || trimmed == "void") { return true; }
+    bool first = true;
+    foreach (string pRaw in trimmed.split(separator: ",")) {
+        string psq = squeeze(s: pRaw);
+        if (psq.isEmpty()) { continue; }
+        string pname0 = declName(squeezed: psq);
+        string pname = safeParam(p: pname0);
+        string ptypeC = declType(squeezed: psq);
+        string ptypeK = names.kamaType(constPtrOk: false, ctypeRaw: ptypeC);
+        if (pname.isEmpty() || ptypeK.isEmpty()) {
+            missed = "parameter ${pname} of type ${ptypeC}";
+            return false;
+        }
+        string sep = ", ";
+        if (first) { sep = ""; }
+        decls = "${decls}${sep}${ptypeK} ${pname}";
+        calls = "${calls}${sep}${pname}: ${pname}";
+        first = false;
+    }
+    return true;
+}
+
+// Callback typedefs -> a `fnptr`, so a descriptor's `callback` field is typed and takes a kama function.
+// `@callerThread`: the backend calls back on the thread that drove it (the frame loop, or the browser's event loop).
+unsafe fn void emitCallbacks(ref DynamicArray<uint8> dst, ref DynamicArray<string> exports, ref Report report,
+                             const ref Names names, const ref Header native, const ref Header web) {
+    DynamicArray<string> all = mergedNames(native: native.callbackDecls(), web: web.callbackDecls());
+    isize i = 0;
+    while (i < all.length()) {
+        string name = copy all[i];
+        bool inNative = native.callbackDecls().has(name: name);
+        bool inWeb = web.callbackDecls().has(name: name);
+        string params = native.callbackDecls().bodyOf(name: name);
+        if (!inNative) { params = web.callbackDecls().bodyOf(name: name); }
+        if (inNative && inWeb) {
+            string other = web.callbackDecls().bodyOf(name: name);
+            if (other != params) { string why = "${name}: its parameters differ between the headers"; report.problem(why: why); }
+        }
+        string decls = "";
+        string calls = "";
+        string missed = "";
+        if (paramsOf(names: names, paramsRaw: params, decls: decls, calls: calls, missed: missed)) {
+            string gate = gateOf(inNative: inNative, inWeb: inWeb);
+            string thread = "${gate}@callerThread";
+            appendLine(dst: dst, s: thread);
+            string row = "${gate}fnptr void ${name}(${decls});";
+            appendLine(dst: dst, s: row);
+            addUnique(xs: exports, name: name);
+        } else {
+            string why = "fnptr ${name}: ${missed}";
+            report.skip(why: why);
+        }
+        i = i + 1;
+    }
+}
+
+// Structs -> `type extern value`, in header order (already dependency order), with `@generate(zero)`: a descriptor is
+// built zeroed and filled field by field. A struct both headers have keeps the fields both declare alike.
+unsafe fn void emitStructs(ref DynamicArray<uint8> dst, ref DynamicArray<string> exports, ref Report report,
+                           const ref Names names, const ref Header native, const ref Header web) {
+    DynamicArray<string> all = mergedNames(native: native.structDecls(), web: web.structDecls());
+    isize i = 0;
+    while (i < all.length()) {
+        string name = copy all[i];
+        bool inNative = native.structDecls().has(name: name);
+        bool inWeb = web.structDecls().has(name: name);
+        // a header's own marker (emdawnwebgpu's `WGPUINTERNAL_HAVE_EMDAWNWEBGPU_HEADER`), not a type to use
+        if (name.startsWith(prefix: "WGPUINTERNAL")) {
+            string why = "struct ${name}: the header's internal marker";
+            report.skip(why: why);
+            i = i + 1;
+            continue;
+        }
+        string nbody = native.structDecls().bodyOf(name: name);
+        string wbody = web.structDecls().bodyOf(name: name);
+        DynamicArray<string> fields = linesOf(body: nbody);
+        if (!inNative) { fields = linesOf(body: wbody); }
+        DynamicArray<string> others = linesOf(body: wbody);
+        DynamicArray<string> rows = DynamicArray.empty();
+        string dropped = "";
+        bool ok = true;
+        isize f = 0;
+        while (f < fields.length()) {
+            string fsq = copy fields[f];
+            string fname = declName(squeezed: fsq);
+            string ctype = declType(squeezed: fsq);
+            if (inNative && inWeb && !hasName(xs: others, name: fsq)) {
+                dropped = "${dropped} ${fname}";
+                f = f + 1;
+                continue;
+            }
+            string ktype = names.kamaType(constPtrOk: false, ctypeRaw: ctype);
+            if (ktype.isEmpty() || fname.isEmpty()) {
+                ok = false;
+                string why = "struct ${name}: field ${fname} of type ${ctype}";
+                report.skip(why: why);
+                break;
+            }
+            if (isReserved(w: fname)) {
+                string note = "    // OMITTED: `${fname}` (${ktype}), a kama reserved word";
+                rows.add(item: give note);
+                string why = "struct ${name}: field `${fname}` is a kama reserved word (left out)";
+                report.skip(why: why);
+            } else {
+                string row = "    public ${ktype} ${fname};";
+                rows.add(item: give row);
+            }
+            f = f + 1;
+        }
+        if (inNative && inWeb) {
+            // the web's fields the native header does not declare alike
+            isize w = 0;
+            while (w < others.length()) {
+                if (!hasName(xs: fields, name: others[w])) {
+                    string wname = declName(squeezed: others[w]);
+                    if (!dropped.contains(substring: " ${wname}")) { dropped = "${dropped} ${wname}"; }
+                }
+                w = w + 1;
+            }
+        }
+        if (ok) {
+            emit(dst: dst, s: "");
+            string gate = gateOf(inNative: inNative, inWeb: inWeb);
+            if (!dropped.isEmpty()) {
+                string note = "// Declared differently by the two headers, so not here:${dropped}.";
+                appendLine(dst: dst, s: note);
+            }
+            string zeroAttr = "${gate}@generate(zero)";
+            appendLine(dst: dst, s: zeroAttr);
+            string head = "${gate}type extern value ${name} {";
+            appendLine(dst: dst, s: head);
+            isize r = 0;
+            while (r < rows.length()) { appendLine(dst: dst, s: rows[r]); r = r + 1; }
+            emit(dst: dst, s: "}");
+            addUnique(xs: exports, name: name);
+        }
+        i = i + 1;
+    }
+}
+
+// Functions -> the `extern fn` (keeping the C spelling) and an exported pass-through wrapper under the de-prefixed
+// name. Every wrapper is `unsafe`: calling into C is the boundary.
+unsafe fn void emitFunctions(ref DynamicArray<uint8> dst, ref DynamicArray<string> exports, ref Report report,
+                             const ref Names names, const ref Header native, const ref Header web) {
+    DynamicArray<string> all = mergedNames(native: native.functionDecls(), web: web.functionDecls());
+    isize i = 0;
+    while (i < all.length()) {
+        string cname = copy all[i];
+        bool inNative = native.functionDecls().has(name: cname);
+        bool inWeb = web.functionDecls().has(name: cname);
+        string decl = native.functionDecls().bodyOf(name: cname);
+        if (!inNative) { decl = web.functionDecls().bodyOf(name: cname); }
+        if (inNative && inWeb) {
+            string other = web.functionDecls().bodyOf(name: cname);
+            if (other != decl) {
+                // wgpu.h's extension and Dawn's under one name are two APIs: neither is WebGPU's, so neither is bound
+                if (native.isExtra(fname: cname)) {
+                    string skipWhy = "fn ${cname}: wgpu.h and emdawnwebgpu's header declare it differently";
+                    report.skip(why: skipWhy);
+                    i = i + 1;
+                    continue;
+                }
+                string why = "${cname}: declared differently: `${decl}` (wgpu-native), `${other}` (emdawnwebgpu)";
+                report.problem(why: why);
+            }
+        }
+        isize lpi = 0 - 1;
+        Optional<isize> lp = decl.find(substring: "(");
+        match (lp) { case Some(value: p): { lpi = p; } case None: { } };
+        if (lpi < 0) { i = i + 1; continue; }
+        string head = squeeze(s: decl.substring(start: 0, end: lpi));
+        string paramsRaw = decl.substring(start: lpi + 1, end: decl.length()).replace(old: ")", with: " ");
+        string retC = declType(squeezed: head);
+        string retK = names.kamaType(constPtrOk: true, ctypeRaw: retC);
+        if (retK.isEmpty()) {
+            string why = "fn ${cname}: return type ${retC}";
+            report.skip(why: why);
+            i = i + 1;
+            continue;
+        }
+        string decls = "";
+        string calls = "";
+        string missed = "";
+        if (!paramsOf(names: names, paramsRaw: paramsRaw, decls: decls, calls: calls, missed: missed)) {
+            string why = "fn ${cname}: ${missed}";
+            report.skip(why: why);
+            i = i + 1;
+            continue;
+        }
+        // emscripten's own `emscripten_webgpu_*` helpers are not WebGPU's API
+        if (!cname.startsWith(prefix: "wgpu")) {
+            string why = "fn ${cname}: not a wgpu function";
+            report.skip(why: why);
+            i = i + 1;
+            continue;
+        }
+        string wname = wrapperName(cname: cname);
+        string gate = gateOf(inNative: inNative, inWeb: inWeb);
+        string externLine = "${gate}extern fn ${retK} ${cname}(${decls});";
+        appendLine(dst: dst, s: externLine);
+        if (retK == "void") {
+            string w = "${gate}unsafe fn void ${wname}(${decls}) { ${cname}(${calls}); }";
+            appendLine(dst: dst, s: w);
+        } else {
+            string w = "${gate}unsafe fn ${retK} ${wname}(${decls}) { return ${cname}(${calls}); }";
+            appendLine(dst: dst, s: w);
+        }
+        addUnique(xs: exports, name: wname);
+        i = i + 1;
+    }
+}
+
+// ---- driver ---------------------------------------------------------------------------------
+
+unsafe fn string argAt(int32 at) {
+    Args a = args();
+    Optional<string> v = a.get(at: at);
+    return match (give v) {
+        case Some(value: s): give s;
+        case None: "";
+    };
+}
+
+unsafe fn int32 run() {
+    string nativePath = argAt(at: 0);
+    string extrasPath = argAt(at: 1);
+    string webPath = argAt(at: 2);
+    string dst = argAt(at: 3);
+    string cdstPath = argAt(at: 4);
+    if (nativePath.isEmpty() || extrasPath.isEmpty() || webPath.isEmpty() || dst.isEmpty()) {
+        println(s: "usage: wgpugen <wgpu-native webgpu.h> <wgpu-native wgpu.h> <emdawnwebgpu webgpu.h> <output .kama> [<output .c>]");
+        return 2;
+    }
+    Header native = Header.make();
+    Header web = Header.make();
+    if (!native.read(path: nativePath, extras: false)) { println(s: "wgpugen: cannot read ${nativePath}"); return 1; }
+    if (!native.read(path: extrasPath, extras: true)) { println(s: "wgpugen: cannot read ${extrasPath}"); return 1; }
+    if (!web.read(path: webPath, extras: false)) { println(s: "wgpugen: cannot read ${webPath}"); return 1; }
+
+    Names names = Names.make();
+    names.take(h: native);
+    names.take(h: web);
+
+    DynamicArray<string> exports = DynamicArray.empty();
+    Report report = Report.make();
+    DynamicArray<uint8> body = DynamicArray.empty();
+    DynamicArray<uint8> checks = DynamicArray.empty();
+
+    emit(dst: body, s: "");
+    emit(dst: body, s: "// ---- enums, as type-scope constants ----------------------------------------------------------------------");
+    emitConstants(dst: body, cdst: checks, exports: exports, report: report, native: native.enumDecls(),
+                  web: web.enumDecls(), kind: "int32", flagSet: false);
+    emit(dst: body, s: "");
+    emit(dst: body, s: "// ---- flag sets -------------------------------------------------------------------------------------------");
+    emitConstants(dst: body, cdst: checks, exports: exports, report: report, native: native.flagDecls(),
+                  web: web.flagDecls(), kind: "uint64", flagSet: true);
+    emit(dst: body, s: "");
+    emit(dst: body, s: "// ---- callback signatures ---------------------------------------------------------------------------------");
+    emit(dst: body, s: "");
+    emitCallbacks(dst: body, exports: exports, report: report, names: names, native: native, web: web);
+    emit(dst: body, s: "");
+    emit(dst: body, s: "// ---- descriptor structs ----------------------------------------------------------------------------------");
+    emitStructs(dst: body, exports: exports, report: report, names: names, native: native, web: web);
+    emit(dst: body, s: "");
+    emit(dst: body, s: "// ---- functions: the extern and its exported pass-through -------------------------------------------------");
+    emit(dst: body, s: "");
+    emitFunctions(dst: body, exports: exports, report: report, names: names, native: native, web: web);
+
+    if (report.problemCount() > 0) {
+        isize p = 0;
+        while (p < report.problemCount()) {
+            string why = report.problemAt(i: p);
+            println(s: "wgpugen: ${why}");
+            p = p + 1;
+        }
+        println(s: "wgpugen: the two headers disagree; nothing written");
+        return 1;
+    }
+
+    string nsha = native.sha(at: 0);
+    string xsha = native.sha(at: 1);
+    string wsha = web.sha(at: 0);
+    DynamicArray<uint8> file = DynamicArray.empty();
+    emit(dst: file, s: "// @kama/gpu's native module: the WebGPU C API as kama. GENERATED by tools/wgpugen; DO NOT EDIT (change the");
+    emit(dst: file, s: "// generator, then run tools/check-bindings.sh --write).");
+    emit(dst: file, s: "//");
+    emit(dst: file, s: "// From three headers, each by the sha256 of its text with LF line endings:");
+    string l1 = "//   wgpu-native's webgpu.h          ${nsha}";
+    appendLine(dst: file, s: l1);
+    string l3 = "//   wgpu-native's wgpu.h            ${xsha}";
+    appendLine(dst: file, s: l3);
+    string l2 = "//   emdawnwebgpu's webgpu.h         ${wsha}";
+    appendLine(dst: file, s: l2);
+    emit(dst: file, s: "// A declaration only one leg has is gated to that leg; tools/check-bindings.sh regenerates this file and compares.");
+    emit(dst: file, s: "");
+    emit(dst: file, s: "export {");
+    isize e = 0;
+    while (e < exports.length()) {
+        string row = "    ${exports[e]},";
+        appendLine(dst: file, s: row);
+        e = e + 1;
+    }
+    emit(dst: file, s: "};");
+    emit(dst: file, s: "");
+    emit(dst: file, s: "extern \"<webgpu/webgpu.h>\";");
+    emit(dst: file, s: "@compileFor(!ARCH_WASM32) extern \"<webgpu/wgpu.h>\";");
+    isize bi = 0;
+    while (bi < body.length()) { file.add(item: body[bi]); bi = bi + 1; }
+
+    Result<isize, IoError> wr = writeFile(path: dst, bytes: file);
+    match (wr) {
+        case Err(error: er): { println(s: "wgpugen: cannot write ${dst}"); return 1; }
+        case Ok(value: nbytes): { }
+    };
+    if (!cdstPath.isEmpty()) {
+        DynamicArray<uint8> cfile = DynamicArray.empty();
+        emit(dst: cfile, s: "// GENERATED by @kama/gpu's tools/wgpugen: every enum and flag constant src/native/webgpu.gen.kama holds,");
+        emit(dst: cfile, s: "// checked against the header of each leg that has it. It compiles, or a number has drifted.");
+        emit(dst: cfile, s: "#include <webgpu/webgpu.h>");
+        emit(dst: cfile, s: "#ifndef __EMSCRIPTEN__");
+        emit(dst: cfile, s: "#include <webgpu/wgpu.h>");
+        emit(dst: cfile, s: "#endif");
+        isize ci = 0;
+        while (ci < checks.length()) { cfile.add(item: checks[ci]); ci = ci + 1; }
+        Result<isize, IoError> cw = writeFile(path: cdstPath, bytes: cfile);
+        match (cw) {
+            case Err(error: er): { println(s: "wgpugen: cannot write ${cdstPath}"); return 1; }
+            case Ok(value: nbytes): { }
+        };
+    }
+    int64 nexp = cast<int64>(exports.length());
+    println(s: "wgpugen: ${nexp} names -> ${dst}");
+    isize s2 = 0;
+    while (s2 < report.skipCount()) {
+        string why = report.skippedAt(i: s2);
+        println(s: "wgpugen: skipped ${why}");
+        s2 = s2 + 1;
+    }
+    return 0;
+}
+
+fn uint8 main() {
+    return cast<uint8>(run());
+}

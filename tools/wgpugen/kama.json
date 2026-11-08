@@ -1,0 +1,13 @@
+{
+  "name": "wgpugen",
+  "version": "0.1.0",
+  "kind": "executable",
+  "kama": ">=0.9.874",
+  "description": "Writes @kama/gpu's WebGPU bindings from wgpu-native's webgpu.h and wgpu.h and emdawnwebgpu's webgpu.h",
+  "entry": "src/main.kama",
+  "modules": {
+    ".": {
+      "visibility": "internal"
+    }
+  }
+}
