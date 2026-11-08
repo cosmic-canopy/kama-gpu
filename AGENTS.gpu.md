@@ -40,43 +40,52 @@ window and the xfail still pass. `tests/` stays on the committed API until kama 
 `App`. The surface's lifetime follows the same lifecycle: a surface is dropped on `SurfaceLost`.
 
 **Not published yet.** kama's floor for a first publish is `tests/` green on every target the package claims, and the
-web leg has not run. kama has not ruled the amendments below, some of which change the API.
+web leg has not run. The stopgaps below change the API, so they are fixed first.
 
 **A consumer names `@kama/window` too, for now.** `@kama/gpu` depends on it by path (`../kama-window`), and kama
 allows a path dependency only in the root project or between members of one workspace, so `tests/`, the xfail and
 the example each list it beside `@kama/gpu`. That ends when `@kama/window` is published and this depends on a version.
 
-## Amendments to relay to kama's design (s8-gpu-wrapper)
+## Where this departs from kama's design (s8-gpu-wrapper)
 
-What the build needed that the design does not say, for kama to rule; nothing here is decided from this repository.
+**The package is standalone and held to production grade, and its first consumer drives what that means** (the
+owner, 2026-11-08: "The bar is production grade general solutions"). kama's design is where it started. Each departure
+is recorded here with its reason, and the owner relays them to kama. **Kept** marks the production answer. A
+**stopgap** is fixed before the first publish, and says what replaces it.
 
-1. **`instance.requestDevice(power:)`** for an offscreen device. The design names `requestDevice(surface:)`; kama has
-   no optional parameters, so the surface form will be a second method (or an `Optional<Surface>` parameter).
-2. **Errors are counted process-wide** (`uncapturedErrors()`, `lastErrorMessage()`, `lostDevices()`). The design
-   names no channel for uncaptured errors or a lost device. A per-device one needs a state block that outlives every
-   copy of the device (a copy is an `AddRef`), which the first version does not have.
-3. **A device gets WebGPU's default limits**, not the adapter's, so a program that runs on one machine does not
-   silently depend on its adapter.
-4. **The numbers are generated and asserted, not bound by name.** The design says to take enum numbers from the
-   header; the bindings carry them as `comptime` constants generated from both headers, and a `_Static_assert` per
+1. **Kept: `instance.requestDevice(power:)`** for an offscreen device. The design names `requestDevice(surface:)`;
+   kama has no optional parameters, so the surface form is a second method (item 6).
+2. **Stopgap: errors are counted process-wide** (`uncapturedErrors()`, `lastErrorMessage()`, `lostDevices()`). The
+   design names no channel for them. **The production answer is per device:** a device's uncaptured errors and its
+   loss reach that device's holders through a state block the seam keeps per device, counted with the device's own
+   copies (each `copy` is an `AddRef`). WebGPU's error scopes (`pushErrorScope`, `popErrorScope`) let a caller catch
+   the errors of one call.
+3. **Kept, and to grow: a device gets WebGPU's default limits**, not the adapter's, so a program that runs on one
+   machine does not silently depend on its adapter. A program that needs more names the limits and features it
+   requires in the request, which fails when the adapter lacks them, as WebGPU's `requiredLimits` does.
+4. **Kept: the numbers are generated and asserted, not bound by name.** The design says to take enum numbers from the
+   header. The bindings carry them as `comptime` constants generated from both headers, and a `_Static_assert` per
    constant holds each to each leg's header, rather than `type extern enum` and `extern const`.
-5. **The polls are `const fn`** (`DeviceRequest.poll`, `BufferRead.poll`, `Device.poll`): the slot they read is the
-   seam's memory, not the kama value's, so a borrowed handle can be polled.
-6. **The surface form of the request is `requestDeviceFor(surface:, power:)`,** a second method (item 1).
-7. **`SurfaceError::Error` is spelled `Failed`,** since the type implements `Error`. `OutOfMemory` is kept but the
-   webgpu.h both legs build against no longer reports it.
-8. **`configure` takes the format** (`examples/clear` uses BGRA8Unorm). Choosing it from the surface's capabilities
-   needs the adapter, which `DeviceStatus::Ready(device, queue)` does not hand over: either Ready carries the
-   adapter, or the request answers the capabilities.
-9. **No C reference on the window.** A `Window` is not reference-counted, so the surface must be dropped before the
-   window it was made on (documented on `Surface`), rather than the seam keeping the window alive.
+5. **Kept: the polls are `const fn`** (`DeviceRequest.poll`, `BufferRead.poll`, `Device.poll`). The slot they read is
+   the seam's memory, not the kama value's, so a borrowed handle can be polled.
+6. **Kept: the surface form of the request is `requestDeviceFor(surface:, power:)`,** a second method (item 1).
+7. **Kept: `SurfaceError::Error` is spelled `Failed`,** since the type implements `Error`. **Stopgap:**
+   `OutOfMemory` is still there, though neither leg's `webgpu.h` reports it any more; it goes.
+8. **Stopgap: `configure` takes a format, and presents with Fifo only** (`examples/clear` uses BGRA8Unorm). Choosing
+   from the surface's capabilities needs the adapter, which `DeviceStatus::Ready(device, queue)` does not hand over.
+   **The production answer:** `Ready` carries the adapter too, `surface.capabilities(adapter:)` answers the formats,
+   present modes and alpha modes, and `configure` takes a choice among them: the preferred format first, Fifo by
+   default, and Mailbox or Immediate where the surface offers them.
+9. **Stopgap: the surface must be dropped before its window** (documented on `Surface`), because a `Window` is not
+   reference-counted. **The production answer:** `@kama/window` counts references to a window's native record, and a
+   surface holds one, so the two drop safely in either order.
 
 ## Where the truth is
 
-- **The design is kama's:** `../kama/docs/ROADMAP_DETAIL.md` § 8, at the anchor `s8-gpu-wrapper`. Read it before
-  writing code. A change the build needs goes back to kama as an amendment of that section; it is not decided here.
-- **kyoten builds it, as its first consumer** (ruled by kama on 2026-11-02; kyoten's KYR-52). kyoten's sessions do the
-  work, and the owner relays to kama.
+- **The design started as kama's:** `../kama/docs/ROADMAP_DETAIL.md` § 8, at the anchor `s8-gpu-wrapper`. Read it
+  before writing code. A departure the production bar needs is made here and recorded above with its reason.
+- **kyoten builds it, as its first consumer** (ruled by kama on 2026-11-02; kyoten's KYR-52), and drives what
+  production grade means for it (the owner, 2026-11-08). kyoten's sessions do the work, and the owner relays to kama.
 - **The starting code** is the WebGPU bindings the owner's games already wrote. What each assumes is in
   `../kyoten/docs/research/harvest.md` § 4 (`wgpugen`) and § 5 (the GPU device, the frame loop and capture).
 
