@@ -442,7 +442,7 @@ type enum TextureFormat {
 
     // The format WebGPU's number `value` names, or None for a number webgpu.h names no format for (an implementation's
     // own extensions among them).
-    public static fn Optional<TextureFormat> of(int32 value) {
+    public static fn Optional<TextureFormat> fromValue(int32 value) {
         if (value == WGPUTextureFormat::R8Unorm) { return Optional::Some(value: TextureFormat::R8Unorm); }
         if (value == WGPUTextureFormat::R8Snorm) { return Optional::Some(value: TextureFormat::R8Snorm); }
         if (value == WGPUTextureFormat::R8Uint) { return Optional::Some(value: TextureFormat::R8Uint); }

@@ -731,7 +731,7 @@ type resource Check implements App {
         string wrong = "";
         int32 n = 0;
         while (n < 1024) {
-            Optional<TextureFormat> f = TextureFormat::of(value: n);
+            Optional<TextureFormat> f = TextureFormat::fromValue(value: n);
             match (f) {
                 case Some(value: x): {
                     named = named + 1;
@@ -744,8 +744,8 @@ type resource Check implements App {
         }
         if (wrong.isEmpty() && named != 101) { wrong = "${named} numbers named, not 101"; }
         this.verdict(name: "TextureFormat names webgpu.h's 101 formats, each by its own number", why: wrong);
-        Optional<TextureFormat> undefined = TextureFormat::of(value: 0);
-        Optional<TextureFormat> nv12 = TextureFormat::of(value: 0x00030007);
+        Optional<TextureFormat> undefined = TextureFormat::fromValue(value: 0);
+        Optional<TextureFormat> nv12 = TextureFormat::fromValue(value: 0x00030007);
         this.verdict(name: "a number webgpu.h names no format for is none: Undefined, and wgpu-native's NV12",
                      why: undefined.isSome() || nv12.isSome() ? "it named one" : "");
         this.verdict(name: "RGBA8Unorm and RGBA8UnormSrgb are each other's sRGB and linear forms",

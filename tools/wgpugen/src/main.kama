@@ -1173,7 +1173,7 @@ unsafe fn void emitFormats(ref DynamicArray<uint8> dst, ref Report report, const
     emit(dst: dst, s: "");
     emit(dst: dst, s: "    // The format WebGPU's number `value` names, or None for a number webgpu.h names no format for (an implementation's");
     emit(dst: dst, s: "    // own extensions among them).");
-    emit(dst: dst, s: "    public static fn Optional<TextureFormat> of(int32 value) {");
+    emit(dst: dst, s: "    public static fn Optional<TextureFormat> fromValue(int32 value) {");
     i = 0;
     while (i < names.length()) {
         string row = "        if (value == WGPUTextureFormat::${names[i]}) { return Optional::Some(value: TextureFormat::${names[i]}); }";

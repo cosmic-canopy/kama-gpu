@@ -1214,7 +1214,7 @@ unsafe fn Result<SurfaceCapabilities, GpuError> capabilitiesOf(UnsafePtr surface
     UnsafePtr<int32> fs = cast<UnsafePtr<int32>>(raw.formats);
     isize i = 0;
     while (i < cast<isize>(raw.formatCount)) {
-        Optional<TextureFormat> f = TextureFormat::of(value: fs[i]);
+        Optional<TextureFormat> f = TextureFormat::fromValue(value: fs[i]);
         match (f) { case Some(value: x): { formats.add(item: x); } case None: { } };
         i = i + 1;
     }

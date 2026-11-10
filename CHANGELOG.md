@@ -9,7 +9,9 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   KR-367): `Instance.create()` is `Instance.make()`, `Surface.create(instance:, window:)` is `Surface.make(…)`,
   `FeatureSet.none()` is `FeatureSet.empty()`, `SurfaceCapabilities.of(…)` is `SurfaceCapabilities.make(…)` (it checks
   what it is handed, so it is not memberwise), `AdapterOptions.forSurface(surface:, power:)` is `withSurface(…)`, and
-  `Color.rgba(r:, g:, b:, a:)` is `Color.of(…)`, written by `@generate(of)`. Entries below keep the names of their day.
+  `Color.rgba(r:, g:, b:, a:)` is `Color.of(…)`, written by `@generate(of)`. `TextureFormat::of(value:)`, which finds the
+  format a webgpu.h number names, is `TextureFormat::fromValue(value:)`, since `of` means memberwise. Entries below keep
+  the names of their day.
 - `COVERAGE.md` (2026-11-10): which of webgpu.h's functions the safe API calls, written by `tools/wgpugen` and held by
   `tools/check-bindings.sh`, its counts a ratchet. 53 of 206 so far.
 - **Breaking:** `SurfaceError::OutOfMemory` is gone (2026-11-10, AGENTS.gpu.md item 7): neither leg's webgpu.h reports it.
