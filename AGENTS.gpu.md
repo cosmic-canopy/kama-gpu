@@ -126,6 +126,34 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
    untested), which matters for Quest. **The production answer:** with the adapter in hand (item 1),
    `surface.capabilities(adapter:)` answers the formats, present modes and alpha modes, and `configure` takes a choice
    among them: the preferred format first, Fifo by default, and Mailbox or Immediate where the surface offers them.
+
+   **Proposed, to put to the owner in full before it is built** (drafted 2026-11-10; the owner: "be prepared with your
+   best kama/kyoten production grade answer"). The facts are from webgpu.h (wgpu-native v29.0.1.1): `formats` come "in
+   order of preference", `presentModes` is "guaranteed to contain Fifo", `CompositeAlphaMode_Auto` "will be an alias for
+   the first element" of `alphaModes` and never in it, and `WGPUSurfaceConfiguration` carries `viewFormats`.
+   1. **What a surface answers:** `surface.capabilities(adapter:)` gives `SurfaceCapabilities`, a `type resource` since
+      it owns its lists, with `formats()` (in the surface's order, as `TextureFormat`; a format the package does not
+      name yet is left out, never mapped to a guess), `presentModes()`, `alphaModes()` and `usages()`. The browser's
+      `getPreferredCanvasFormat()` is the web's first format.
+   2. **What `configure` takes:** a `SurfaceConfig` value (format, view format, present mode, alpha mode, usage), made
+      only from capabilities: `caps.preferred()` gives the first format, Fifo, the first alpha mode and
+      RenderAttachment. A program changes a field, and `caps.allows(config:)` says whether the surface takes it.
+      `surface.configure(device:, config:, width:, height:)` keeps the size apart, since a resize changes it and
+      nothing else. Configuring with a choice the surface does not offer is refused by WebGPU as a validation error,
+      which item 2 delivers to the device.
+   3. **The modes:** `PresentMode { Fifo, FifoRelaxed, Immediate, Mailbox }`, named for the present itself, and
+      `AlphaMode { Opaque, Premultiplied, Unpremultiplied, Inherit }`. `Auto` is left out, since `preferred()` already
+      picks the surface's first, which is what `Auto` means. The web offers Fifo only.
+   4. **sRGB:** a game wants its colours encoded as sRGB, but a browser's canvas formats are not sRGB (`bgra8unorm`,
+      `rgba8unorm`, `rgba16float`), while a native surface often is (`BGRA8UnormSrgb`). WebGPU's answer is a view format:
+      the surface stays `bgra8unorm` and frames are drawn through a `bgra8unorm-srgb` view. `preferred()` sets the view
+      format to the format's sRGB twin when it has one and is not sRGB already, and `SurfaceTexture.view()` makes the
+      view in it, so the same game code draws sRGB on every leg.
+   5. **`TextureFormat` grows** to every format a surface can answer on either leg, measured on each when it is built
+      (natively here, and in Edge with G6): `RGB10A2Unorm` and the sRGB twins at least.
+
+   The questions to ask: 1's shape; 2's config made only from capabilities, and the size kept apart; 3's names and
+   `Auto` left out; 4's sRGB through a view format by default; 5's formats.
 9. **Stopgap: the surface must be dropped before its window** (documented on `Surface`), because a `Window` is not
    reference-counted, so a lifetime rule lives only in documentation, in a safe API. **The production answer:**
    `@kama/window` counts references to a window's native record and destroys it on the last release, and a surface
