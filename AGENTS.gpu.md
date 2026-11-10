@@ -39,8 +39,9 @@ in; *as an engine renderer* they stay out.
 
 **[SPEC.md](SPEC.md) is what the package is, [ROADMAP.md](ROADMAP.md) what comes next, and [COVERAGE.md](COVERAGE.md)
 which of webgpu.h it calls.** In short (2026-11-10, kama 0.9.911): offscreen work and a surface on a window run natively
-on Windows, the web leg builds and has not run, the safe API calls 53 of webgpu.h's 206 functions, and GPU-1, errors
-per device, is next. `tools/test.sh` passes before every commit.
+on Windows, the web leg builds and has not run, the safe API calls 55 of webgpu.h's 206 functions, and a device's
+errors reach its own holders (GPU-1, built). GPU-2, a surface holding its window, is next, after `@kama/window`'s WIN-1.
+`tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
 
@@ -96,11 +97,33 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
      `AdapterStatus { Pending, Ready(Adapter adapter), Failed(GpuError error) }` beside `DeviceRequest` and
      `DeviceStatus`. `instance.requestDevice(power:)` and `requestDeviceFor(surface:, power:)` go: the package is not
      published, and its tests and `examples/clear` move with it.
-2. **Stopgap, GPU-1: errors are counted process-wide** (`uncapturedErrors()`, `lastErrorMessage()`, `lostDevices()`). The
-   design names no channel for them. **The production answer is per device:** a device's uncaptured errors and its
-   loss reach that device's holders through a state block the seam keeps per device, counted with the device's own
-   copies (each `copy` is an `AddRef`). WebGPU's error scopes (`pushErrorScope`, `popErrorScope`) let a caller catch
-   the errors of one call.
+2. **Built on 2026-11-10: errors per device, and error scopes (GPU-1)** (kama 0.9.911), replacing the stopgap below.
+   Natively, on wgpu-native v29.0.1.1 over Vulkan (AMD's driver), test-first in four parts, each with the gate green and
+   its mutations caught before its commit:
+   - **wgpu-native's facts** (`a772ed0`): `tests/facts/wgpufacts.c`, run by `tools/check-facts.sh`, 22 facts; 10 of 10
+     mutations caught;
+   - **the channel, and every handle holding its device's state** (`cf2dc25`): 13 cases; 11 of 11 mutations caught;
+   - **the scopes** (`44d9691`): 9 cases; 7 of 8 mutations caught. The eighth sends an error to another thread's scope,
+     which no case can reach: a `Device` is not `Sendable`, so only a program working through `raw()` can use one on
+     two threads. The rule stands, as WebGPU's;
+   - **a failed `finish` never submitted natively**: 2 cases; 4 of 4 mutations caught.
+
+   The tests are 69 cases natively (51 without a display), and COVERAGE.md is 55 of 206: `PushErrorScope` and
+   `PopErrorScope` are called on the web leg, while natively the seam keeps the scopes. The web half builds, and runs
+   with GPU-3, which also measures what was read here and not run: whether emdawnwebgpu fires the lost callback for a
+   failed device request (the web's extra hold on the block is released only there), and that no uncaptured error
+   arrives after a device's loss.
+
+   **Two things the build settled within the decisions below.** The block is held by every handle made from the
+   device, not by the device's copies alone (detail 6, measured). And an adopted device gets a block of its own that
+   its callbacks never reach (decision 5), so natively its scopes catch nothing and `watched()` says so; on the web its
+   scopes are the browser's and do catch.
+
+   **Stopgap, replaced: errors were counted process-wide** (`uncapturedErrors()`, `lastErrorMessage()`,
+   `lostDevices()`). The design names no channel for them. **The production answer is per device:** a device's
+   uncaptured errors and its loss reach that device's holders through a state block the seam keeps per device, counted
+   with the device's own copies (each `copy` is an `AddRef`). WebGPU's error scopes (`pushErrorScope`, `popErrorScope`)
+   let a caller catch the errors of one call.
 
    **Measured first, on 2026-11-10** (kama 0.9.911; a C probe in kyoten's `.scratch/item2-errors/`, one process per
    case, wgpu-native v29.0.1.1 over Vulkan on an AMD Radeon 880M; the web read from emdawnwebgpu's source, Dawn

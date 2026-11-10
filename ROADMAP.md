@@ -20,14 +20,13 @@ sections in the order `@kama/graphics` pulls them.
 
 | id | item | why |
 |---|---|---|
-| GPU-1 | **Errors per device, and error scopes** (decided 2026-11-10): a polled channel per device, scopes as consumed guards kept by the seam natively, a failed command buffer never submitted natively, and loss per leg | [AGENTS.gpu.md, item 2](AGENTS.gpu.md#where-this-departs-from-kamas-design-s8-gpu-wrapper) |
 | GPU-2 | **A surface holds its window**, once `@kama/window` counts a window's references (its WIN-1), so the two drop in either order | [AGENTS.gpu.md, item 9](AGENTS.gpu.md#where-this-departs-from-kamas-design-s8-gpu-wrapper) |
 
 ## NEXT: the web leg, then the render pipeline set
 
 | id | item | why |
 |---|---|---|
-| GPU-3 | **A canvas surface, and the tests run in a browser**, after `@kama/window`'s web half (its WIN-3): the web's surface, limits and features measured for the first time, and GPU-1's web half run | [detail](ROADMAP_DETAIL.md#web-leg) |
+| GPU-3 | **A canvas surface, and the tests run in a browser**, after `@kama/window`'s web half (its WIN-3): the web's surface, limits and features measured for the first time, and a device's errors and scopes run there | [detail](ROADMAP_DETAIL.md#web-leg) |
 | GPU-4 | **The render pipeline set**, shaped by `@kama/graphics`' design pass: shader modules, layouts and bind groups, samplers, render pipelines, vertex and index buffers, depth and multisampled targets | [detail](ROADMAP_DETAIL.md#render-pipelines) |
 
 ## LATER: the rest of webgpu.h before 1.0

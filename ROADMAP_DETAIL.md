@@ -20,7 +20,10 @@ before anything is built on what it was assumed to do.
   - a canvas surface's capabilities, so the SPEC's web column is measured, not read;
   - the limits and features (the tests hold `maxBindGroupsPlusVertexBuffers` to 24 and expect `CoreFeaturesAndLimits`
     there);
-  - when GPU-1's errors, scopes and loss arrive, which the web delivers a task later;
+  - when a device's errors, scopes and loss arrive, which the web delivers a task later ([SPEC](SPEC.md), a device's
+    errors and its loss): the error cases `tests/` runs natively only so far, whether emdawnwebgpu fires the lost
+    callback for a failed device request (the web's extra hold on the device's state is released only there), and
+    that no uncaptured error arrives after a device's loss;
   - the clear example on a canvas.
 - **Done:** `tests/` and `examples/clear` green in a browser, every measurement in the SPEC.
 
@@ -37,7 +40,7 @@ that pass, so the binding serves the library's design rather than the other way 
 - **Questions for when it comes up:**
   - how a descriptor reads in kama, given WebGPU's dictionaries with defaults and kama's lack of optional parameters;
   - whether pipelines are made asynchronously (`createRenderPipelineAsync`, polled like the requests) or both ways;
-  - how a shader's compilation errors reach a program, through GPU-1's channel and `getCompilationInfo`.
+  - how a shader's compilation errors reach a program, through a device's channel and its scopes, and `getCompilationInfo`.
 - **Done:** a triangle drawn into a window and into a texture read back, on both legs, with zero hand-written
   releases, and COVERAGE.md's pipeline, binding, sampler and shader rows called.
 
@@ -83,7 +86,7 @@ remain. No raw destroy is allowed in the safe API, so these four are uncovered u
 candidate is a `destroy()` that consumes the handle: WebGPU defines a later use through another copy as a validation
 error, not a crash. On 2026-11-10 wgpu-native was measured reporting every call on a destroyed device as a validation
 error ("Parent device is lost"), and never reporting the device's loss. The form, and whether errors on a destroyed
-handle are dropped natively as the web drops them (GPU-1), are decided when the row comes up.
+handle are dropped natively as the web drops them (AGENTS.gpu.md item 2, decision 4), are decided when the row comes up.
 
 <a id="extensions"></a>
 ## GPU-10: wgpu-native's own extensions
@@ -118,7 +121,7 @@ Done: `tests/` and the clear example green on each.
 
 kama's floor for a first publish is `tests/` green on every target the package claims, and `AGENTS.package.md` has
 the rest. Before it:
-- GPU-1 and GPU-2, which change the API;
+- GPU-2, which changes the API;
 - GPU-3, so the web is a claimed target that passes;
 - `@kama/window` published first, so this depends on its version and a consumer stops naming it beside `@kama/gpu`.
 
