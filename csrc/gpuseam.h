@@ -1,6 +1,6 @@
 // gpuseam.h: @kama/gpu's C seam — what kama cannot do itself, kept as small as that allows.
 //
-// WebGPU's asynchronous steps (an adapter, then a device; a buffer map) finish in a callback, and a callback may fire
+// WebGPU's asynchronous steps (an adapter, a device from it, a buffer map) finish in a callback, and a callback may fire
 // on a thread of the implementation's own (wgpu-native) or from the browser's event loop between frames (the web). So
 // the seam receives them here, into a heap slot of its own, and publishes the outcome with a release-store; kama polls
 // it with an acquire-load and never hands WebGPU a kama function. A slot dropped while its callback is still owed is
@@ -29,21 +29,52 @@
 #define GPUSEAM_READY 1
 #define GPUSEAM_FAILED 2
 
-// ---- a device on its way up: the adapter's callback, then the device's, chained into one slot ----
+// ---- an adapter on its way: WebGPU's first step ----
+
+typedef struct gpuseam_adapter_request gpuseam_adapter_request;
+
+// Ask `instance` for an adapter (`compatible` may be NULL: an offscreen one). `power` is a WGPUPowerPreference. The
+// slot holds a reference on the instance while it lives. NULL only when the slot cannot be allocated.
+gpuseam_adapter_request *gpuseam_request_adapter(WGPUInstance instance, WGPUSurface compatible, int32_t power);
+// GPUSEAM_PENDING, _READY or _FAILED, after processing the instance's events.
+int32_t gpuseam_adapter_request_poll(gpuseam_adapter_request *request);
+// A READY request's adapter, handed over once (NULL after).
+WGPUAdapter gpuseam_adapter_request_take(gpuseam_adapter_request *request);
+// A FAILED request's words, copied into `dst` (at most `capacity` bytes, UTF-8, not terminated): their length.
+int32_t gpuseam_adapter_request_message(gpuseam_adapter_request *request, uint8_t *dst, int32_t capacity);
+// Done with the slot: freed now, or abandoned to its callback if one is still owed. An adapter not taken is released.
+void gpuseam_adapter_request_drop(gpuseam_adapter_request *request);
+
+// ---- what an adapter answers ----
+
+// One of the adapter's info strings (`which`: 0 vendor, 1 architecture, 2 device, 3 description), copied into `dst` (at
+// most `capacity` bytes, UTF-8, not terminated): its length. A browser may leave each one empty.
+int32_t gpuseam_adapter_info_text(WGPUAdapter adapter, int32_t which, uint8_t *dst, int32_t capacity);
+// Its WGPUBackendType, WGPUAdapterType, vendor id and device id.
+void gpuseam_adapter_info_numbers(WGPUAdapter adapter, int32_t *backend, int32_t *kind, uint32_t *vendor_id,
+                                  uint32_t *device_id);
+// The WGPUFeatureNames an adapter or a device has, at most `capacity` of them into `dst`: how many it has in all.
+int32_t gpuseam_adapter_features(WGPUAdapter adapter, int32_t *dst, int32_t capacity);
+int32_t gpuseam_device_features(WGPUDevice device, int32_t *dst, int32_t capacity);
+
+// ---- a device on its way: WebGPU's second step ----
 
 typedef struct gpuseam_device_request gpuseam_device_request;
 
-// Ask `instance` for an adapter (`compatible` may be NULL: an offscreen device) and then a device with WebGPU's
-// default limits. `power` is a WGPUPowerPreference. NULL only when the slot cannot be allocated.
-gpuseam_device_request *gpuseam_request_device(WGPUInstance instance, WGPUSurface compatible, int32_t power);
-// GPUSEAM_PENDING, _READY or _FAILED, after processing the instance's events.
+// Ask `adapter` for a device with `limits` (NULL, or a WGPULimits whose undefined fields take WebGPU's defaults) and
+// `feature_count` WGPUFeatureNames, its uncaptured errors and its loss counted process-wide. `instance` is the one the
+// adapter came from, whose events a poll processes, or NULL for an adapter adopted from elsewhere. The slot holds a
+// reference on each while it lives. NULL only when the slot cannot be allocated.
+gpuseam_device_request *gpuseam_adapter_request_device(WGPUInstance instance, WGPUAdapter adapter,
+                                                       const WGPULimits *limits, const int32_t *features,
+                                                       int32_t feature_count);
+// GPUSEAM_PENDING, _READY or _FAILED, after processing the instance's events when it has one.
 int32_t gpuseam_device_request_poll(gpuseam_device_request *request);
-// The adapter and the device of a READY request, each handed over once (NULL after).
-WGPUAdapter gpuseam_device_request_take_adapter(gpuseam_device_request *request);
+// A READY request's device, handed over once (NULL after).
 WGPUDevice gpuseam_device_request_take_device(gpuseam_device_request *request);
 // A FAILED request's words, copied into `dst` (at most `capacity` bytes, UTF-8, not terminated): their length.
 int32_t gpuseam_device_request_message(gpuseam_device_request *request, uint8_t *dst, int32_t capacity);
-// Done with the slot: freed now, or abandoned to its callback if one is still owed. Whatever was not taken is released.
+// Done with the slot: freed now, or abandoned to its callback if one is still owed. A device not taken is released.
 void gpuseam_device_request_drop(gpuseam_device_request *request);
 
 // ---- a buffer map ----

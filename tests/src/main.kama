@@ -1,11 +1,13 @@
-// @kama/gpu's tests, one program (AGENTS.package.md): a device brought up, a 64×64 texture cleared to a known colour,
-// copied to a buffer, mapped and read back, with every handle released by its destructor and no uncaptured error.
+// @kama/gpu's tests, one program (AGENTS.package.md): an adapter asked for, answering its info, its limits and its
+// features; devices requested from it with WebGPU's defaults, a raised limit, a limit beyond it and a feature it lacks;
+// then a 64×64 texture cleared to a known colour, copied to a buffer, mapped and read back, with every handle released by
+// its destructor and no uncaptured error.
 //
-// It is a state machine, an `App` that std::app::run ticks, because on the web the device and the map are answered by the
-// browser's event loop, between ticks. Natively the ticks run back to back, faster than the GPU clears and copies
-// (measured: 600 non-blocking polls pass before a 64×64 clear's map completes), so it waits on the device there with
-// `poll(wait: true)`, which the web leg ignores; the timeout is the clock's, not a tick count.
-// A failing case prints its name, and the exit status is the number of failures (at most 1 here).
+// It is a state machine, an `App` that std::app::run ticks, because on the web the adapter, the devices and the map are
+// answered by the browser's event loop, between ticks. Natively the ticks run back to back, faster than the GPU clears
+// and copies (measured: 600 non-blocking polls pass before a 64×64 clear's map completes), so it waits on the device
+// there with `poll(wait: true)`, which the web leg ignores; the timeout is the clock's, not a tick count.
+// A failing case prints its name, and the exit status is 1 when any failed.
 
 import {
     core::println,
@@ -13,7 +15,9 @@ import {
     std::collections::DynamicArray,
     std::memory::Owned, std::memory::replace,
     std::time::Instant, std::time::monotonicNow,
-    gpu::Instance, gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError,
+    gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::AdapterInfo,
+    gpu::Backend, gpu::Limits, gpu::Feature, gpu::FeatureSet, gpu::DeviceOptions,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError,
     gpu::PowerPreference, gpu::Buffer, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::Texture,
     gpu::TextureFormat, gpu::TextureUsage, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass,
     gpu::CommandBuffer, gpu::Color, gpu::uncapturedErrors, gpu::lastErrorMessage, gpu::lostDevices,
@@ -33,14 +37,213 @@ fn bool near(uint8 got, int32 want) {
     return g >= want - 1 && g <= want + 1;
 }
 
+// ---- limits, compared field by field ---------------------------------------------------------------------------------
+
+// "" when `have` is at least `want` (a maximum), else the field and both numbers.
+fn string atLeast(const ref string name, uint64 have, uint64 want) {
+    if (have >= want) { return ""; }
+    return "${name}: ${have}, below ${want}";
+}
+
+// "" when `have` is at most `want` (a minimum alignment, where less is better).
+fn string atMost(const ref string name, uint64 have, uint64 want) {
+    if (have <= want) { return ""; }
+    return "${name}: ${have}, above ${want}";
+}
+
+fn string same(const ref string name, uint64 have, uint64 want) {
+    if (have == want) { return ""; }
+    return "${name}: ${have}, not ${want}";
+}
+
+fn string first(const ref DynamicArray<string> faults) {
+    foreach (const ref string f in faults.iterConst()) { if (!f.isEmpty()) { return copy f; } }
+    return "";
+}
+
+fn uint64 w(uint32 v) { return cast<uint64>(v); }
+
+// wgpu-native (v29.0.1.1) does not report `maxBindGroupsPlusVertexBuffers`: an adapter and a device both answer 0 for
+// it (measured 2026-11-10). The package answers what the implementation says, so natively that one 0 is accepted, and
+// on the web, where the browser reports it, it is held like the rest.
+@compileFor(ARCH_WASM32)
+fn bool unreported(uint32 v) { return false; }
+@compileFor(!ARCH_WASM32)
+fn bool unreported(uint32 v) { return v == 0; }
+
+// The first limit of `have` that does not meet `want`, or "": each maximum at least as high, each alignment as low.
+fn string meets(const ref Limits have, const ref Limits want) {
+    DynamicArray<string> f = DynamicArray.empty();
+    f.add(item: atLeast(name: "maxTextureDimension1D", have: w(v: have.maxTextureDimension1D), want: w(v: want.maxTextureDimension1D)));
+    f.add(item: atLeast(name: "maxTextureDimension2D", have: w(v: have.maxTextureDimension2D), want: w(v: want.maxTextureDimension2D)));
+    f.add(item: atLeast(name: "maxTextureDimension3D", have: w(v: have.maxTextureDimension3D), want: w(v: want.maxTextureDimension3D)));
+    f.add(item: atLeast(name: "maxTextureArrayLayers", have: w(v: have.maxTextureArrayLayers), want: w(v: want.maxTextureArrayLayers)));
+    f.add(item: atLeast(name: "maxBindGroups", have: w(v: have.maxBindGroups), want: w(v: want.maxBindGroups)));
+    f.add(item: unreported(v: have.maxBindGroupsPlusVertexBuffers) ? ""
+                : atLeast(name: "maxBindGroupsPlusVertexBuffers", have: w(v: have.maxBindGroupsPlusVertexBuffers), want: w(v: want.maxBindGroupsPlusVertexBuffers)));
+    f.add(item: atLeast(name: "maxBindingsPerBindGroup", have: w(v: have.maxBindingsPerBindGroup), want: w(v: want.maxBindingsPerBindGroup)));
+    f.add(item: atLeast(name: "maxDynamicUniformBuffersPerPipelineLayout", have: w(v: have.maxDynamicUniformBuffersPerPipelineLayout), want: w(v: want.maxDynamicUniformBuffersPerPipelineLayout)));
+    f.add(item: atLeast(name: "maxDynamicStorageBuffersPerPipelineLayout", have: w(v: have.maxDynamicStorageBuffersPerPipelineLayout), want: w(v: want.maxDynamicStorageBuffersPerPipelineLayout)));
+    f.add(item: atLeast(name: "maxSampledTexturesPerShaderStage", have: w(v: have.maxSampledTexturesPerShaderStage), want: w(v: want.maxSampledTexturesPerShaderStage)));
+    f.add(item: atLeast(name: "maxSamplersPerShaderStage", have: w(v: have.maxSamplersPerShaderStage), want: w(v: want.maxSamplersPerShaderStage)));
+    f.add(item: atLeast(name: "maxStorageBuffersPerShaderStage", have: w(v: have.maxStorageBuffersPerShaderStage), want: w(v: want.maxStorageBuffersPerShaderStage)));
+    f.add(item: atLeast(name: "maxStorageTexturesPerShaderStage", have: w(v: have.maxStorageTexturesPerShaderStage), want: w(v: want.maxStorageTexturesPerShaderStage)));
+    f.add(item: atLeast(name: "maxUniformBuffersPerShaderStage", have: w(v: have.maxUniformBuffersPerShaderStage), want: w(v: want.maxUniformBuffersPerShaderStage)));
+    f.add(item: atLeast(name: "maxUniformBufferBindingSize", have: have.maxUniformBufferBindingSize, want: want.maxUniformBufferBindingSize));
+    f.add(item: atLeast(name: "maxStorageBufferBindingSize", have: have.maxStorageBufferBindingSize, want: want.maxStorageBufferBindingSize));
+    f.add(item: atMost(name: "minUniformBufferOffsetAlignment", have: w(v: have.minUniformBufferOffsetAlignment), want: w(v: want.minUniformBufferOffsetAlignment)));
+    f.add(item: atMost(name: "minStorageBufferOffsetAlignment", have: w(v: have.minStorageBufferOffsetAlignment), want: w(v: want.minStorageBufferOffsetAlignment)));
+    f.add(item: atLeast(name: "maxVertexBuffers", have: w(v: have.maxVertexBuffers), want: w(v: want.maxVertexBuffers)));
+    f.add(item: atLeast(name: "maxBufferSize", have: have.maxBufferSize, want: want.maxBufferSize));
+    f.add(item: atLeast(name: "maxVertexAttributes", have: w(v: have.maxVertexAttributes), want: w(v: want.maxVertexAttributes)));
+    f.add(item: atLeast(name: "maxVertexBufferArrayStride", have: w(v: have.maxVertexBufferArrayStride), want: w(v: want.maxVertexBufferArrayStride)));
+    f.add(item: atLeast(name: "maxInterStageShaderVariables", have: w(v: have.maxInterStageShaderVariables), want: w(v: want.maxInterStageShaderVariables)));
+    f.add(item: atLeast(name: "maxColorAttachments", have: w(v: have.maxColorAttachments), want: w(v: want.maxColorAttachments)));
+    f.add(item: atLeast(name: "maxColorAttachmentBytesPerSample", have: w(v: have.maxColorAttachmentBytesPerSample), want: w(v: want.maxColorAttachmentBytesPerSample)));
+    f.add(item: atLeast(name: "maxComputeWorkgroupStorageSize", have: w(v: have.maxComputeWorkgroupStorageSize), want: w(v: want.maxComputeWorkgroupStorageSize)));
+    f.add(item: atLeast(name: "maxComputeInvocationsPerWorkgroup", have: w(v: have.maxComputeInvocationsPerWorkgroup), want: w(v: want.maxComputeInvocationsPerWorkgroup)));
+    f.add(item: atLeast(name: "maxComputeWorkgroupSizeX", have: w(v: have.maxComputeWorkgroupSizeX), want: w(v: want.maxComputeWorkgroupSizeX)));
+    f.add(item: atLeast(name: "maxComputeWorkgroupSizeY", have: w(v: have.maxComputeWorkgroupSizeY), want: w(v: want.maxComputeWorkgroupSizeY)));
+    f.add(item: atLeast(name: "maxComputeWorkgroupSizeZ", have: w(v: have.maxComputeWorkgroupSizeZ), want: w(v: want.maxComputeWorkgroupSizeZ)));
+    f.add(item: atLeast(name: "maxComputeWorkgroupsPerDimension", have: w(v: have.maxComputeWorkgroupsPerDimension), want: w(v: want.maxComputeWorkgroupsPerDimension)));
+    f.add(item: atLeast(name: "maxImmediateSize", have: w(v: have.maxImmediateSize), want: w(v: want.maxImmediateSize)));
+    return first(faults: f);
+}
+
+// The first limit of `have` that is not `want`'s, or "".
+fn string equal(const ref Limits have, const ref Limits want) {
+    DynamicArray<string> f = DynamicArray.empty();
+    f.add(item: same(name: "maxTextureDimension1D", have: w(v: have.maxTextureDimension1D), want: w(v: want.maxTextureDimension1D)));
+    f.add(item: same(name: "maxTextureDimension2D", have: w(v: have.maxTextureDimension2D), want: w(v: want.maxTextureDimension2D)));
+    f.add(item: same(name: "maxTextureDimension3D", have: w(v: have.maxTextureDimension3D), want: w(v: want.maxTextureDimension3D)));
+    f.add(item: same(name: "maxTextureArrayLayers", have: w(v: have.maxTextureArrayLayers), want: w(v: want.maxTextureArrayLayers)));
+    f.add(item: same(name: "maxBindGroups", have: w(v: have.maxBindGroups), want: w(v: want.maxBindGroups)));
+    f.add(item: unreported(v: have.maxBindGroupsPlusVertexBuffers) ? ""
+                : same(name: "maxBindGroupsPlusVertexBuffers", have: w(v: have.maxBindGroupsPlusVertexBuffers), want: w(v: want.maxBindGroupsPlusVertexBuffers)));
+    f.add(item: same(name: "maxBindingsPerBindGroup", have: w(v: have.maxBindingsPerBindGroup), want: w(v: want.maxBindingsPerBindGroup)));
+    f.add(item: same(name: "maxDynamicUniformBuffersPerPipelineLayout", have: w(v: have.maxDynamicUniformBuffersPerPipelineLayout), want: w(v: want.maxDynamicUniformBuffersPerPipelineLayout)));
+    f.add(item: same(name: "maxDynamicStorageBuffersPerPipelineLayout", have: w(v: have.maxDynamicStorageBuffersPerPipelineLayout), want: w(v: want.maxDynamicStorageBuffersPerPipelineLayout)));
+    f.add(item: same(name: "maxSampledTexturesPerShaderStage", have: w(v: have.maxSampledTexturesPerShaderStage), want: w(v: want.maxSampledTexturesPerShaderStage)));
+    f.add(item: same(name: "maxSamplersPerShaderStage", have: w(v: have.maxSamplersPerShaderStage), want: w(v: want.maxSamplersPerShaderStage)));
+    f.add(item: same(name: "maxStorageBuffersPerShaderStage", have: w(v: have.maxStorageBuffersPerShaderStage), want: w(v: want.maxStorageBuffersPerShaderStage)));
+    f.add(item: same(name: "maxStorageTexturesPerShaderStage", have: w(v: have.maxStorageTexturesPerShaderStage), want: w(v: want.maxStorageTexturesPerShaderStage)));
+    f.add(item: same(name: "maxUniformBuffersPerShaderStage", have: w(v: have.maxUniformBuffersPerShaderStage), want: w(v: want.maxUniformBuffersPerShaderStage)));
+    f.add(item: same(name: "maxUniformBufferBindingSize", have: have.maxUniformBufferBindingSize, want: want.maxUniformBufferBindingSize));
+    f.add(item: same(name: "maxStorageBufferBindingSize", have: have.maxStorageBufferBindingSize, want: want.maxStorageBufferBindingSize));
+    f.add(item: same(name: "minUniformBufferOffsetAlignment", have: w(v: have.minUniformBufferOffsetAlignment), want: w(v: want.minUniformBufferOffsetAlignment)));
+    f.add(item: same(name: "minStorageBufferOffsetAlignment", have: w(v: have.minStorageBufferOffsetAlignment), want: w(v: want.minStorageBufferOffsetAlignment)));
+    f.add(item: same(name: "maxVertexBuffers", have: w(v: have.maxVertexBuffers), want: w(v: want.maxVertexBuffers)));
+    f.add(item: same(name: "maxBufferSize", have: have.maxBufferSize, want: want.maxBufferSize));
+    f.add(item: same(name: "maxVertexAttributes", have: w(v: have.maxVertexAttributes), want: w(v: want.maxVertexAttributes)));
+    f.add(item: same(name: "maxVertexBufferArrayStride", have: w(v: have.maxVertexBufferArrayStride), want: w(v: want.maxVertexBufferArrayStride)));
+    f.add(item: same(name: "maxInterStageShaderVariables", have: w(v: have.maxInterStageShaderVariables), want: w(v: want.maxInterStageShaderVariables)));
+    f.add(item: same(name: "maxColorAttachments", have: w(v: have.maxColorAttachments), want: w(v: want.maxColorAttachments)));
+    f.add(item: same(name: "maxColorAttachmentBytesPerSample", have: w(v: have.maxColorAttachmentBytesPerSample), want: w(v: want.maxColorAttachmentBytesPerSample)));
+    f.add(item: same(name: "maxComputeWorkgroupStorageSize", have: w(v: have.maxComputeWorkgroupStorageSize), want: w(v: want.maxComputeWorkgroupStorageSize)));
+    f.add(item: same(name: "maxComputeInvocationsPerWorkgroup", have: w(v: have.maxComputeInvocationsPerWorkgroup), want: w(v: want.maxComputeInvocationsPerWorkgroup)));
+    f.add(item: same(name: "maxComputeWorkgroupSizeX", have: w(v: have.maxComputeWorkgroupSizeX), want: w(v: want.maxComputeWorkgroupSizeX)));
+    f.add(item: same(name: "maxComputeWorkgroupSizeY", have: w(v: have.maxComputeWorkgroupSizeY), want: w(v: want.maxComputeWorkgroupSizeY)));
+    f.add(item: same(name: "maxComputeWorkgroupSizeZ", have: w(v: have.maxComputeWorkgroupSizeZ), want: w(v: want.maxComputeWorkgroupSizeZ)));
+    f.add(item: same(name: "maxComputeWorkgroupsPerDimension", have: w(v: have.maxComputeWorkgroupsPerDimension), want: w(v: want.maxComputeWorkgroupsPerDimension)));
+    f.add(item: same(name: "maxImmediateSize", have: w(v: have.maxImmediateSize), want: w(v: want.maxImmediateSize)));
+    return first(faults: f);
+}
+
+// A feature desktop adapters commonly lack, the first of these this adapter lacks; None when it has them all.
+fn Optional<Feature> lackedBy(const ref FeatureSet has) {
+    DynamicArray<Feature> candidates = DynamicArray.empty();
+    candidates.add(item: Feature::TextureCompressionASTC);
+    candidates.add(item: Feature::TextureCompressionASTCSliced3D);
+    candidates.add(item: Feature::TextureCompressionETC2);
+    candidates.add(item: Feature::TextureComponentSwizzle);
+    candidates.add(item: Feature::PrimitiveIndex);
+    candidates.add(item: Feature::ClipDistances);
+    foreach (Feature f in candidates.iterator()) { if (!has.has(feature: f)) { return Optional::Some(value: f); } }
+    return Optional::None;
+}
+
+// WebGPU says every adapter has `core-features-and-limits`, and the browser lists it. wgpu-native (v29.0.1.1) does not
+// (measured 2026-11-10: 14 of webgpu.h's features, that one not among them), so natively an adapter must answer at
+// least one feature, and on the web that one.
+@compileFor(ARCH_WASM32)
+fn string answered(const ref FeatureSet has) {
+    return has.has(feature: Feature::CoreFeaturesAndLimits) ? "" : "it does not list CoreFeaturesAndLimits";
+}
+@compileFor(!ARCH_WASM32)
+fn string answered(const ref FeatureSet has) {
+    FeatureSet none = FeatureSet.none();
+    string gap = missingFrom(given: none, offered: has);
+    return gap.isEmpty() ? "it lists none of webgpu.h's features" : "";
+}
+
+// The first feature `offered` has that `given` lacks, or "".
+fn string missingFrom(const ref FeatureSet given, const ref FeatureSet offered) {
+    DynamicArray<Feature> all = DynamicArray.empty();
+    all.add(item: Feature::CoreFeaturesAndLimits);
+    all.add(item: Feature::DepthClipControl);
+    all.add(item: Feature::Depth32FloatStencil8);
+    all.add(item: Feature::TextureCompressionBC);
+    all.add(item: Feature::TextureCompressionBCSliced3D);
+    all.add(item: Feature::TextureCompressionETC2);
+    all.add(item: Feature::TextureCompressionASTC);
+    all.add(item: Feature::TextureCompressionASTCSliced3D);
+    all.add(item: Feature::TimestampQuery);
+    all.add(item: Feature::IndirectFirstInstance);
+    all.add(item: Feature::ShaderF16);
+    all.add(item: Feature::RG11B10UfloatRenderable);
+    all.add(item: Feature::BGRA8UnormStorage);
+    all.add(item: Feature::Float32Filterable);
+    all.add(item: Feature::Float32Blendable);
+    all.add(item: Feature::ClipDistances);
+    all.add(item: Feature::DualSourceBlending);
+    all.add(item: Feature::Subgroups);
+    all.add(item: Feature::TextureFormatsTier1);
+    all.add(item: Feature::TextureFormatsTier2);
+    all.add(item: Feature::PrimitiveIndex);
+    all.add(item: Feature::TextureComponentSwizzle);
+    isize n = 0;
+    foreach (Feature f in all.iterator()) {
+        if (offered.has(feature: f)) {
+            n = n + 1;
+            if (!given.has(feature: f)) { return "feature ${n} of those offered was not given"; }
+        }
+    }
+    println(s: "info the adapter offers ${n} of webgpu.h's features");
+    return "";
+}
+
+// One request polled: Pending keeps it in `slot`; a settled one leaves `slot` empty and is handed back.
+unsafe fn DeviceStatus pollOne(ref Optional<DeviceRequest> slot) {
+    Optional<DeviceRequest> taken = replace(place: slot, with: Optional::None);
+    match (give taken) {
+        case None: { return DeviceStatus::Failed(error: GpuError::Taken); }
+        case Some(value: r): {
+            DeviceStatus s = r.poll();
+            slot = Optional::Some(value: give r);
+            bool pending = match (s) { case Pending: true; case _: false; };
+            if (!pending) { slot = Optional::None; }
+            return give s;
+        }
+    };
+}
+
 type resource Check implements App {
     Optional<Instance> instance = Optional::None;
-    Optional<DeviceRequest> request = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<Adapter> adapter = Optional::None;
+    Optional<DeviceRequest> request = Optional::None;     // WebGPU's defaults: the device the clear runs on
+    Optional<DeviceRequest> raised = Optional::None;      // one limit raised to the adapter's
+    Optional<DeviceRequest> beyond = Optional::None;      // one limit past the adapter's
+    Optional<DeviceRequest> lacking = Optional::None;     // a feature the adapter lacks
+    Optional<DeviceRequest> every = Optional::None;       // every feature the adapter has
+    FeatureSet offered = FeatureSet.none();
+    uint32 raisedTo = 0;
+    int32 open = 0;                                       // device requests not settled yet
     Optional<Device> device = Optional::None;
     Optional<Queue> queue = Optional::None;
     Optional<Buffer> readback = Optional::None;
     Optional<BufferRead> read = Optional::None;
-    int32 stage = 0;     // 0 awaiting the device, 1 awaiting the map, 2 done
+    int32 stage = 0;     // 0 awaiting the adapter, 1 the devices, 2 the map, 3 done
     Instant began = monotonicNow();
     int32 runs = 0;
     int32 failures = 0;
@@ -49,13 +252,13 @@ type resource Check implements App {
         Result<Instance, GpuError> made = Instance.create();
         match (give made) {
             case Ok(value: inst): {
-                this.request = Optional::Some(value: inst.requestDevice(power: PowerPreference::HighPerformance));
+                this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.make(power: PowerPreference::HighPerformance)));
                 this.instance = Optional::Some(value: give inst);
             }
             case Err(error: e): {
                 string why = e.message();
                 this.verdict(name: "an instance", why: why);
-                this.stage = 2;
+                this.stage = 3;
             }
         };
     }
@@ -79,45 +282,194 @@ type resource Check implements App {
     public fn void lifecycle(Lifecycle event) { }
 
     unsafe fn int32 step() {
-        if (this.stage < 2 && this.began.elapsed().asMillis() > TIMEOUT_MS) {
+        if (this.stage < 3 && this.began.elapsed().asMillis() > TIMEOUT_MS) {
             int64 lost = lostDevices();
             string last = lastErrorMessage();
             this.verdict(name: "the GPU answers within 10 s",
                          why: "timed out at stage ${this.stage} (devices lost: ${lost}; last message: ${last})");
-            this.stage = 2;
+            this.stage = 3;
         }
-        if (this.stage == 0) { this.awaitDevice(); }
-        if (this.stage == 1) { this.awaitRead(); }
-        if (this.stage == 2) { return this.finish(); }
+        if (this.stage == 0) { this.awaitAdapter(); }
+        if (this.stage == 1) { this.awaitDevices(); }
+        if (this.stage == 2) { this.awaitRead(); }
+        if (this.stage == 3) { return this.finish(); }
         return 1;
     }
 
-    unsafe fn void awaitDevice() {
-        Optional<DeviceRequest> taken = replace(place: this.request, with: Optional::None);
+    unsafe fn void awaitAdapter() {
+        Optional<AdapterRequest> taken = replace(place: this.adapterRequest, with: Optional::None);
         match (give taken) {
-            case None: { this.verdict(name: "a device request", why: "there was none"); this.stage = 2; }
+            case None: { this.verdict(name: "an adapter request", why: "there was none"); this.stage = 3; }
             case Some(value: r): {
-                DeviceStatus status = r.poll();
-                this.request = Optional::Some(value: give r);   // kept while pending, dropped once settled
+                AdapterStatus status = r.poll();
+                this.adapterRequest = Optional::Some(value: give r);
                 match (give status) {
                     case Pending: { }
-                    case Ready(device: d, queue: q): {
-                        this.request = Optional::None;
-                        this.verdict(name: "a device and its queue", why: "");
-                        this.render(device: d, queue: q);
-                        this.device = Optional::Some(value: give d);
-                        this.queue = Optional::Some(value: give q);
+                    case Ready(adapter: a): {
+                        this.adapterRequest = Optional::None;
+                        this.verdict(name: "an adapter, asked of the instance", why: "");
+                        this.askAdapter(adapter: a);
+                        this.adapter = Optional::Some(value: give a);
                         this.stage = 1;
                     }
                     case Failed(error: e): {
-                        this.request = Optional::None;
+                        this.adapterRequest = Optional::None;
                         string why = e.message();
-                        this.verdict(name: "a device and its queue", why: why);
-                        this.stage = 2;
+                        this.verdict(name: "an adapter, asked of the instance", why: why);
+                        this.stage = 3;
                     }
                 };
             }
         };
+    }
+
+    // What the adapter answers, then four devices asked of it at once.
+    unsafe fn void askAdapter(ref Adapter adapter) {
+        AdapterInfo info = adapter.info();
+        Backend backend = info.backend();
+        bool named = match (backend) { case Undefined: false; case Null: false; case _: true; };
+        string description = info.description();
+        println(s: "info the adapter: ${description}");
+        this.verdict(name: "the adapter names its backend", why: named ? "" : "its backend is Undefined or Null");
+        Limits limits = adapter.limits();
+        Limits defaults = Limits.defaults();
+        string below = meets(have: limits, want: defaults);
+        this.verdict(name: "the adapter's limits meet WebGPU's defaults", why: below);
+
+        this.request = Optional::Some(value: adapter.requestDevice(options: DeviceOptions.defaults()));
+        this.open = 1;
+
+        uint32 top = limits.maxTextureDimension2D;
+        if (top > defaults.maxTextureDimension2D) {
+            DeviceOptions up = DeviceOptions.defaults();
+            up.limits.maxTextureDimension2D = top;
+            this.raisedTo = top;
+            this.raised = Optional::Some(value: adapter.requestDevice(options: up));
+            this.open = this.open + 1;
+        } else {
+            println(s: "skip a raised limit: the adapter's maxTextureDimension2D is WebGPU's default, ${top}");
+        }
+
+        DeviceOptions past = DeviceOptions.defaults();
+        past.limits.maxTextureDimension2D = top + 1;
+        this.beyond = Optional::Some(value: adapter.requestDevice(options: past));
+        this.open = this.open + 1;
+
+        FeatureSet has = adapter.features();
+        this.verdict(name: "the adapter answers its features", why: answered(has: has));
+        DeviceOptions all = DeviceOptions.defaults();
+        all.features = has;
+        this.offered = has;
+        this.every = Optional::Some(value: adapter.requestDevice(options: all));
+        this.open = this.open + 1;
+        Optional<Feature> missing = lackedBy(has: has);
+        match (missing) {
+            case Some(value: f): {
+                DeviceOptions wants = DeviceOptions.defaults();
+                wants.features = wants.features.with(feature: f);
+                this.lacking = Optional::Some(value: adapter.requestDevice(options: wants));
+                this.open = this.open + 1;
+            }
+            case None: { println(s: "skip a feature the adapter lacks: it has every candidate"); }
+        };
+    }
+
+    unsafe fn void awaitDevices() {
+        if (this.request.isSome()) {
+            DeviceStatus s = pollOne(slot: this.request);
+            match (give s) {
+                case Pending: { }
+                case Ready(device: d, queue: q): {
+                    this.open = this.open - 1;
+                    this.verdict(name: "a device and its queue, from the adapter", why: "");
+                    Limits got = d.limits();
+                    Limits defaults = Limits.defaults();
+                    string off = equal(have: got, want: defaults);
+                    this.verdict(name: "a device asked for the defaults has WebGPU's default limits, not the adapter's", why: off);
+                    this.render(device: d, queue: q);
+                    this.device = Optional::Some(value: give d);
+                    this.queue = Optional::Some(value: give q);
+                }
+                case Failed(error: e): {
+                    this.open = this.open - 1;
+                    string why = e.message();
+                    this.verdict(name: "a device and its queue, from the adapter", why: why);
+                    this.stage = 3;
+                    return;
+                }
+            };
+        }
+        if (this.raised.isSome()) {
+            DeviceStatus s = pollOne(slot: this.raised);
+            match (give s) {
+                case Pending: { }
+                case Ready(device: d, queue: q): {
+                    this.open = this.open - 1;
+                    Limits got = d.limits();
+                    uint32 to = got.maxTextureDimension2D;
+                    uint32 want = this.raisedTo;
+                    this.verdict(name: "a limit raised to the adapter's is granted",
+                                 why: to == want ? "" : "maxTextureDimension2D ${to}, not ${want}");
+                }
+                case Failed(error: e): {
+                    this.open = this.open - 1;
+                    string why = e.message();
+                    this.verdict(name: "a limit raised to the adapter's is granted", why: "refused: " + why);
+                }
+            };
+        }
+        if (this.beyond.isSome()) {
+            DeviceStatus s = pollOne(slot: this.beyond);
+            match (give s) {
+                case Pending: { }
+                case Ready(device: d, queue: q): {
+                    this.open = this.open - 1;
+                    this.verdict(name: "a limit past the adapter's is refused, in the implementation's words", why: "a device was given");
+                }
+                case Failed(error: e): {
+                    this.open = this.open - 1;
+                    string why = e.message();
+                    println(s: "info refused: ${why}");
+                    this.verdict(name: "a limit past the adapter's is refused, in the implementation's words",
+                                 why: why.isEmpty() ? "refused with no words" : "");
+                }
+            };
+        }
+        if (this.lacking.isSome()) {
+            DeviceStatus s = pollOne(slot: this.lacking);
+            match (give s) {
+                case Pending: { }
+                case Ready(device: d, queue: q): {
+                    this.open = this.open - 1;
+                    this.verdict(name: "a feature the adapter lacks is refused, in the implementation's words", why: "a device was given");
+                }
+                case Failed(error: e): {
+                    this.open = this.open - 1;
+                    string why = e.message();
+                    println(s: "info refused: ${why}");
+                    this.verdict(name: "a feature the adapter lacks is refused, in the implementation's words",
+                                 why: why.isEmpty() ? "refused with no words" : "");
+                }
+            };
+        }
+        if (this.every.isSome()) {
+            DeviceStatus s = pollOne(slot: this.every);
+            match (give s) {
+                case Pending: { }
+                case Ready(device: d, queue: q): {
+                    this.open = this.open - 1;
+                    FeatureSet given = d.features();
+                    string gap = missingFrom(given: given, offered: this.offered);
+                    this.verdict(name: "a device asked for every feature the adapter has is given them all", why: gap);
+                }
+                case Failed(error: e): {
+                    this.open = this.open - 1;
+                    string why = e.message();
+                    this.verdict(name: "a device asked for every feature the adapter has is given them all", why: "refused: " + why);
+                }
+            };
+        }
+        if (this.open == 0 && this.stage == 1) { this.stage = 2; }
     }
 
     // Clear a texture, copy it to a buffer, and ask for the buffer's bytes.
@@ -149,11 +501,11 @@ type resource Check implements App {
         };
         match (give status) {
             case Pending: { }
-            case Ready: { this.checkPixels(); this.stage = 2; }
+            case Ready: { this.checkPixels(); this.stage = 3; }
             case Failed(error: e): {
                 string why = e.message();
                 this.verdict(name: "the readback maps", why: why);
-                this.stage = 2;
+                this.stage = 3;
             }
         };
     }
@@ -201,6 +553,12 @@ type resource Check implements App {
         this.queue = Optional::None;
         this.device = Optional::None;
         this.request = Optional::None;
+        this.raised = Optional::None;
+        this.beyond = Optional::None;
+        this.lacking = Optional::None;
+        this.every = Optional::None;
+        this.adapter = Optional::None;
+        this.adapterRequest = Optional::None;
         this.instance = Optional::None;
         int64 errors = uncapturedErrors();
         if (errors == 0) {

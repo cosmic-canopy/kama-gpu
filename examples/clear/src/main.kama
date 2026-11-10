@@ -10,7 +10,8 @@ import {
     core::println,
     core::env::args, core::env::Args,
     std::fmt::parse, std::fmt::ParseError,
-    gpu::Instance, gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::PowerPreference,
+    gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::DeviceOptions,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::PowerPreference,
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::TextureFormat, gpu::TextureView, gpu::CommandEncoder,
     gpu::RenderPass, gpu::CommandBuffer, gpu::Color, gpu::uncapturedErrors, gpu::lastErrorMessage,
     window::Window, window::WindowError, window::Event, window::Key, window::Size,
@@ -34,9 +35,26 @@ unsafe fn int32 frameLimit() {
     };
 }
 
-// A device for `surface`; natively the request is answered as soon as it is polled.
+// An adapter that can present to `surface`, then a device from it with WebGPU's defaults; natively each request is
+// answered as soon as it is polled.
 unsafe fn Result<DeviceStatus, GpuError> device(ref Instance instance, const ref Surface surface) {
-    DeviceRequest request = instance.requestDeviceFor(surface: surface, power: PowerPreference::HighPerformance);
+    AdapterRequest asked = instance.requestAdapter(options: AdapterOptions.forSurface(surface: surface,
+                                                                                       power: PowerPreference::HighPerformance));
+    int32 polls = 0;
+    while (polls < 1000) {
+        AdapterStatus a = asked.poll();
+        match (give a) {
+            case Pending: { }
+            case Ready(adapter: adapter): { return deviceFrom(adapter: adapter); }
+            case Failed(error: e): { return Result::Err(error: give e); }
+        };
+        polls = polls + 1;
+    }
+    return Result::Err(error: GpuError::Refused(words: "the adapter request never settled"));
+}
+
+unsafe fn Result<DeviceStatus, GpuError> deviceFrom(ref Adapter adapter) {
+    DeviceRequest request = adapter.requestDevice(options: DeviceOptions.defaults());
     int32 polls = 0;
     while (polls < 1000) {
         DeviceStatus s = request.poll();

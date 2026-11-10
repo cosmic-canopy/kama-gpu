@@ -6,10 +6,13 @@
 //   dangling.
 // - The once-in-order steps are moves: `encoder.finish()` consumes the encoder, `pass.end()` the pass, and
 //   `queue.submit(commands:)` the command buffer.
-// - The asynchronous steps are polled, never called back into kama: `instance.requestDevice(…)` gives a
-//   `DeviceRequest` whose `poll()` says Pending, Ready (with the device and its queue) or Failed; `buffer.mapRead(…)`
-//   gives a `BufferRead` the same way. Natively `device.poll(wait:)` drives them; on the web the browser's event loop
-//   does, between frames.
+// - The asynchronous steps are polled, never called back into kama. WebGPU's own two steps: `instance.requestAdapter(…)`
+//   gives an `AdapterRequest` whose `poll()` says Pending, Ready (with the adapter) or Failed, and
+//   `adapter.requestDevice(…)` a `DeviceRequest` the same way (with the device and its queue); `buffer.mapRead(…)` gives
+//   a `BufferRead` the same way. Natively `device.poll(wait:)` drives them; on the web the browser's event loop does,
+//   between frames.
+// - A device gets WebGPU's default limits and no feature unless its `DeviceOptions` raise them, never its adapter's,
+//   so a program that runs on one machine does not silently depend on that machine's adapter.
 // - `adopt` and `raw` on every handle let a program bind more of webgpu.h with its own externs.
 //
 // It starts at what an offscreen clear and its readback touch, and grows toward the whole of webgpu.h.
@@ -18,8 +21,8 @@ import {
     std::collections::DynamicArray,
     std::encoding::utf8::decode, std::encoding::utf8::Utf8Error,
     gpu::native::createInstance, gpu::native::instanceAddRef, gpu::native::instanceRelease,
-    gpu::native::adapterAddRef, gpu::native::adapterRelease,
-    gpu::native::deviceAddRef, gpu::native::deviceRelease, gpu::native::deviceGetQueue,
+    gpu::native::adapterAddRef, gpu::native::adapterRelease, gpu::native::adapterGetLimits,
+    gpu::native::deviceAddRef, gpu::native::deviceRelease, gpu::native::deviceGetQueue, gpu::native::deviceGetLimits,
     gpu::native::deviceCreateBuffer, gpu::native::deviceCreateTexture, gpu::native::deviceCreateCommandEncoder,
     gpu::native::queueAddRef, gpu::native::queueRelease, gpu::native::queueSubmit,
     gpu::native::bufferAddRef, gpu::native::bufferRelease, gpu::native::bufferGetSize,
@@ -35,8 +38,13 @@ import {
     gpu::native::WGPUBufferUsage, gpu::native::WGPUTextureUsage, gpu::native::WGPUMapMode,
     gpu::native::WGPUTextureFormat, gpu::native::WGPUTextureDimension, gpu::native::WGPULoadOp,
     gpu::native::WGPUStoreOp, gpu::native::WGPUTextureAspect, gpu::native::WGPUPowerPreference,
+    gpu::native::WGPULimits, gpu::native::WGPUFeatureName, gpu::native::WGPUBackendType, gpu::native::WGPUAdapterType,
     gpu::native::SEAM_PENDING, gpu::native::SEAM_FAILED,
-    gpu::native::requestDevice, gpu::native::deviceRequestPoll, gpu::native::deviceRequestTakeAdapter,
+    gpu::native::requestAdapter, gpu::native::adapterRequestPoll, gpu::native::adapterRequestTake,
+    gpu::native::adapterRequestMessage, gpu::native::adapterRequestDrop,
+    gpu::native::adapterInfoText, gpu::native::adapterInfoNumbers, gpu::native::adapterFeatureNames,
+    gpu::native::deviceFeatureNames,
+    gpu::native::requestDeviceOf, gpu::native::deviceRequestPoll,
     gpu::native::deviceRequestTakeDevice, gpu::native::deviceRequestMessage, gpu::native::deviceRequestDrop,
     gpu::native::mapAsync, gpu::native::mapPoll, gpu::native::mapMessage, gpu::native::mapDrop, gpu::native::mapBytes,
     gpu::native::errorCount, gpu::native::lastError, gpu::native::lostCount, gpu::native::pollDevice,
@@ -48,7 +56,9 @@ import {
 };
 
 export {
-    Instance, Adapter, Device, Queue, DeviceRequest, DeviceStatus, GpuError, PowerPreference,
+    Instance, Adapter, AdapterOptions, AdapterRequest, AdapterStatus, AdapterInfo, Backend, AdapterKind,
+    Limits, Feature, FeatureSet, DeviceOptions,
+    Device, Queue, DeviceRequest, DeviceStatus, GpuError, PowerPreference,
     Buffer, BufferUsage, BufferRead, ReadStatus,
     Texture, TextureFormat, TextureUsage, TextureView,
     CommandEncoder, RenderPass, CommandBuffer, Color,
@@ -59,19 +69,24 @@ export {
 comptime int32 MESSAGE_BYTES = 512;
 // webgpu.h's WGPU_DEPTH_SLICE_UNDEFINED, a #define the bindings never see; csrc/gpuseam.c asserts it is this.
 comptime uint32 DEPTH_SLICE_UNDEFINED = 0xFFFFFFFF;
+// webgpu.h's WGPU_LIMIT_U32_UNDEFINED and _U64_UNDEFINED: a limit a request leaves to WebGPU's default. Asserted likewise.
+comptime uint32 LIMIT_U32_UNDEFINED = 0xFFFFFFFF;
+comptime uint64 LIMIT_U64_UNDEFINED = 0xFFFFFFFFFFFFFFFF;
+// The most features a set holds or a query copies out: webgpu.h names 22, and an implementation may add its own.
+comptime int32 FEATURES_MAX = 64;
 
 // ---- errors ----------------------------------------------------------------------------------------------------------
 
 type enum GpuError implements Error {
     NoInstance,             // WebGPU gave no instance
     Refused(string words),  // the adapter, the device or a map was refused, in the implementation's words
-    Taken;                  // a request's device was handed over already
+    Taken;                  // what a request gave was handed over already
 
     public const fn string message() {
         return match (this) {
             case NoInstance: "WebGPU gave no instance";
             case Refused(words: w): copy w;
-            case Taken: "the device was already taken from this request";
+            case Taken: "what this request gave was already taken";
         };
     }
 }
@@ -111,6 +126,296 @@ fn int32 powerValue(PowerPreference p) {
         case LowPower: WGPUPowerPreference::LowPower;
         case HighPerformance: WGPUPowerPreference::HighPerformance;
     };
+}
+
+// The API an adapter runs on: WebGPU in a browser, a native one elsewhere.
+type enum Backend { Undefined, Null, WebGPU, D3D11, D3D12, Metal, Vulkan, OpenGL, OpenGLES }
+
+fn Backend backendOf(int32 v) {
+    if (v == WGPUBackendType::Null) { return Backend::Null; }
+    if (v == WGPUBackendType::WebGPU) { return Backend::WebGPU; }
+    if (v == WGPUBackendType::D3D11) { return Backend::D3D11; }
+    if (v == WGPUBackendType::D3D12) { return Backend::D3D12; }
+    if (v == WGPUBackendType::Metal) { return Backend::Metal; }
+    if (v == WGPUBackendType::Vulkan) { return Backend::Vulkan; }
+    if (v == WGPUBackendType::OpenGL) { return Backend::OpenGL; }
+    if (v == WGPUBackendType::OpenGLES) { return Backend::OpenGLES; }
+    return Backend::Undefined;
+}
+
+// What kind of processor an adapter is.
+type enum AdapterKind { DiscreteGPU, IntegratedGPU, CPU, Unknown }
+
+fn AdapterKind kindOf(int32 v) {
+    if (v == WGPUAdapterType::DiscreteGPU) { return AdapterKind::DiscreteGPU; }
+    if (v == WGPUAdapterType::IntegratedGPU) { return AdapterKind::IntegratedGPU; }
+    if (v == WGPUAdapterType::CPU) { return AdapterKind::CPU; }
+    return AdapterKind::Unknown;
+}
+
+// A feature a device can be asked for (WebGPU's `GPUFeatureName`). The set grows as webgpu.h's does.
+type enum Feature {
+    CoreFeaturesAndLimits, DepthClipControl, Depth32FloatStencil8, TextureCompressionBC, TextureCompressionBCSliced3D,
+    TextureCompressionETC2, TextureCompressionASTC, TextureCompressionASTCSliced3D, TimestampQuery, IndirectFirstInstance,
+    ShaderF16, RG11B10UfloatRenderable, BGRA8UnormStorage, Float32Filterable, Float32Blendable, ClipDistances,
+    DualSourceBlending, Subgroups, TextureFormatsTier1, TextureFormatsTier2, PrimitiveIndex, TextureComponentSwizzle
+}
+
+fn int32 featureValue(Feature f) {
+    return match (f) {
+        case CoreFeaturesAndLimits: WGPUFeatureName::CoreFeaturesAndLimits;
+        case DepthClipControl: WGPUFeatureName::DepthClipControl;
+        case Depth32FloatStencil8: WGPUFeatureName::Depth32FloatStencil8;
+        case TextureCompressionBC: WGPUFeatureName::TextureCompressionBC;
+        case TextureCompressionBCSliced3D: WGPUFeatureName::TextureCompressionBCSliced3D;
+        case TextureCompressionETC2: WGPUFeatureName::TextureCompressionETC2;
+        case TextureCompressionASTC: WGPUFeatureName::TextureCompressionASTC;
+        case TextureCompressionASTCSliced3D: WGPUFeatureName::TextureCompressionASTCSliced3D;
+        case TimestampQuery: WGPUFeatureName::TimestampQuery;
+        case IndirectFirstInstance: WGPUFeatureName::IndirectFirstInstance;
+        case ShaderF16: WGPUFeatureName::ShaderF16;
+        case RG11B10UfloatRenderable: WGPUFeatureName::RG11B10UfloatRenderable;
+        case BGRA8UnormStorage: WGPUFeatureName::BGRA8UnormStorage;
+        case Float32Filterable: WGPUFeatureName::Float32Filterable;
+        case Float32Blendable: WGPUFeatureName::Float32Blendable;
+        case ClipDistances: WGPUFeatureName::ClipDistances;
+        case DualSourceBlending: WGPUFeatureName::DualSourceBlending;
+        case Subgroups: WGPUFeatureName::Subgroups;
+        case TextureFormatsTier1: WGPUFeatureName::TextureFormatsTier1;
+        case TextureFormatsTier2: WGPUFeatureName::TextureFormatsTier2;
+        case PrimitiveIndex: WGPUFeatureName::PrimitiveIndex;
+        case TextureComponentSwizzle: WGPUFeatureName::TextureComponentSwizzle;
+    };
+}
+
+// Every feature, in webgpu.h's order.
+fn DynamicArray<Feature> everyFeature() {
+    DynamicArray<Feature> all = DynamicArray.empty();
+    all.add(item: Feature::CoreFeaturesAndLimits);
+    all.add(item: Feature::DepthClipControl);
+    all.add(item: Feature::Depth32FloatStencil8);
+    all.add(item: Feature::TextureCompressionBC);
+    all.add(item: Feature::TextureCompressionBCSliced3D);
+    all.add(item: Feature::TextureCompressionETC2);
+    all.add(item: Feature::TextureCompressionASTC);
+    all.add(item: Feature::TextureCompressionASTCSliced3D);
+    all.add(item: Feature::TimestampQuery);
+    all.add(item: Feature::IndirectFirstInstance);
+    all.add(item: Feature::ShaderF16);
+    all.add(item: Feature::RG11B10UfloatRenderable);
+    all.add(item: Feature::BGRA8UnormStorage);
+    all.add(item: Feature::Float32Filterable);
+    all.add(item: Feature::Float32Blendable);
+    all.add(item: Feature::ClipDistances);
+    all.add(item: Feature::DualSourceBlending);
+    all.add(item: Feature::Subgroups);
+    all.add(item: Feature::TextureFormatsTier1);
+    all.add(item: Feature::TextureFormatsTier2);
+    all.add(item: Feature::PrimitiveIndex);
+    all.add(item: Feature::TextureComponentSwizzle);
+    return all;
+}
+
+// The feature a WGPUFeatureName names, or None for one this package does not name (an implementation's own).
+fn Optional<Feature> featureFrom(int32 v) {
+    DynamicArray<Feature> all = everyFeature();
+    foreach (Feature f in all.iterator()) { if (featureValue(f: f) == v) { return Optional::Some(value: f); } }
+    return Optional::None;
+}
+
+// Features, as a set: `FeatureSet.none().with(feature: Feature::TimestampQuery)`.
+type value FeatureSet {
+    uint64 bits = 0;   // bit n is the feature whose webgpu.h number is n + 1
+
+    public ctor none() { }
+
+    // This set and `feature`.
+    public const fn FeatureSet with(Feature feature) {
+        FeatureSet more = FeatureSet.none();
+        more.bits = this.bits | (cast<uint64>(1) << (featureValue(f: feature) - 1));
+        return more;
+    }
+
+    public const fn bool has(Feature feature) {
+        return (this.bits & (cast<uint64>(1) << (featureValue(f: feature) - 1))) != 0;
+    }
+}
+
+// The WGPUFeatureNames `count` of which a query copied into `names`, as a set; an implementation's own are left out.
+fn FeatureSet featuresFrom(const ref InlineArray<int32>#(64) names, int32 count) {
+    FeatureSet s = FeatureSet.none();
+    int32 i = 0;
+    while (i < count && i < FEATURES_MAX) {
+        Optional<Feature> f = featureFrom(v: names[cast<isize>(i)]);
+        match (f) { case Some(value: x): { s = s.with(feature: x); } case None: { } };
+        i = i + 1;
+    }
+    return s;
+}
+
+// The most a device may use, as WebGPU's `GPUSupportedLimits` names them: each `max` a ceiling, each `min` alignment a
+// floor (lower is more). An adapter answers the most it can give; a device, what it was given.
+type value Limits {
+    public uint32 maxTextureDimension1D = 0;
+    public uint32 maxTextureDimension2D = 0;
+    public uint32 maxTextureDimension3D = 0;
+    public uint32 maxTextureArrayLayers = 0;
+    public uint32 maxBindGroups = 0;
+    public uint32 maxBindGroupsPlusVertexBuffers = 0;
+    public uint32 maxBindingsPerBindGroup = 0;
+    public uint32 maxDynamicUniformBuffersPerPipelineLayout = 0;
+    public uint32 maxDynamicStorageBuffersPerPipelineLayout = 0;
+    public uint32 maxSampledTexturesPerShaderStage = 0;
+    public uint32 maxSamplersPerShaderStage = 0;
+    public uint32 maxStorageBuffersPerShaderStage = 0;
+    public uint32 maxStorageTexturesPerShaderStage = 0;
+    public uint32 maxUniformBuffersPerShaderStage = 0;
+    public uint64 maxUniformBufferBindingSize = 0;
+    public uint64 maxStorageBufferBindingSize = 0;
+    public uint32 minUniformBufferOffsetAlignment = 0;
+    public uint32 minStorageBufferOffsetAlignment = 0;
+    public uint32 maxVertexBuffers = 0;
+    public uint64 maxBufferSize = 0;
+    public uint32 maxVertexAttributes = 0;
+    public uint32 maxVertexBufferArrayStride = 0;
+    public uint32 maxInterStageShaderVariables = 0;
+    public uint32 maxColorAttachments = 0;
+    public uint32 maxColorAttachmentBytesPerSample = 0;
+    public uint32 maxComputeWorkgroupStorageSize = 0;
+    public uint32 maxComputeInvocationsPerWorkgroup = 0;
+    public uint32 maxComputeWorkgroupSizeX = 0;
+    public uint32 maxComputeWorkgroupSizeY = 0;
+    public uint32 maxComputeWorkgroupSizeZ = 0;
+    public uint32 maxComputeWorkgroupsPerDimension = 0;
+    public uint32 maxImmediateSize = 0;
+
+    // WebGPU's defaults, which every adapter meets (the spec's limits table). The tests hold a device asked for them to
+    // exactly these on each leg.
+    public ctor defaults() {
+        this.maxTextureDimension1D = 8192;
+        this.maxTextureDimension2D = 8192;
+        this.maxTextureDimension3D = 2048;
+        this.maxTextureArrayLayers = 256;
+        this.maxBindGroups = 4;
+        this.maxBindGroupsPlusVertexBuffers = 24;
+        this.maxBindingsPerBindGroup = 1000;
+        this.maxDynamicUniformBuffersPerPipelineLayout = 8;
+        this.maxDynamicStorageBuffersPerPipelineLayout = 4;
+        this.maxSampledTexturesPerShaderStage = 16;
+        this.maxSamplersPerShaderStage = 16;
+        this.maxStorageBuffersPerShaderStage = 8;
+        this.maxStorageTexturesPerShaderStage = 4;
+        this.maxUniformBuffersPerShaderStage = 12;
+        this.maxUniformBufferBindingSize = 65536;
+        this.maxStorageBufferBindingSize = 134217728;
+        this.minUniformBufferOffsetAlignment = 256;
+        this.minStorageBufferOffsetAlignment = 256;
+        this.maxVertexBuffers = 8;
+        this.maxBufferSize = 268435456;
+        this.maxVertexAttributes = 16;
+        this.maxVertexBufferArrayStride = 2048;
+        this.maxInterStageShaderVariables = 16;
+        this.maxColorAttachments = 8;
+        this.maxColorAttachmentBytesPerSample = 32;
+        this.maxComputeWorkgroupStorageSize = 16384;
+        this.maxComputeInvocationsPerWorkgroup = 256;
+        this.maxComputeWorkgroupSizeX = 256;
+        this.maxComputeWorkgroupSizeY = 256;
+        this.maxComputeWorkgroupSizeZ = 64;
+        this.maxComputeWorkgroupsPerDimension = 65535;
+        this.maxImmediateSize = 0;
+    }
+}
+
+// What webgpu.h answered, as `Limits`.
+fn Limits limitsOf(const ref WGPULimits n) {
+    Limits l = Limits.defaults();
+    l.maxTextureDimension1D = n.maxTextureDimension1D;
+    l.maxTextureDimension2D = n.maxTextureDimension2D;
+    l.maxTextureDimension3D = n.maxTextureDimension3D;
+    l.maxTextureArrayLayers = n.maxTextureArrayLayers;
+    l.maxBindGroups = n.maxBindGroups;
+    l.maxBindGroupsPlusVertexBuffers = n.maxBindGroupsPlusVertexBuffers;
+    l.maxBindingsPerBindGroup = n.maxBindingsPerBindGroup;
+    l.maxDynamicUniformBuffersPerPipelineLayout = n.maxDynamicUniformBuffersPerPipelineLayout;
+    l.maxDynamicStorageBuffersPerPipelineLayout = n.maxDynamicStorageBuffersPerPipelineLayout;
+    l.maxSampledTexturesPerShaderStage = n.maxSampledTexturesPerShaderStage;
+    l.maxSamplersPerShaderStage = n.maxSamplersPerShaderStage;
+    l.maxStorageBuffersPerShaderStage = n.maxStorageBuffersPerShaderStage;
+    l.maxStorageTexturesPerShaderStage = n.maxStorageTexturesPerShaderStage;
+    l.maxUniformBuffersPerShaderStage = n.maxUniformBuffersPerShaderStage;
+    l.maxUniformBufferBindingSize = n.maxUniformBufferBindingSize;
+    l.maxStorageBufferBindingSize = n.maxStorageBufferBindingSize;
+    l.minUniformBufferOffsetAlignment = n.minUniformBufferOffsetAlignment;
+    l.minStorageBufferOffsetAlignment = n.minStorageBufferOffsetAlignment;
+    l.maxVertexBuffers = n.maxVertexBuffers;
+    l.maxBufferSize = n.maxBufferSize;
+    l.maxVertexAttributes = n.maxVertexAttributes;
+    l.maxVertexBufferArrayStride = n.maxVertexBufferArrayStride;
+    l.maxInterStageShaderVariables = n.maxInterStageShaderVariables;
+    l.maxColorAttachments = n.maxColorAttachments;
+    l.maxColorAttachmentBytesPerSample = n.maxColorAttachmentBytesPerSample;
+    l.maxComputeWorkgroupStorageSize = n.maxComputeWorkgroupStorageSize;
+    l.maxComputeInvocationsPerWorkgroup = n.maxComputeInvocationsPerWorkgroup;
+    l.maxComputeWorkgroupSizeX = n.maxComputeWorkgroupSizeX;
+    l.maxComputeWorkgroupSizeY = n.maxComputeWorkgroupSizeY;
+    l.maxComputeWorkgroupSizeZ = n.maxComputeWorkgroupSizeZ;
+    l.maxComputeWorkgroupsPerDimension = n.maxComputeWorkgroupsPerDimension;
+    l.maxImmediateSize = n.maxImmediateSize;
+    return l;
+}
+
+fn uint32 asked32(uint32 want, uint32 standard) { return want == standard ? LIMIT_U32_UNDEFINED : want; }
+fn uint64 asked64(uint64 want, uint64 standard) { return want == standard ? LIMIT_U64_UNDEFINED : want; }
+
+// `want` as a request: each limit left at WebGPU's default is undefined, so the implementation's own default stands,
+// and each one raised is asked for.
+fn WGPULimits required(const ref Limits want) {
+    Limits d = Limits.defaults();
+    WGPULimits n = WGPULimits.zero();
+    n.maxTextureDimension1D = asked32(want: want.maxTextureDimension1D, standard: d.maxTextureDimension1D);
+    n.maxTextureDimension2D = asked32(want: want.maxTextureDimension2D, standard: d.maxTextureDimension2D);
+    n.maxTextureDimension3D = asked32(want: want.maxTextureDimension3D, standard: d.maxTextureDimension3D);
+    n.maxTextureArrayLayers = asked32(want: want.maxTextureArrayLayers, standard: d.maxTextureArrayLayers);
+    n.maxBindGroups = asked32(want: want.maxBindGroups, standard: d.maxBindGroups);
+    n.maxBindGroupsPlusVertexBuffers = asked32(want: want.maxBindGroupsPlusVertexBuffers, standard: d.maxBindGroupsPlusVertexBuffers);
+    n.maxBindingsPerBindGroup = asked32(want: want.maxBindingsPerBindGroup, standard: d.maxBindingsPerBindGroup);
+    n.maxDynamicUniformBuffersPerPipelineLayout = asked32(want: want.maxDynamicUniformBuffersPerPipelineLayout, standard: d.maxDynamicUniformBuffersPerPipelineLayout);
+    n.maxDynamicStorageBuffersPerPipelineLayout = asked32(want: want.maxDynamicStorageBuffersPerPipelineLayout, standard: d.maxDynamicStorageBuffersPerPipelineLayout);
+    n.maxSampledTexturesPerShaderStage = asked32(want: want.maxSampledTexturesPerShaderStage, standard: d.maxSampledTexturesPerShaderStage);
+    n.maxSamplersPerShaderStage = asked32(want: want.maxSamplersPerShaderStage, standard: d.maxSamplersPerShaderStage);
+    n.maxStorageBuffersPerShaderStage = asked32(want: want.maxStorageBuffersPerShaderStage, standard: d.maxStorageBuffersPerShaderStage);
+    n.maxStorageTexturesPerShaderStage = asked32(want: want.maxStorageTexturesPerShaderStage, standard: d.maxStorageTexturesPerShaderStage);
+    n.maxUniformBuffersPerShaderStage = asked32(want: want.maxUniformBuffersPerShaderStage, standard: d.maxUniformBuffersPerShaderStage);
+    n.maxUniformBufferBindingSize = asked64(want: want.maxUniformBufferBindingSize, standard: d.maxUniformBufferBindingSize);
+    n.maxStorageBufferBindingSize = asked64(want: want.maxStorageBufferBindingSize, standard: d.maxStorageBufferBindingSize);
+    n.minUniformBufferOffsetAlignment = asked32(want: want.minUniformBufferOffsetAlignment, standard: d.minUniformBufferOffsetAlignment);
+    n.minStorageBufferOffsetAlignment = asked32(want: want.minStorageBufferOffsetAlignment, standard: d.minStorageBufferOffsetAlignment);
+    n.maxVertexBuffers = asked32(want: want.maxVertexBuffers, standard: d.maxVertexBuffers);
+    n.maxBufferSize = asked64(want: want.maxBufferSize, standard: d.maxBufferSize);
+    n.maxVertexAttributes = asked32(want: want.maxVertexAttributes, standard: d.maxVertexAttributes);
+    n.maxVertexBufferArrayStride = asked32(want: want.maxVertexBufferArrayStride, standard: d.maxVertexBufferArrayStride);
+    n.maxInterStageShaderVariables = asked32(want: want.maxInterStageShaderVariables, standard: d.maxInterStageShaderVariables);
+    n.maxColorAttachments = asked32(want: want.maxColorAttachments, standard: d.maxColorAttachments);
+    n.maxColorAttachmentBytesPerSample = asked32(want: want.maxColorAttachmentBytesPerSample, standard: d.maxColorAttachmentBytesPerSample);
+    n.maxComputeWorkgroupStorageSize = asked32(want: want.maxComputeWorkgroupStorageSize, standard: d.maxComputeWorkgroupStorageSize);
+    n.maxComputeInvocationsPerWorkgroup = asked32(want: want.maxComputeInvocationsPerWorkgroup, standard: d.maxComputeInvocationsPerWorkgroup);
+    n.maxComputeWorkgroupSizeX = asked32(want: want.maxComputeWorkgroupSizeX, standard: d.maxComputeWorkgroupSizeX);
+    n.maxComputeWorkgroupSizeY = asked32(want: want.maxComputeWorkgroupSizeY, standard: d.maxComputeWorkgroupSizeY);
+    n.maxComputeWorkgroupSizeZ = asked32(want: want.maxComputeWorkgroupSizeZ, standard: d.maxComputeWorkgroupSizeZ);
+    n.maxComputeWorkgroupsPerDimension = asked32(want: want.maxComputeWorkgroupsPerDimension, standard: d.maxComputeWorkgroupsPerDimension);
+    n.maxImmediateSize = asked32(want: want.maxImmediateSize, standard: d.maxImmediateSize);
+    return n;
+}
+
+// What a device is asked for (WebGPU's `GPUDeviceDescriptor`, its `requiredLimits` and `requiredFeatures`): WebGPU's
+// default limits and no feature, unless a program raises a limit or adds a feature. A request its adapter cannot meet
+// fails, in the implementation's words.
+type value DeviceOptions {
+    public Limits limits = Limits.defaults();
+    public FeatureSet features = FeatureSet.none();
+
+    public ctor defaults() { }
 }
 
 // A texel format. The set grows as the package does; `Texture.adopt` takes any.
@@ -172,44 +477,182 @@ type resource Instance implements Copyable<This>(bare: give) {
     public unsafe ctor copy(ref Instance source) { this.handle = source.handle; instanceAddRef(instance: this.handle); }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
-    // Ask for an adapter, then a device on it with WebGPU's default limits; `poll()` the request until it settles.
-    public unsafe fn DeviceRequest requestDevice(PowerPreference power) {
-        return DeviceRequest.start(instance: this.handle, compatible: null, power: powerValue(p: power));
-    }
-
-    // The same, for an adapter that can present to `surface`.
-    public unsafe fn DeviceRequest requestDeviceFor(const ref Surface surface, PowerPreference power) {
-        return DeviceRequest.start(instance: this.handle, compatible: surface.raw(), power: powerValue(p: power));
+    // Ask for an adapter (WebGPU's first step); `poll()` the request until it settles.
+    public unsafe fn AdapterRequest requestAdapter(const ref AdapterOptions options) {
+        return AdapterRequest.start(instance: this.handle, compatible: options.surface, power: options.power);
     }
 
     unsafe ~Instance() { if (this.handle != null) { instanceRelease(instance: this.handle); } }
 }
 
+// What an adapter is asked for (WebGPU's `GPURequestAdapterOptions`): a power preference, and the surface it must
+// present to when there is one, on which it holds a reference.
+type resource AdapterOptions {
+    int32 power;
+    UnsafePtr surface;   // null for an adapter that need present nowhere
+
+    friend Instance::requestAdapter[power, surface];
+
+    public unsafe ctor make(PowerPreference power) { this.power = powerValue(p: power); this.surface = null; }
+    public unsafe ctor forSurface(const ref Surface surface, PowerPreference power) {
+        this.power = powerValue(p: power);
+        this.surface = surface.raw();
+        surfaceAddRef(surface: this.surface);
+    }
+
+    unsafe ~AdapterOptions() { if (this.surface != null) { surfaceRelease(surface: this.surface); } }
+}
+
+type enum AdapterStatus { Pending, Ready(Adapter adapter), Failed(GpuError error) }
+
+// An adapter on its way. Dropping it while it is still pending is safe: the seam frees it when its callback fires.
+type resource AdapterRequest {
+    UnsafePtr slot;
+    UnsafePtr instance;   // the instance it was asked of, alive while the slot is; the adapter keeps a reference
+
+    friend Instance::requestAdapter[start];
+
+    unsafe ctor start(UnsafePtr instance, UnsafePtr compatible, int32 power) {
+        this.instance = instance;
+        this.slot = requestAdapter(instance: instance, compatible: compatible, power: power);
+    }
+
+    // Pending until the adapter has answered; then Ready once, handing the adapter over, or Failed with the
+    // implementation's words. A poll after Ready is Failed(Taken).
+    public unsafe const fn AdapterStatus poll() {
+        if (this.slot == null) { return AdapterStatus::Failed(error: GpuError::Refused(words: "out of memory for the request")); }
+        int32 s = adapterRequestPoll(request: this.slot);
+        if (s == SEAM_PENDING) { return AdapterStatus::Pending; }
+        if (s == SEAM_FAILED) {
+            InlineArray<uint8>#(512) buf = [0; 512];
+            int32 n = adapterRequestMessage(request: this.slot, dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
+            string words = textOf(buf: buf, length: n);
+            return AdapterStatus::Failed(error: GpuError::Refused(words: give words));
+        }
+        UnsafePtr adapter = adapterRequestTake(request: this.slot);
+        if (adapter == null) { return AdapterStatus::Failed(error: GpuError::Taken); }
+        return AdapterStatus::Ready(adapter: Adapter.of(raw: adapter, instance: this.instance));
+    }
+
+    unsafe ~AdapterRequest() { adapterRequestDrop(request: this.slot); }
+}
+
+// What an adapter is (WebGPU's `GPUAdapterInfo`). A browser may leave the names empty, so a program must not depend
+// on them.
+type resource AdapterInfo {
+    string vendorName = "";
+    string architectureName = "";
+    string deviceName = "";
+    string descriptionText = "";
+    Backend api = Backend::Undefined;
+    AdapterKind sort = AdapterKind::Unknown;
+    uint32 vendorNumber = 0;
+    uint32 deviceNumber = 0;
+
+    friend Adapter::info[of];
+
+    unsafe ctor of(UnsafePtr adapter) {
+        InlineArray<uint8>#(512) buf = [0; 512];
+        int32 n = adapterInfoText(adapter: adapter, which: 0, dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
+        this.vendorName = textOf(buf: buf, length: n);
+        n = adapterInfoText(adapter: adapter, which: 1, dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
+        this.architectureName = textOf(buf: buf, length: n);
+        n = adapterInfoText(adapter: adapter, which: 2, dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
+        this.deviceName = textOf(buf: buf, length: n);
+        n = adapterInfoText(adapter: adapter, which: 3, dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
+        this.descriptionText = textOf(buf: buf, length: n);
+        int32 backend = 0;
+        int32 kind = 0;
+        uint32 vendorId = 0;
+        uint32 deviceId = 0;
+        adapterInfoNumbers(adapter: adapter, backend: addr(of: backend), kind: addr(of: kind), vendorId: addr(of: vendorId),
+                           deviceId: addr(of: deviceId));
+        this.api = backendOf(v: backend);
+        this.sort = kindOf(v: kind);
+        this.vendorNumber = vendorId;
+        this.deviceNumber = deviceId;
+    }
+
+    public const fn string vendor() { return copy this.vendorName; }
+    public const fn string architecture() { return copy this.architectureName; }
+    public const fn string device() { return copy this.deviceName; }
+    public const fn string description() { return copy this.descriptionText; }
+    public const fn Backend backend() { return this.api; }
+    public const fn AdapterKind kind() { return this.sort; }
+    public const fn uint32 vendorId() { return this.vendorNumber; }
+    public const fn uint32 deviceId() { return this.deviceNumber; }
+}
+
 type resource Adapter implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    UnsafePtr instance;   // the instance it came from, whose events its requests process; null when adopted
 
-    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    public unsafe ctor copy(ref Adapter source) { this.handle = source.handle; adapterAddRef(adapter: this.handle); }
+    friend AdapterRequest::poll[of];
+
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; this.instance = null; }
+    unsafe ctor of(UnsafePtr raw, UnsafePtr instance) {
+        this.handle = raw;
+        this.instance = instance;
+        if (instance != null) { instanceAddRef(instance: instance); }
+    }
+    public unsafe ctor copy(ref Adapter source) {
+        this.handle = source.handle;
+        this.instance = source.instance;
+        adapterAddRef(adapter: this.handle);
+        if (this.instance != null) { instanceAddRef(instance: this.instance); }
+    }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
-    unsafe ~Adapter() { if (this.handle != null) { adapterRelease(adapter: this.handle); } }
+    // What it is: its names, its backend and its kind.
+    public unsafe const fn AdapterInfo info() { return AdapterInfo.of(adapter: this.handle); }
+
+    // The most it can give a device.
+    public unsafe const fn Limits limits() {
+        WGPULimits n = WGPULimits.zero();
+        int32 status = adapterGetLimits(adapter: this.handle, limits: cast<UnsafePtr>(addr(of: n)));
+        return limitsOf(n: n);
+    }
+
+    // The features it can give a device.
+    public unsafe const fn FeatureSet features() {
+        InlineArray<int32>#(64) names = [0; 64];
+        int32 n = adapterFeatureNames(adapter: this.handle, dst: addr(of: names[0]), capacity: FEATURES_MAX);
+        return featuresFrom(names: names, count: n);
+    }
+
+    // Ask for a device with `options` (WebGPU's second step); `poll()` the request until it settles.
+    public unsafe fn DeviceRequest requestDevice(const ref DeviceOptions options) {
+        return DeviceRequest.start(instance: this.instance, adapter: this.handle, options: options);
+    }
+
+    unsafe ~Adapter() {
+        if (this.handle != null) { adapterRelease(adapter: this.handle); }
+        if (this.instance != null) { instanceRelease(instance: this.instance); }
+    }
 }
 
 type enum DeviceStatus { Pending, Ready(Device device, Queue queue), Failed(GpuError error) }
 
-// A device on its way up. Dropping it while it is still pending is safe: the seam frees it when its callback fires.
+// A device on its way. Dropping it while it is still pending is safe: the seam frees it when its callback fires.
 type resource DeviceRequest {
     UnsafePtr slot;
 
-    friend Instance::requestDevice[start];
-    friend Instance::requestDeviceFor[start];
+    friend Adapter::requestDevice[start];
 
-    unsafe ctor start(UnsafePtr instance, UnsafePtr compatible, int32 power) {
-        this.slot = requestDevice(instance: instance, compatible: compatible, power: power);
+    unsafe ctor start(UnsafePtr instance, UnsafePtr adapter, const ref DeviceOptions options) {
+        WGPULimits limits = required(want: options.limits);
+        InlineArray<int32>#(64) names = [0; 64];
+        int32 count = 0;
+        DynamicArray<Feature> all = everyFeature();
+        foreach (Feature f in all.iterator()) {
+            if (options.features.has(feature: f)) { names[cast<isize>(count)] = featureValue(f: f); count = count + 1; }
+        }
+        this.slot = requestDeviceOf(instance: instance, adapter: adapter, limits: cast<UnsafePtr>(addr(of: limits)),
+                                         features: addr(of: names[0]), featureCount: count);
     }
 
-    // Pending until the adapter and the device have answered; then Ready once, handing the device and its queue over,
-    // or Failed with the implementation's words. A poll after Ready is Failed(Taken).
+    // Pending until the device has answered; then Ready once, handing the device and its queue over, or Failed with
+    // the implementation's words. A poll after Ready is Failed(Taken).
     public unsafe const fn DeviceStatus poll() {
         if (this.slot == null) { return DeviceStatus::Failed(error: GpuError::Refused(words: "out of memory for the request")); }
         int32 s = deviceRequestPoll(request: this.slot);
@@ -220,8 +663,6 @@ type resource DeviceRequest {
             string words = textOf(buf: buf, length: n);
             return DeviceStatus::Failed(error: GpuError::Refused(words: give words));
         }
-        UnsafePtr adapter = deviceRequestTakeAdapter(request: this.slot);
-        if (adapter != null) { adapterRelease(adapter: adapter); }   // the device keeps what it needs of it
         UnsafePtr device = deviceRequestTakeDevice(request: this.slot);
         if (device == null) { return DeviceStatus::Failed(error: GpuError::Taken); }
         UnsafePtr queue = deviceGetQueue(device: device);
@@ -237,6 +678,20 @@ type resource Device implements Copyable<This>(bare: give) {
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
     public unsafe ctor copy(ref Device source) { this.handle = source.handle; deviceAddRef(device: this.handle); }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    // The limits it was given: WebGPU's defaults, unless its request raised them.
+    public unsafe const fn Limits limits() {
+        WGPULimits n = WGPULimits.zero();
+        int32 status = deviceGetLimits(device: this.handle, limits: cast<UnsafePtr>(addr(of: n)));
+        return limitsOf(n: n);
+    }
+
+    // The features it was given.
+    public unsafe const fn FeatureSet features() {
+        InlineArray<int32>#(64) names = [0; 64];
+        int32 n = deviceFeatureNames(device: this.handle, dst: addr(of: names[0]), capacity: FEATURES_MAX);
+        return featuresFrom(names: names, count: n);
+    }
 
     // A buffer of `size` bytes for `usage` (BufferUsage flags OR'd together).
     public unsafe fn Buffer createBuffer(uint64 size, uint64 usage) {

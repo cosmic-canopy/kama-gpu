@@ -74,74 +74,41 @@ int32_t gpuseam_last_error(uint8_t *dst, int32_t capacity) {
     return n;
 }
 
-// ---- a device on its way up ------------------------------------------------------------------------------------------
+// ---- an adapter on its way ----------------------------------------------------------------------------------------
 
-struct gpuseam_device_request {
+struct gpuseam_adapter_request {
     atomic_int state;
     WGPUInstance instance;   // a reference held while the slot lives, for its events
     WGPUAdapter adapter;
-    WGPUDevice device;
     char message[GPUSEAM_MESSAGE_BYTES];
     int32_t message_length;
 };
 
-static void request_free(gpuseam_device_request *r) {
-    if (r->device != NULL) wgpuDeviceRelease(r->device);
+static void adapter_request_free(gpuseam_adapter_request *r) {
     if (r->adapter != NULL) wgpuAdapterRelease(r->adapter);
     if (r->instance != NULL) wgpuInstanceRelease(r->instance);
     free(r);
 }
 
-// Publish `outcome`, unless the owner has gone: then the slot is the callback's to free.
-static void request_settle(gpuseam_device_request *r, int outcome) {
-    int expected = GPUSEAM_PENDING;
-    if (!atomic_compare_exchange_strong_explicit(&r->state, &expected, outcome, memory_order_acq_rel, memory_order_acquire)) {
-        request_free(r);   // ABANDONED
-    }
-}
-
-static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView message, void *u1, void *u2) {
-    (void)u2;
-    gpuseam_device_request *r = (gpuseam_device_request *)u1;
-    if (status != WGPURequestDeviceStatus_Success || device == NULL) {
-        r->message_length = keep_message(message, r->message);
-        if (r->message_length == 0) r->message_length = keep_text("the adapter gave no device", r->message);
-        request_settle(r, GPUSEAM_FAILED);
-        return;
-    }
-    r->device = device;
-    request_settle(r, GPUSEAM_READY);
-}
-
 static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView message, void *u1, void *u2) {
     (void)u2;
-    gpuseam_device_request *r = (gpuseam_device_request *)u1;
+    gpuseam_adapter_request *r = (gpuseam_adapter_request *)u1;
+    int outcome = GPUSEAM_READY;
     if (status != WGPURequestAdapterStatus_Success || adapter == NULL) {
         r->message_length = keep_message(message, r->message);
         if (r->message_length == 0) r->message_length = keep_text("WebGPU offered no adapter", r->message);
-        request_settle(r, GPUSEAM_FAILED);
-        return;
+        outcome = GPUSEAM_FAILED;
+    } else {
+        r->adapter = adapter;
     }
-    r->adapter = adapter;
-    if (atomic_load_explicit(&r->state, memory_order_acquire) == GPUSEAM_ABANDONED) {
-        request_free(r);
-        return;
+    int expected = GPUSEAM_PENDING;
+    if (!atomic_compare_exchange_strong_explicit(&r->state, &expected, outcome, memory_order_acq_rel, memory_order_acquire)) {
+        adapter_request_free(r);   // ABANDONED
     }
-    WGPUDeviceDescriptor dd;
-    memset(&dd, 0, sizeof dd);
-    dd.deviceLostCallbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
-    dd.deviceLostCallbackInfo.callback = on_device_lost;
-    dd.uncapturedErrorCallbackInfo.callback = on_uncaptured_error;
-    WGPURequestDeviceCallbackInfo ci;
-    memset(&ci, 0, sizeof ci);
-    ci.mode = WGPUCallbackMode_AllowSpontaneous;
-    ci.callback = on_device;
-    ci.userdata1 = r;
-    wgpuAdapterRequestDevice(adapter, &dd, ci);
 }
 
-gpuseam_device_request *gpuseam_request_device(WGPUInstance instance, WGPUSurface compatible, int32_t power) {
-    gpuseam_device_request *r = (gpuseam_device_request *)calloc(1, sizeof *r);
+gpuseam_adapter_request *gpuseam_request_adapter(WGPUInstance instance, WGPUSurface compatible, int32_t power) {
+    gpuseam_adapter_request *r = (gpuseam_adapter_request *)calloc(1, sizeof *r);
     if (r == NULL) return NULL;
     atomic_init(&r->state, GPUSEAM_PENDING);
     wgpuInstanceAddRef(instance);
@@ -159,7 +126,7 @@ gpuseam_device_request *gpuseam_request_device(WGPUInstance instance, WGPUSurfac
     return r;
 }
 
-int32_t gpuseam_device_request_poll(gpuseam_device_request *r) {
+int32_t gpuseam_adapter_request_poll(gpuseam_adapter_request *r) {
     int state = atomic_load_explicit(&r->state, memory_order_acquire);
     if (state == GPUSEAM_PENDING) {
         wgpuInstanceProcessEvents(r->instance);
@@ -168,11 +135,146 @@ int32_t gpuseam_device_request_poll(gpuseam_device_request *r) {
     return (int32_t)state;
 }
 
-WGPUAdapter gpuseam_device_request_take_adapter(gpuseam_device_request *r) {
+WGPUAdapter gpuseam_adapter_request_take(gpuseam_adapter_request *r) {
     if (atomic_load_explicit(&r->state, memory_order_acquire) != GPUSEAM_READY) return NULL;
     WGPUAdapter a = r->adapter;
     r->adapter = NULL;
     return a;
+}
+
+int32_t gpuseam_adapter_request_message(gpuseam_adapter_request *r, uint8_t *dst, int32_t capacity) {
+    if (atomic_load_explicit(&r->state, memory_order_acquire) != GPUSEAM_FAILED) return 0;
+    return copy_out(r->message, r->message_length, dst, capacity);
+}
+
+void gpuseam_adapter_request_drop(gpuseam_adapter_request *r) {
+    if (r == NULL) return;
+    int expected = GPUSEAM_PENDING;
+    if (atomic_compare_exchange_strong_explicit(&r->state, &expected, GPUSEAM_ABANDONED, memory_order_acq_rel, memory_order_acquire)) {
+        return;   // a callback is still owed, and frees the slot when it fires
+    }
+    adapter_request_free(r);
+}
+
+// ---- what an adapter answers -----------------------------------------------------------------------------------------
+
+int32_t gpuseam_adapter_info_text(WGPUAdapter adapter, int32_t which, uint8_t *dst, int32_t capacity) {
+    WGPUAdapterInfo info;
+    memset(&info, 0, sizeof info);
+    if (wgpuAdapterGetInfo(adapter, &info) != WGPUStatus_Success) return 0;
+    WGPUStringView v = which == 0 ? info.vendor : which == 1 ? info.architecture : which == 2 ? info.device : info.description;
+    char kept[GPUSEAM_MESSAGE_BYTES];
+    int32_t n = keep_message(v, kept);
+    wgpuAdapterInfoFreeMembers(info);
+    return copy_out(kept, n, dst, capacity);
+}
+
+void gpuseam_adapter_info_numbers(WGPUAdapter adapter, int32_t *backend, int32_t *kind, uint32_t *vendor_id,
+                                  uint32_t *device_id) {
+    WGPUAdapterInfo info;
+    memset(&info, 0, sizeof info);
+    *backend = 0;
+    *kind = 0;
+    *vendor_id = 0;
+    *device_id = 0;
+    if (wgpuAdapterGetInfo(adapter, &info) != WGPUStatus_Success) return;
+    *backend = (int32_t)info.backendType;
+    *kind = (int32_t)info.adapterType;
+    *vendor_id = info.vendorID;
+    *device_id = info.deviceID;
+    wgpuAdapterInfoFreeMembers(info);
+}
+
+static int32_t copy_features(WGPUSupportedFeatures *f, int32_t *dst, int32_t capacity) {
+    int32_t n = (int32_t)f->featureCount;
+    for (int32_t i = 0; i < n && i < capacity; i++) dst[i] = (int32_t)f->features[i];
+    wgpuSupportedFeaturesFreeMembers(*f);
+    return n;
+}
+
+int32_t gpuseam_adapter_features(WGPUAdapter adapter, int32_t *dst, int32_t capacity) {
+    WGPUSupportedFeatures f;
+    memset(&f, 0, sizeof f);
+    wgpuAdapterGetFeatures(adapter, &f);
+    return copy_features(&f, dst, capacity);
+}
+
+int32_t gpuseam_device_features(WGPUDevice device, int32_t *dst, int32_t capacity) {
+    WGPUSupportedFeatures f;
+    memset(&f, 0, sizeof f);
+    wgpuDeviceGetFeatures(device, &f);
+    return copy_features(&f, dst, capacity);
+}
+
+// ---- a device on its way ---------------------------------------------------------------------------------------------
+
+struct gpuseam_device_request {
+    atomic_int state;
+    WGPUInstance instance;   // the adapter's instance, for its events, or NULL; a reference held while the slot lives
+    WGPUAdapter adapter;     // a reference held while the slot lives
+    WGPUDevice device;
+    char message[GPUSEAM_MESSAGE_BYTES];
+    int32_t message_length;
+};
+
+static void request_free(gpuseam_device_request *r) {
+    if (r->device != NULL) wgpuDeviceRelease(r->device);
+    if (r->adapter != NULL) wgpuAdapterRelease(r->adapter);
+    if (r->instance != NULL) wgpuInstanceRelease(r->instance);
+    free(r);
+}
+
+static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView message, void *u1, void *u2) {
+    (void)u2;
+    gpuseam_device_request *r = (gpuseam_device_request *)u1;
+    int outcome = GPUSEAM_READY;
+    if (status != WGPURequestDeviceStatus_Success || device == NULL) {
+        r->message_length = keep_message(message, r->message);
+        if (r->message_length == 0) r->message_length = keep_text("the adapter gave no device", r->message);
+        outcome = GPUSEAM_FAILED;
+    } else {
+        r->device = device;
+    }
+    int expected = GPUSEAM_PENDING;
+    if (!atomic_compare_exchange_strong_explicit(&r->state, &expected, outcome, memory_order_acq_rel, memory_order_acquire)) {
+        request_free(r);   // ABANDONED
+    }
+}
+
+gpuseam_device_request *gpuseam_adapter_request_device(WGPUInstance instance, WGPUAdapter adapter,
+                                                       const WGPULimits *limits, const int32_t *features,
+                                                       int32_t feature_count) {
+    gpuseam_device_request *r = (gpuseam_device_request *)calloc(1, sizeof *r);
+    if (r == NULL) return NULL;
+    atomic_init(&r->state, GPUSEAM_PENDING);
+    if (instance != NULL) wgpuInstanceAddRef(instance);
+    r->instance = instance;
+    wgpuAdapterAddRef(adapter);
+    r->adapter = adapter;
+    WGPUDeviceDescriptor dd;
+    memset(&dd, 0, sizeof dd);
+    dd.requiredLimits = limits;
+    dd.requiredFeatureCount = feature_count > 0 ? (size_t)feature_count : 0;
+    dd.requiredFeatures = (const WGPUFeatureName *)features;
+    dd.deviceLostCallbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
+    dd.deviceLostCallbackInfo.callback = on_device_lost;
+    dd.uncapturedErrorCallbackInfo.callback = on_uncaptured_error;
+    WGPURequestDeviceCallbackInfo ci;
+    memset(&ci, 0, sizeof ci);
+    ci.mode = WGPUCallbackMode_AllowSpontaneous;
+    ci.callback = on_device;
+    ci.userdata1 = r;
+    wgpuAdapterRequestDevice(adapter, &dd, ci);
+    return r;
+}
+
+int32_t gpuseam_device_request_poll(gpuseam_device_request *r) {
+    int state = atomic_load_explicit(&r->state, memory_order_acquire);
+    if (state == GPUSEAM_PENDING && r->instance != NULL) {
+        wgpuInstanceProcessEvents(r->instance);
+        state = atomic_load_explicit(&r->state, memory_order_acquire);
+    }
+    return (int32_t)state;
 }
 
 WGPUDevice gpuseam_device_request_take_device(gpuseam_device_request *r) {
@@ -281,6 +383,9 @@ void gpuseam_device_poll(WGPUDevice device, int32_t wait) {
 
 // A 2D color attachment's depthSlice is WGPU_DEPTH_SLICE_UNDEFINED, a #define the generated bindings never see.
 _Static_assert(WGPU_DEPTH_SLICE_UNDEFINED == 0xFFFFFFFFu, "gpu.kama's DEPTH_SLICE_UNDEFINED");
+// A limit a request leaves to WebGPU's default is WGPU_LIMIT_U32_UNDEFINED or _U64_UNDEFINED, #defines likewise unseen.
+_Static_assert(WGPU_LIMIT_U32_UNDEFINED == 0xFFFFFFFFu, "gpu.kama's LIMIT_U32_UNDEFINED");
+_Static_assert(WGPU_LIMIT_U64_UNDEFINED == 0xFFFFFFFFFFFFFFFFull, "gpu.kama's LIMIT_U64_UNDEFINED");
 
 // ---- a surface -------------------------------------------------------------------------------------------------------
 

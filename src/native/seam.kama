@@ -3,8 +3,9 @@
 
 export {
     SEAM_PENDING, SEAM_READY, SEAM_FAILED,
-    requestDevice, deviceRequestPoll, deviceRequestTakeAdapter, deviceRequestTakeDevice, deviceRequestMessage,
-    deviceRequestDrop,
+    requestAdapter, adapterRequestPoll, adapterRequestTake, adapterRequestMessage, adapterRequestDrop,
+    adapterInfoText, adapterInfoNumbers, adapterFeatureNames, deviceFeatureNames,
+    requestDeviceOf, deviceRequestPoll, deviceRequestTakeDevice, deviceRequestMessage, deviceRequestDrop,
     mapAsync, mapPoll, mapMessage, mapDrop, mapBytes,
     errorCount, lastError, lostCount, pollDevice,
     SURFACE_OK, SURFACE_OCCLUDED, SURFACE_OUTDATED, SURFACE_LOST, SURFACE_TIMEOUT,
@@ -23,9 +24,19 @@ comptime int32 SURFACE_OUTDATED = 2;
 comptime int32 SURFACE_LOST = 3;
 comptime int32 SURFACE_TIMEOUT = 4;
 
-extern fn UnsafePtr gpuseam_request_device(UnsafePtr instance, UnsafePtr compatible, int32 power);
+extern fn UnsafePtr gpuseam_request_adapter(UnsafePtr instance, UnsafePtr compatible, int32 power);
+extern fn int32 gpuseam_adapter_request_poll(UnsafePtr request);
+extern fn UnsafePtr gpuseam_adapter_request_take(UnsafePtr request);
+extern fn int32 gpuseam_adapter_request_message(UnsafePtr request, UnsafePtr<uint8> dst, int32 capacity);
+extern fn void gpuseam_adapter_request_drop(UnsafePtr request);
+extern fn int32 gpuseam_adapter_info_text(UnsafePtr adapter, int32 which, UnsafePtr<uint8> dst, int32 capacity);
+extern fn void gpuseam_adapter_info_numbers(UnsafePtr adapter, UnsafePtr<int32> backend, UnsafePtr<int32> kind,
+                                            UnsafePtr<uint32> vendor_id, UnsafePtr<uint32> device_id);
+extern fn int32 gpuseam_adapter_features(UnsafePtr adapter, UnsafePtr<int32> dst, int32 capacity);
+extern fn int32 gpuseam_device_features(UnsafePtr device, UnsafePtr<int32> dst, int32 capacity);
+extern fn UnsafePtr gpuseam_adapter_request_device(UnsafePtr instance, UnsafePtr adapter, UnsafePtr limits,
+                                                   UnsafePtr<int32> features, int32 feature_count);
 extern fn int32 gpuseam_device_request_poll(UnsafePtr request);
-extern fn UnsafePtr gpuseam_device_request_take_adapter(UnsafePtr request);
 extern fn UnsafePtr gpuseam_device_request_take_device(UnsafePtr request);
 extern fn int32 gpuseam_device_request_message(UnsafePtr request, UnsafePtr<uint8> dst, int32 capacity);
 extern fn void gpuseam_device_request_drop(UnsafePtr request);
@@ -39,11 +50,34 @@ extern fn int32 gpuseam_last_error(UnsafePtr<uint8> dst, int32 capacity);
 extern fn int64 gpuseam_lost_count();
 extern fn void gpuseam_device_poll(UnsafePtr device, int32 wait);
 
-unsafe fn UnsafePtr requestDevice(UnsafePtr instance, UnsafePtr compatible, int32 power) {
-    return gpuseam_request_device(instance: instance, compatible: compatible, power: power);
+unsafe fn UnsafePtr requestAdapter(UnsafePtr instance, UnsafePtr compatible, int32 power) {
+    return gpuseam_request_adapter(instance: instance, compatible: compatible, power: power);
+}
+unsafe fn int32 adapterRequestPoll(UnsafePtr request) { return gpuseam_adapter_request_poll(request: request); }
+unsafe fn UnsafePtr adapterRequestTake(UnsafePtr request) { return gpuseam_adapter_request_take(request: request); }
+unsafe fn int32 adapterRequestMessage(UnsafePtr request, UnsafePtr<uint8> dst, int32 capacity) {
+    return gpuseam_adapter_request_message(request: request, dst: dst, capacity: capacity);
+}
+unsafe fn void adapterRequestDrop(UnsafePtr request) { gpuseam_adapter_request_drop(request: request); }
+unsafe fn int32 adapterInfoText(UnsafePtr adapter, int32 which, UnsafePtr<uint8> dst, int32 capacity) {
+    return gpuseam_adapter_info_text(adapter: adapter, which: which, dst: dst, capacity: capacity);
+}
+unsafe fn void adapterInfoNumbers(UnsafePtr adapter, UnsafePtr<int32> backend, UnsafePtr<int32> kind,
+                                  UnsafePtr<uint32> vendorId, UnsafePtr<uint32> deviceId) {
+    gpuseam_adapter_info_numbers(adapter: adapter, backend: backend, kind: kind, vendor_id: vendorId, device_id: deviceId);
+}
+unsafe fn int32 adapterFeatureNames(UnsafePtr adapter, UnsafePtr<int32> dst, int32 capacity) {
+    return gpuseam_adapter_features(adapter: adapter, dst: dst, capacity: capacity);
+}
+unsafe fn int32 deviceFeatureNames(UnsafePtr device, UnsafePtr<int32> dst, int32 capacity) {
+    return gpuseam_device_features(device: device, dst: dst, capacity: capacity);
+}
+unsafe fn UnsafePtr requestDeviceOf(UnsafePtr instance, UnsafePtr adapter, UnsafePtr limits,
+                                         UnsafePtr<int32> features, int32 featureCount) {
+    return gpuseam_adapter_request_device(instance: instance, adapter: adapter, limits: limits, features: features,
+                                          feature_count: featureCount);
 }
 unsafe fn int32 deviceRequestPoll(UnsafePtr request) { return gpuseam_device_request_poll(request: request); }
-unsafe fn UnsafePtr deviceRequestTakeAdapter(UnsafePtr request) { return gpuseam_device_request_take_adapter(request: request); }
 unsafe fn UnsafePtr deviceRequestTakeDevice(UnsafePtr request) { return gpuseam_device_request_take_device(request: request); }
 unsafe fn int32 deviceRequestMessage(UnsafePtr request, UnsafePtr<uint8> dst, int32 capacity) {
     return gpuseam_device_request_message(request: request, dst: dst, capacity: capacity);
