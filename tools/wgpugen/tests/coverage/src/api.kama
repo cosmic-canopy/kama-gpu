@@ -1,0 +1,11 @@
+// A fixture for tools/wgpugen's coverage report: the safe API. It imports three of the native module's functions and
+// calls two of them.
+
+import { covfix::native::deviceCreateBuffer, covfix::native::bufferGetSize, covfix::native::requestAdapter };
+
+export { make };
+
+unsafe fn UnsafePtr make(UnsafePtr instance) {
+    UnsafePtr adapter = requestAdapter(instance: instance);
+    return deviceCreateBuffer(device: adapter, descriptor: null);
+}

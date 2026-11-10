@@ -18,6 +18,9 @@
 // The optional third output is the safe API's `TextureFormat` (src/formats.gen.kama), every format both headers name,
 // written from the same headers in the same run so the enum and the bindings cannot disagree.
 //
+// `wgpugen --coverage …` writes COVERAGE.md instead: which of the headers' functions the safe API calls, from kama's
+// answer to where each binding and seam wrapper is referenced (§ coverage, below; tools/check-bindings.sh runs it).
+//
 // Ported from cosmic-forge@render/tools/wgpugen (itself from the-mallow-man@45f15d4 and friendly-fire-department@f8a4265),
 // whose parser, type map and merge it keeps. What changed here: wgpu.h, wgpu-native's own extensions, is read as part
 // of the native leg. Its declarations are gated native-only like any other the web's header lacks; a function both
@@ -53,6 +56,9 @@ import {
     std::io::IoError,
     std::collections::DynamicArray,
     std::digest::sha256::Sha256,
+    std::memory::Owned,
+    std::serialization::text::json::JsonValue,
+    std::serialization::text::json::deserializeJsonBuffer,
 };
 
 // The runtime string constructor; must match std::io::streams' declaration exactly (one C symbol).
@@ -1179,6 +1185,548 @@ unsafe fn void emitFormats(ref DynamicArray<uint8> dst, ref Report report, const
     emit(dst: dst, s: "}");
 }
 
+// ---- coverage ---------------------------------------------------------------------------------
+//
+// `wgpugen --coverage <wgpu-native webgpu.h> <wgpu-native wgpu.h> <emdawnwebgpu webgpu.h> <bindings refs .json>
+// <seam refs .json> <gpuseam.c> <output .md>` writes COVERAGE.md: which of the headers' functions the safe API calls.
+// The two answers are `kama query --refs`, asked by tools/check-bindings.sh for every function src/native/webgpu.gen.kama
+// and src/native/seam.kama declare. A function is called when its binding has a reference outside src/native/ that is
+// not an import entry, or when the seam's C reaches it from a seam wrapper the safe API calls that way. The C is read
+// as text with its comments stripped: a function is a top-level definition, and it reaches every WebGPU function it
+// names and, through them, every seam function it names, a callback it registers included. Both legs' bodies count.
+
+fn bool isIdentByte(uint8 c) {
+    return (c >= 48ui8 && c <= 57ui8) || (c >= 65ui8 && c <= 90ui8) || (c >= 97ui8 && c <= 122ui8) || c == 95ui8;
+}
+
+// Every identifier in `text`, each once, in the order first met.
+unsafe fn DynamicArray<string> identifiersIn(const ref string text) {
+    DynamicArray<string> acc = DynamicArray.empty();
+    isize n = text.length();
+    isize i = 0;
+    while (i < n) {
+        if (!isIdentByte(c: text[i])) { i = i + 1; continue; }
+        isize start = i;
+        while (i < n && isIdentByte(c: text[i])) { i = i + 1; }
+        string w = text.substring(start: start, end: i);
+        addUnique(xs: acc, name: w);
+    }
+    return acc;
+}
+
+// A WebGPU function's name: `wgpu` and a capital (`wgpuDeviceCreateBuffer`), never a type (`WGPUDevice`).
+fn bool isWgpuFunction(const ref string w) {
+    return w.length() > 4 && w.startsWith(prefix: "wgpu") && w[4] >= 65ui8 && w[4] <= 90ui8;
+}
+
+// The text up to and including the last '/', or "" without one.
+unsafe fn string dirOfPath(const ref string path) {
+    isize i = path.length() - 1;
+    while (i >= 0) {
+        if (path[i] == 47ui8) { return path.substring(start: 0, end: i + 1); }
+        i = i - 1;
+    }
+    return "";
+}
+
+// The line an ask names: `--refs 2465:20` -> 2465, or 0.
+fn isize askedLine(const ref string ask) {
+    isize n = 0;
+    bool seen = false;
+    isize i = 0;
+    while (i < ask.length()) {
+        uint8 c = ask[i];
+        if (c >= 48ui8 && c <= 57ui8) {
+            n = n * 10 + cast<isize>(c - 48ui8);
+            seen = true;
+        } else if (seen) {
+            break;
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+// The last line of a kama file's `import { … };` block (1-based), or 0 without one. A file's imports come first, so a
+// reference at or above it is an import entry, not a call.
+fn isize importEndOf(const ref DynamicArray<string> lines) {
+    bool inside = false;
+    isize i = 0;
+    while (i < lines.length()) {
+        string t = lines[i].trim();
+        if (!inside && t.startsWith(prefix: "import {")) { inside = true; }
+        if (inside && t.endsWith(suffix: "};")) { return i + 1; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+// The source files an answer names, each read once, as lines with their line endings cut and the empty ones kept.
+type resource Sources {
+    DynamicArray<string> paths = DynamicArray.empty();
+    DynamicArray<DynamicArray<string>> texts = DynamicArray.empty();
+
+    public ctor make() { }
+
+    unsafe fn isize indexOf(const ref string path) {
+        isize i = 0;
+        while (i < this.paths.length()) {
+            if (this.paths[i] == path) { return i; }
+            i = i + 1;
+        }
+        DynamicArray<string> lines = DynamicArray.empty();
+        Result<DynamicArray<uint8>, IoError> r = readFile(path: path);
+        match (give r) {
+            case Ok(value: raw): {
+                string text = bytesToString(b: raw);
+                foreach (string piece in text.split(separator: "\n")) { lines.add(item: piece.replace(old: "\r", with: "")); }
+            }
+            case Err(error: e): { }
+        };
+        this.paths.add(item: copy path);
+        this.texts.add(item: give lines);
+        return this.paths.length() - 1;
+    }
+
+    public unsafe fn isize importEnd(const ref string path) {
+        isize f = this.indexOf(path: path);
+        return importEndOf(lines: this.texts[f]);
+    }
+
+    // The declaration at `line` (1-based) of `path`: its lines up to the one that closes its body.
+    public unsafe fn string declaration(const ref string path, isize line) {
+        isize f = this.indexOf(path: path);
+        isize last = this.texts[f].length();
+        string acc = "";
+        isize i = line - 1;
+        while (i >= 0 && i < last && i < line + 20) {
+            string l = copy this.texts[f][i];
+            acc = "${acc}${l}\n";
+            if (l.trim().endsWith(suffix: "}")) { break; }
+            i = i + 1;
+        }
+        return acc;
+    }
+}
+
+fn string jsonText(const ref JsonValue doc, const ref string key) {
+    Optional<JsonValue> v = doc.get(key: key);
+    match (v) {
+        case Some(value: j): { match (j) { case String(value: s): { return copy s; } case _: { return ""; } }; }
+        case None: { return ""; }
+    };
+}
+
+fn int64 jsonNumber(const ref JsonValue doc, const ref string key) {
+    Optional<JsonValue> v = doc.get(key: key);
+    match (v) {
+        case Some(value: j): { Optional<int64> n = j.asInt64(); return match (n) { case Some(value: x): x; case None: 0; }; }
+        case None: { return 0; }
+    };
+}
+
+// One answer of kama's: when the declaration it was asked about is referenced outside its own folder, past the
+// referring file's imports, the declaration's text is added to `called`. False, with `why`, when it names no place.
+unsafe fn bool takeAnswer(const ref JsonValue answer, ref Sources sources, ref DynamicArray<string> called, ref string why) {
+    string file = jsonText(doc: answer, key: "file");
+    string ask = jsonText(doc: answer, key: "ask");
+    isize line = askedLine(ask: ask);
+    if (file.isEmpty() || line <= 0) {
+        why = "an answer names no file or line (`${ask}`)";
+        return false;
+    }
+    string home = dirOfPath(path: file);
+    bool isCalled = false;
+    Optional<JsonValue> refs = answer.get(key: "results");
+    match (refs) {
+        case Some(value: rs): {
+            match (rs) {
+                case Array(items: xs): {
+                    foreach (const ref JsonValue x in xs.iterConst()) {
+                        string uri = jsonText(doc: x, key: "uri");
+                        isize at = cast<isize>(jsonNumber(doc: x, key: "line"));
+                        if (uri.isEmpty() || uri.startsWith(prefix: home)) { continue; }
+                        if (at <= sources.importEnd(path: uri)) { continue; }
+                        isCalled = true;
+                    }
+                }
+                case _: { }
+            };
+        }
+        case None: { }
+    };
+    if (isCalled) { called.add(item: sources.declaration(path: file, line: line)); }
+    return true;
+}
+
+// The declarations `refsPath` (one `kama query --refs … --json` answer, or a batch of them) shows the safe API calls,
+// each as its text. None, with `why`, when the answer cannot be read.
+unsafe fn Optional<DynamicArray<string>> calledDeclarations(const ref string refsPath, ref Sources sources, ref string why) {
+    Result<DynamicArray<uint8>, IoError> r = readFile(path: refsPath);
+    DynamicArray<uint8> raw = match (give r) {
+        case Ok(value: b): give b;
+        case Err(error: e): { why = "cannot read ${refsPath}"; return Optional::None; }
+    };
+    string text = bytesToString(b: raw);
+    Result<JsonValue, Owned<Error>> parsed = deserializeJsonBuffer::<JsonValue>(src: give text, strict: false);
+    JsonValue doc = match (give parsed) {
+        case Ok(value: d): give d;
+        case Err(error: e): { string m = e.message(); why = "${refsPath} is not JSON: ${m}"; return Optional::None; }
+    };
+    DynamicArray<string> called = DynamicArray.empty();
+    if (jsonText(doc: doc, key: "mode") != "batch") {
+        if (!takeAnswer(answer: doc, sources: sources, called: called, why: why)) { return Optional::None; }
+        return Optional::Some(value: give called);
+    }
+    Optional<JsonValue> all = doc.get(key: "results");
+    match (all) {
+        case Some(value: rs): {
+            match (rs) {
+                case Array(items: xs): {
+                    foreach (const ref JsonValue x in xs.iterConst()) {
+                        if (!takeAnswer(answer: x, sources: sources, called: called, why: why)) { return Optional::None; }
+                    }
+                }
+                case _: { why = "${refsPath}: a batch whose results are not a list"; return Optional::None; }
+            };
+        }
+        case None: { why = "${refsPath}: a batch with no results"; return Optional::None; }
+    };
+    return Optional::Some(value: give called);
+}
+
+// The name a C definition's first line declares: the identifier before its first '('.
+unsafe fn string nameBeforeParen(const ref string line) {
+    Optional<isize> at = line.find(substring: "(");
+    isize end = match (at) { case Some(value: p): p; case None: 0; };
+    isize start = end;
+    while (start > 0 && isIdentByte(c: line[start - 1])) { start = start - 1; }
+    return line.substring(start: start, end: end);
+}
+
+// The seam's C functions into `into`, each its name and its body, comments stripped: a definition starts at column 0
+// and reaches a `{` before a `;`, and ends at a line that is `}`. A function defined once per leg keeps both bodies.
+unsafe fn bool readSeamC(const ref string path, ref Decls into) {
+    Result<DynamicArray<uint8>, IoError> r = readFile(path: path);
+    DynamicArray<uint8> raw = match (give r) {
+        case Ok(value: b): give b;
+        case Err(error: e): { return false; }
+    };
+    string plain = bytesToString(b: raw);
+    string text = stripComments(src: plain);
+    DynamicArray<string> lines = DynamicArray.empty();
+    foreach (string piece in text.split(separator: "\n")) { lines.add(item: piece.replace(old: "\r", with: "")); }
+    isize i = 0;
+    while (i < lines.length()) {
+        string l = copy lines[i];
+        bool top = !l.isEmpty() && isIdentByte(c: l[0]) && l.contains(substring: "(") && !l.startsWith(prefix: "typedef");
+        if (!top) { i = i + 1; continue; }
+        string first = l.trimEnd();
+        if (first.contains(substring: "{") && first.endsWith(suffix: "}")) {
+            string oneLine = nameBeforeParen(line: l);
+            into.append(name: oneLine, line: l);
+            i = i + 1;
+            continue;
+        }
+        isize j = i;
+        bool isDefinition = false;
+        while (j < lines.length()) {
+            string t = lines[j].trimEnd();
+            if (t.endsWith(suffix: "{")) { isDefinition = true; break; }
+            if (t.endsWith(suffix: ";")) { break; }
+            j = j + 1;
+        }
+        if (!isDefinition) { i = j + 1; continue; }
+        string name = nameBeforeParen(line: l);
+        string body = "";
+        isize k = i;
+        while (k < lines.length()) {
+            string b = copy lines[k];
+            body = "${body}${b}\n";
+            if (k > i && b == "}") { break; }
+            k = k + 1;
+        }
+        into.append(name: name, line: body);
+        i = k + 1;
+    }
+    return true;
+}
+
+// The WebGPU functions the seam reaches from `roots`: every one each names, following every seam function it names.
+unsafe fn DynamicArray<string> reachedFrom(const ref DynamicArray<string> roots, const ref Decls seam) {
+    DynamicArray<string> queue = copy roots;
+    DynamicArray<string> seen = DynamicArray.empty();
+    DynamicArray<string> reached = DynamicArray.empty();
+    isize q = 0;
+    while (q < queue.length()) {
+        string name = copy queue[q];
+        q = q + 1;
+        if (hasName(xs: seen, name: name)) { continue; }
+        seen.add(item: copy name);
+        string body = seam.bodyOf(name: name);
+        DynamicArray<string> words = identifiersIn(text: body);
+        foreach (const ref string w in words.iterConst()) {
+            if (isWgpuFunction(w: w)) {
+                addUnique(xs: reached, name: w);
+            } else if (seam.has(name: w) && !hasName(xs: seen, name: w)) {
+                queue.add(item: copy w);
+            }
+        }
+    }
+    return reached;
+}
+
+// The report's sections, in the WebGPU spec's order, each function filed by the handle it acts on or creates.
+fn DynamicArray<string> sectionNames() {
+    DynamicArray<string> s = DynamicArray.empty();
+    s.add(item: "Instances and adapters");
+    s.add(item: "Devices");
+    s.add(item: "Buffers");
+    s.add(item: "Textures and views");
+    s.add(item: "Samplers");
+    s.add(item: "Resource binding");
+    s.add(item: "Shader modules");
+    s.add(item: "Pipelines");
+    s.add(item: "Command encoding and copies");
+    s.add(item: "Render passes and bundles");
+    s.add(item: "Compute passes");
+    s.add(item: "Queries and timestamps");
+    s.add(item: "The queue");
+    s.add(item: "Surfaces");
+    s.add(item: "Errors and debugging");
+    s.add(item: "Native interop");
+    return s;
+}
+
+// The section `f` is filed under (an index into sectionNames), or -1: by what its name says first, where that says
+// more than the handle (an error scope, a query, a pass begun), then by its handle, the longer prefixes first. A
+// function filed nowhere fails the run, so a header that brings a new handle is filed by a person, never guessed.
+fn isize sectionOf(const ref string f) {
+    if (f.contains(substring: "ErrorScope")) { return 14; }
+    if (f.contains(substring: "Query") || f.contains(substring: "Timestamp")) { return 11; }
+    if (f.contains(substring: "NativeMetal")) { return 15; }
+    if (f.startsWith(prefix: "wgpuSetLog") || f == "wgpuGenerateReport" || f == "wgpuGetVersion") { return 14; }
+    if (f.contains(substring: "GraphicsDebuggerCapture")) { return 14; }
+    if (f == "wgpuInstanceCreateSurface" || f.startsWith(prefix: "wgpuSurface")) { return 13; }
+    if (f.startsWith(prefix: "wgpuCommandEncoderBeginRenderPass")) { return 9; }
+    if (f.startsWith(prefix: "wgpuDeviceCreateRenderBundleEncoder")) { return 9; }
+    if (f.startsWith(prefix: "wgpuCommandEncoderBeginComputePass")) { return 10; }
+    if (f.startsWith(prefix: "wgpuDeviceCreateBuffer")) { return 2; }
+    if (f.startsWith(prefix: "wgpuDeviceCreateTexture")) { return 3; }
+    if (f.startsWith(prefix: "wgpuDeviceCreateSampler")) { return 4; }
+    if (f.startsWith(prefix: "wgpuDeviceCreateBindGroup") || f.startsWith(prefix: "wgpuDeviceCreatePipelineLayout")) { return 5; }
+    if (f.startsWith(prefix: "wgpuDeviceCreateShaderModule")) { return 6; }
+    if (f.startsWith(prefix: "wgpuDeviceCreateRenderPipeline") || f.startsWith(prefix: "wgpuDeviceCreateComputePipeline")) { return 7; }
+    if (f.startsWith(prefix: "wgpuDeviceCreateCommandEncoder")) { return 8; }
+    if (f.startsWith(prefix: "wgpuDevice")) { return 1; }
+    if (f.startsWith(prefix: "wgpuBuffer")) { return 2; }
+    if (f.startsWith(prefix: "wgpuTexture") || f.startsWith(prefix: "wgpuExternalTexture")) { return 3; }
+    if (f.startsWith(prefix: "wgpuSampler")) { return 4; }
+    if (f.startsWith(prefix: "wgpuBindGroup") || f.startsWith(prefix: "wgpuPipelineLayout")) { return 5; }
+    if (f.startsWith(prefix: "wgpuShaderModule")) { return 6; }
+    if (f.startsWith(prefix: "wgpuRenderPipeline") || f.startsWith(prefix: "wgpuComputePipeline")) { return 7; }
+    if (f.startsWith(prefix: "wgpuCommandEncoder") || f.startsWith(prefix: "wgpuCommandBuffer")) { return 8; }
+    if (f.startsWith(prefix: "wgpuRenderPassEncoder") || f.startsWith(prefix: "wgpuRenderBundle")) { return 9; }
+    if (f.startsWith(prefix: "wgpuComputePassEncoder")) { return 10; }
+    if (f.startsWith(prefix: "wgpuQueue")) { return 12; }
+    if (f.startsWith(prefix: "wgpuInstance") || f.startsWith(prefix: "wgpuAdapter") || f.startsWith(prefix: "wgpuSupported")) { return 0; }
+    if (f == "wgpuCreateInstance" || f.startsWith(prefix: "wgpuGetInstance") || f.startsWith(prefix: "wgpuHasInstance")) { return 0; }
+    if (f == "wgpuGetProcAddress") { return 0; }
+    return 0 - 1;
+}
+
+// Which legs declare `f`, as the report says it.
+fn string legsOf(bool core, bool extra, bool web) {
+    if (core && web) { return "both"; }
+    if (core) { return "wgpu-native"; }
+    if (web && extra) { return "emdawnwebgpu; wgpu.h natively"; }
+    if (web) { return "emdawnwebgpu"; }
+    return "wgpu-native";
+}
+
+// One table of the report: the functions of `names` that `wanted` picks (webgpu.h's or wgpu.h's), by section.
+unsafe fn void emitCoverageTable(ref DynamicArray<uint8> dst, const ref DynamicArray<string> names,
+                                 const ref DynamicArray<bool> inWebgpuH, bool wanted, const ref DynamicArray<string> legs,
+                                 const ref DynamicArray<string> called) {
+    DynamicArray<string> sections = sectionNames();
+    isize s = 0;
+    while (s < sections.length()) {
+        int64 total = 0;
+        int64 hits = 0;
+        isize i = 0;
+        while (i < names.length()) {
+            if (inWebgpuH[i] == wanted && sectionOf(f: names[i]) == s) {
+                total = total + 1;
+                if (hasName(xs: called, name: names[i])) { hits = hits + 1; }
+            }
+            i = i + 1;
+        }
+        if (total > 0) {
+            string title = copy sections[s];
+            string head = "### ${title}, ${hits} of ${total}";
+            emit(dst: dst, s: "");
+            appendLine(dst: dst, s: head);
+            emit(dst: dst, s: "");
+            emit(dst: dst, s: "| Function | Legs | Called |");
+            emit(dst: dst, s: "|---|---|---|");
+            isize k = 0;
+            while (k < names.length()) {
+                if (inWebgpuH[k] == wanted && sectionOf(f: names[k]) == s) {
+                    string fname = copy names[k];
+                    string leg = copy legs[k];
+                    string mark = "no";
+                    if (hasName(xs: called, name: fname)) { mark = "yes"; }
+                    string row = "| `${fname}` | ${leg} | ${mark} |";
+                    appendLine(dst: dst, s: row);
+                }
+                k = k + 1;
+            }
+        }
+        s = s + 1;
+    }
+}
+
+unsafe fn int32 coverage() {
+    string nativePath = argAt(at: 1);
+    string extrasPath = argAt(at: 2);
+    string webPath = argAt(at: 3);
+    string bindingRefs = argAt(at: 4);
+    string seamRefs = argAt(at: 5);
+    string seamC = argAt(at: 6);
+    string dst = argAt(at: 7);
+    if (nativePath.isEmpty() || extrasPath.isEmpty() || webPath.isEmpty() || bindingRefs.isEmpty() || seamRefs.isEmpty()
+        || seamC.isEmpty() || dst.isEmpty()) {
+        println(s: "usage: wgpugen --coverage <wgpu-native webgpu.h> <wgpu-native wgpu.h> <emdawnwebgpu webgpu.h> <bindings refs .json> <seam refs .json> <gpuseam.c> <output .md>");
+        return 2;
+    }
+    Header native = Header.make();
+    Header web = Header.make();
+    if (!native.read(path: nativePath, extras: false)) { println(s: "wgpugen: cannot read ${nativePath}"); return 1; }
+    if (!native.read(path: extrasPath, extras: true)) { println(s: "wgpugen: cannot read ${extrasPath}"); return 1; }
+    if (!web.read(path: webPath, extras: false)) { println(s: "wgpugen: cannot read ${webPath}"); return 1; }
+
+    // What the safe API calls: the bindings it calls, and what the seam reaches from the wrappers it calls.
+    Sources sources = Sources.make();
+    string why = "";
+    Optional<DynamicArray<string>> fromBindings = calledDeclarations(refsPath: bindingRefs, sources: sources, why: why);
+    DynamicArray<string> bindingDecls = match (give fromBindings) {
+        case Some(value: d): give d;
+        case None: { println(s: "wgpugen: ${why}"); return 1; }
+    };
+    Optional<DynamicArray<string>> fromSeam = calledDeclarations(refsPath: seamRefs, sources: sources, why: why);
+    DynamicArray<string> seamDecls = match (give fromSeam) {
+        case Some(value: d): give d;
+        case None: { println(s: "wgpugen: ${why}"); return 1; }
+    };
+    Decls seam = Decls.make();
+    if (!readSeamC(path: seamC, into: seam)) { println(s: "wgpugen: cannot read ${seamC}"); return 1; }
+    DynamicArray<string> called = DynamicArray.empty();
+    foreach (const ref string d in bindingDecls.iterConst()) {
+        DynamicArray<string> words = identifiersIn(text: d);
+        foreach (const ref string w in words.iterConst()) { if (isWgpuFunction(w: w)) { addUnique(xs: called, name: w); } }
+    }
+    DynamicArray<string> roots = DynamicArray.empty();
+    foreach (const ref string d in seamDecls.iterConst()) {
+        DynamicArray<string> words = identifiersIn(text: d);
+        foreach (const ref string w in words.iterConst()) { if (seam.has(name: w)) { addUnique(xs: roots, name: w); } }
+    }
+    DynamicArray<string> reached = reachedFrom(roots: roots, seam: seam);
+    foreach (const ref string w in reached.iterConst()) { addUnique(xs: called, name: w); }
+
+    // Every function either leg declares, wgpu-native's order first: which header, which legs, and the counts.
+    DynamicArray<string> names = mergedNames(native: native.functionDecls(), web: web.functionDecls());
+    int64 unfiled = 0;
+    foreach (const ref string f in names.iterConst()) {
+        if (sectionOf(f: f) < 0) {
+            println(s: "wgpugen: ${f} is filed under no section of the coverage report (tools/wgpugen's sectionOf)");
+            unfiled = unfiled + 1;
+        }
+    }
+    if (unfiled > 0) { return 1; }
+    DynamicArray<bool> inWebgpuH = DynamicArray.empty();
+    DynamicArray<string> legs = DynamicArray.empty();
+    int64 coreTotal = 0;
+    int64 coreHits = 0;
+    int64 bothTotal = 0;
+    int64 bothHits = 0;
+    int64 nativeTotal = 0;
+    int64 nativeHits = 0;
+    int64 webTotal = 0;
+    int64 webHits = 0;
+    int64 extraTotal = 0;
+    int64 extraHits = 0;
+    foreach (const ref string f in names.iterConst()) {
+        bool extra = native.isExtra(fname: f);
+        bool core = native.functionDecls().has(name: f) && !extra;
+        bool onWeb = web.functionDecls().has(name: f);
+        bool hit = hasName(xs: called, name: f);
+        int64 one = 0;
+        if (hit) { one = 1; }
+        bool header = core || onWeb;
+        inWebgpuH.add(item: header);
+        legs.add(item: legsOf(core: core, extra: extra, web: onWeb));
+        if (!header) {
+            extraTotal = extraTotal + 1;
+            extraHits = extraHits + one;
+            continue;
+        }
+        coreTotal = coreTotal + 1;
+        coreHits = coreHits + one;
+        if (core && onWeb) {
+            bothTotal = bothTotal + 1;
+            bothHits = bothHits + one;
+        } else if (core) {
+            nativeTotal = nativeTotal + 1;
+            nativeHits = nativeHits + one;
+        } else {
+            webTotal = webTotal + 1;
+            webHits = webHits + one;
+        }
+    }
+
+    string nsha = native.sha(at: 0);
+    string xsha = native.sha(at: 1);
+    string wsha = web.sha(at: 0);
+    DynamicArray<uint8> file = DynamicArray.empty();
+    emit(dst: file, s: "# webgpu.h coverage");
+    emit(dst: file, s: "");
+    emit(dst: file, s: "GENERATED by `tools/wgpugen`; DO NOT EDIT. `tools/check-bindings.sh` regenerates it and compares; `--write`");
+    emit(dst: file, s: "replaces it, and refuses a lower count unless `--lower-coverage` says lowering it is a decision.");
+    emit(dst: file, s: "");
+    emit(dst: file, s: "Which of the WebGPU C API's functions the safe API calls. A function is called when its binding has a call site");
+    emit(dst: file, s: "outside `src/native/`, as `kama query --refs` answers, or when `csrc/gpuseam.c` reaches it from a seam function the");
+    emit(dst: file, s: "safe API calls. 1.0 is every function in the webgpu.h tables (AGENTS.gpu.md, every call in webgpu.h before 1.0).");
+    emit(dst: file, s: "wgpu-native's own extensions are counted apart.");
+    emit(dst: file, s: "");
+    emit(dst: file, s: "From three headers, each by the sha256 of its text with LF line endings:");
+    string h1 = "- wgpu-native's webgpu.h `${nsha}`";
+    appendLine(dst: file, s: h1);
+    string h2 = "- wgpu-native's wgpu.h `${xsha}`";
+    appendLine(dst: file, s: h2);
+    string h3 = "- emdawnwebgpu's webgpu.h `${wsha}`";
+    appendLine(dst: file, s: h3);
+    emit(dst: file, s: "");
+    string total = "**webgpu.h: ${coreHits} of ${coreTotal} called.** On both legs, ${bothHits} of ${bothTotal}; only in wgpu-native's, ${nativeHits} of ${nativeTotal}; only in emdawnwebgpu's, ${webHits} of ${webTotal}.";
+    appendLine(dst: file, s: total);
+    emit(dst: file, s: "");
+    string apart = "**wgpu.h, wgpu-native's own extensions, apart: ${extraHits} of ${extraTotal} called.**";
+    appendLine(dst: file, s: apart);
+    emit(dst: file, s: "");
+    emit(dst: file, s: "## webgpu.h");
+    emitCoverageTable(dst: file, names: names, inWebgpuH: inWebgpuH, wanted: true, legs: legs, called: called);
+    emit(dst: file, s: "");
+    emit(dst: file, s: "## wgpu.h, wgpu-native's own extensions");
+    emitCoverageTable(dst: file, names: names, inWebgpuH: inWebgpuH, wanted: false, legs: legs, called: called);
+
+    Result<isize, IoError> wr = writeFile(path: dst, bytes: file);
+    match (wr) {
+        case Err(error: er): { println(s: "wgpugen: cannot write ${dst}"); return 1; }
+        case Ok(value: nbytes): { }
+    };
+    println(s: "wgpugen: webgpu.h ${coreHits} of ${coreTotal} called, wgpu.h ${extraHits} of ${extraTotal} -> ${dst}");
+    return 0;
+}
+
 // ---- driver ---------------------------------------------------------------------------------
 
 unsafe fn string argAt(int32 at) {
@@ -1191,6 +1739,7 @@ unsafe fn string argAt(int32 at) {
 }
 
 unsafe fn int32 run() {
+    if (argAt(at: 0) == "--coverage") { return coverage(); }
     string nativePath = argAt(at: 0);
     string extrasPath = argAt(at: 1);
     string webPath = argAt(at: 2);

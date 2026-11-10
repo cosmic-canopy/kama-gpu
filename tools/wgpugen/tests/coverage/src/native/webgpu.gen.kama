@@ -1,0 +1,11 @@
+// A fixture for tools/wgpugen's coverage report: three bindings, one per way a binding is referenced. The safe API
+// (src/api.kama) calls deviceCreateBuffer, imports bufferGetSize without calling it, and never names queueSubmit.
+
+export { deviceCreateBuffer, bufferGetSize, queueSubmit };
+
+extern fn UnsafePtr wgpuDeviceCreateBuffer(UnsafePtr device, UnsafePtr descriptor);
+unsafe fn UnsafePtr deviceCreateBuffer(UnsafePtr device, UnsafePtr descriptor) { return wgpuDeviceCreateBuffer(device: device, descriptor: descriptor); }
+extern fn uint64 wgpuBufferGetSize(UnsafePtr buffer);
+unsafe fn uint64 bufferGetSize(UnsafePtr buffer) { return wgpuBufferGetSize(buffer: buffer); }
+@compileFor(!ARCH_WASM32) extern fn void wgpuQueueSubmit(UnsafePtr queue, usize commandCount, UnsafePtr commands);
+@compileFor(!ARCH_WASM32) unsafe fn void queueSubmit(UnsafePtr queue, usize commandCount, UnsafePtr commands) { wgpuQueueSubmit(queue: queue, commandCount: commandCount, commands: commands); }

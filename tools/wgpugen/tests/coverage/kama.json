@@ -1,0 +1,12 @@
+{
+  "name": "covfix",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "description": "A fixture for tools/wgpugen's coverage report: each rule of what counts as a call, once",
+  "kind": "library",
+  "kama": ">=0.9.911",
+  "modules": {
+    ".": { "visibility": "public" },
+    "native": { "visibility": "internal" }
+  }
+}

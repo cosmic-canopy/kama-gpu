@@ -19,11 +19,15 @@ in; *as an engine renderer* they stay out.
   architecture.md § Decided, the eighth session's entry).
   - A function is covered when the safe API calls it: a call site of its binding outside `src/native/`, as
     `kama query --refs` answers, or a call in a seam function the safe API calls.
-  - 1.0 is all of webgpu.h: what both legs declare, and what only wgpu-native's webgpu.h has yet. `wgpu.h`'s
-    extensions are reported apart; whether any belongs in 1.0 is `@kama/graphics`' design pass's question.
+  - 1.0 is all of webgpu.h, 206 functions: the 199 both legs declare, the 3 only wgpu-native's webgpu.h has yet
+    (`SetImmediates`), and the 4 only emdawnwebgpu's has, which wgpu-native declares in `wgpu.h` instead
+    (`WriteTimestamp` and `MultiDrawIndirect`, two each). `wgpu.h`'s other 22 functions are reported apart; whether
+    any belongs in 1.0 is `@kama/graphics`' design pass's question.
   - A `Destroy` stays uncovered until its row decides a safe form: no raw destroy rules out a raw one, not every one.
   - Grouped by the spec's sections, written as a committed `COVERAGE.md`, and held as the bindings are:
-    `tools/check-bindings.sh` regenerates and compares it, and the covered count is a ratchet.
+    `tools/check-bindings.sh` regenerates and compares it, and the covered count is a ratchet. **Built on
+    2026-11-10:** 53 of 206 called, and 1 of `wgpu.h`'s 22. The rules of what counts as a call are held on a fixture
+    package, `tools/wgpugen/tests/coverage`, whatever the safe API calls; 9 of 9 mutations were caught.
 - It grows by the spec's sections, in the order `@kama/graphics` pulls them: the render pipeline's set first (shader
   modules, pipelines and their layouts, bind groups, samplers, vertex and index buffers, depth and MSAA), then compute,
   queries and timestamps, and indirect draws.

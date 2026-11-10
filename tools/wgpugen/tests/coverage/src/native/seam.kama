@@ -1,0 +1,12 @@
+// A fixture for tools/wgpugen's coverage report: two seam wrappers, one the safe API calls (over two lines, as most
+// are) and one it never does.
+
+export { requestAdapter, mapAsync };
+
+extern fn UnsafePtr gpuseam_request_adapter(UnsafePtr instance);
+extern fn UnsafePtr gpuseam_map_async(UnsafePtr buffer);
+
+unsafe fn UnsafePtr requestAdapter(UnsafePtr instance) {
+    return gpuseam_request_adapter(instance: instance);
+}
+unsafe fn UnsafePtr mapAsync(UnsafePtr buffer) { return gpuseam_map_async(buffer: buffer); }
