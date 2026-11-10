@@ -39,10 +39,10 @@ in; *as an engine renderer* they stay out.
   it answers; four devices from it (WebGPU's defaults, a raised limit, a limit past the adapter's, a feature it lacks)
   and a fifth with every feature it has; an offscreen clear read back; and, natively with a display, a surface on a
   real window: its capabilities, each configure the package refuses, every choice it offers taken, and a grey frame
-  read back through an sRGB view and a linear one. 44 cases natively with a display (27 without), debug and release;
+  read back through an sRGB view and a linear one. 45 cases natively with a display (28 without), debug and release;
   wasm builds; and an xfail for an encoder used after `finish()`. `tools/test.sh` runs all of it.
 
-Next: the stopgaps that change the API (items 7, 2 and 9 below), then the triangle's set (shader module, pipeline,
+Next: the stopgaps that change the API (items 2 and 9 below), then the triangle's set (shader module, pipeline,
 bind group), then the web leg: a canvas surface once `@kama/window` has its web half, and the offscreen test run in a
 browser with WebGPU, where the web's capabilities are measured for the first time.
 
@@ -127,8 +127,9 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
    the seam's memory, not the kama value's, so a borrowed handle can be polled.
 6. **Built on 2026-11-10, with item 1: `AdapterOptions.forSurface(surface:, power:)`.** The second request method,
    `requestDeviceFor(surface:, power:)`, is gone. The options hold a reference on the surface while they live.
-7. **Kept: `SurfaceError::Error` is spelled `Failed`,** since the type implements `Error`. **Stopgap:**
-   `OutOfMemory` is still there, though neither leg's `webgpu.h` reports it any more; it goes.
+7. **Kept: `SurfaceError::Error` is spelled `Failed`,** since the type implements `Error`. **Built on 2026-11-10:**
+   `OutOfMemory` is gone, since neither leg's `webgpu.h` reports it any more. A test matches exhaustively on the five
+   that remain, so it would not build with the variant back, as it did not before the removal.
 8. **Built on 2026-11-10: a surface is configured from what it offers** (kama 0.9.909), replacing the stopgap below.
    Natively, on wgpu-native v29.0.1.1 over Vulkan, test-first: 15 new cases on every leg with no GPU (`TextureFormat`,
    and what `preferred()` makes of the web's answer and of this machine's, handed in through `SurfaceCapabilities.of`),

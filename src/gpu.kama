@@ -950,9 +950,10 @@ type resource CommandBuffer implements Copyable<This>(bare: give) {
 
 // Why an acquire gave no texture. Occluded: the window is hidden or minimised; natively the acquire slept 32 ms first,
 // so a loop that skips the frame does not spin. Outdated or Lost: configure again (at the window's new size). Timeout:
-// try the next frame. OutOfMemory is the design's; the webgpu.h both legs build against no longer reports it.
+// try the next frame. Failed: anything else webgpu.h reports. (The design's OutOfMemory is not here: neither leg's
+// webgpu.h reports it any more.)
 type enum SurfaceError implements Error {
-    Occluded, Outdated, Lost, Timeout, OutOfMemory, Failed;
+    Occluded, Outdated, Lost, Timeout, Failed;
 
     public const fn string message() {
         return match (this) {
@@ -960,7 +961,6 @@ type enum SurfaceError implements Error {
             case Outdated: "the surface is out of date: configure it again";
             case Lost: "the surface was lost: configure it again";
             case Timeout: "no texture came in time";
-            case OutOfMemory: "out of memory for a surface texture";
             case Failed: "the surface failed";
         };
     }

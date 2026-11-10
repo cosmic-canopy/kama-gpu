@@ -5,6 +5,7 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Breaking:** `SurfaceError::OutOfMemory` is gone (2026-11-10, AGENTS.gpu.md item 7): neither leg's webgpu.h reports it.
 - A surface is configured from what it offers (2026-11-10, kama 0.9.909; AGENTS.gpu.md item 8). **Breaking:**
   `surface.configure(device:, width:, height:, format:)` became `configure(device:, config:, width:, height:)`, which
   returns `Result<Unit, ConfigureError>`, and `Device.adopt(raw:)` takes the device's `adapter:` too.

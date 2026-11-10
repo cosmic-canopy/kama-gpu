@@ -336,6 +336,31 @@ fn DynamicArray<AlphaMode> alphas1(AlphaMode a) {
     return l;
 }
 
+// "" when every way an acquire can fail has its words. The match is exhaustive, so a variant added, or one left over
+// that neither leg's webgpu.h reports (OutOfMemory, item 7), fails the build.
+fn string acquireFailures() {
+    DynamicArray<SurfaceError> all = DynamicArray.empty();
+    all.add(item: SurfaceError::Occluded);
+    all.add(item: SurfaceError::Outdated);
+    all.add(item: SurfaceError::Lost);
+    all.add(item: SurfaceError::Timeout);
+    all.add(item: SurfaceError::Failed);
+    isize i = 0;
+    while (i < all.length()) {
+        string kind = match (all[i]) {
+            case Occluded: "Occluded";
+            case Outdated: "Outdated";
+            case Lost: "Lost";
+            case Timeout: "Timeout";
+            case Failed: "Failed";
+        };
+        string words = all[i].message();
+        if (words.isEmpty()) { return "${kind} has no words"; }
+        i = i + 1;
+    }
+    return "";
+}
+
 // "" when capabilities made of these lists are refused.
 unsafe fn string refused(DynamicArray<TextureFormat> formats, DynamicArray<PresentMode> presents,
                          DynamicArray<AlphaMode> alphas, uint64 usages) {
@@ -402,6 +427,7 @@ type resource Check implements App {
     public unsafe ctor make() {
         this.formatCases();
         this.capabilityCases();
+        this.verdict(name: "an acquire fails in one of five ways, each with its words", why: acquireFailures());
         Result<Instance, GpuError> made = Instance.create();
         match (give made) {
             case Ok(value: inst): {
