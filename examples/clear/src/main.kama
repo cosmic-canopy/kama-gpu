@@ -1,7 +1,10 @@
 // clear: a window cleared to a slowly changing colour every frame, on @kama/gpu and @kama/window. Escape or the close
-// button quits; a resize reconfigures the surface. `clear --frames N` presents N frames and exits, for a check that
-// needs no hand on the keyboard. It prints how many frames it presented and whether WebGPU reported an error, and its
-// exit status is 1 when it did.
+// button quits; a resize reconfigures the surface, and while the window has no area (minimised) frames are skipped.
+// `clear --frames N` presents N frames and exits, for a check that needs no hand on the keyboard. It prints how many
+// frames it presented and whether WebGPU reported an error, and its exit status is 1 when it did.
+//
+// The surface is configured from what it offers the adapter: `caps.preferred()`, its first format drawn through its
+// sRGB form, so the colours are the same on every leg.
 //
 // Native only for now: on the web the loop must be the browser's (std::app::run) and the window a canvas, which come
 // with @kama/window's web half.
@@ -10,14 +13,14 @@ import {
     core::println,
     core::env::args, core::env::Args,
     std::fmt::parse, std::fmt::ParseError,
+    std::time::sleep, std::time::Duration,
     gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::DeviceOptions,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::PowerPreference,
-    gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::TextureFormat, gpu::TextureView, gpu::CommandEncoder,
-    gpu::RenderPass, gpu::CommandBuffer, gpu::Color, gpu::uncapturedErrors, gpu::lastErrorMessage,
+    gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
+    gpu::ConfigureError, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass, gpu::CommandBuffer, gpu::Color,
+    gpu::uncapturedErrors, gpu::lastErrorMessage,
     window::Window, window::WindowError, window::Event, window::Key, window::Size,
 };
-
-comptime TextureFormat FORMAT = TextureFormat::BGRA8Unorm;
 
 // `--frames N`, or 0 for no limit.
 unsafe fn int32 frameLimit() {
@@ -35,9 +38,8 @@ unsafe fn int32 frameLimit() {
     };
 }
 
-// An adapter that can present to `surface`, then a device from it with WebGPU's defaults; natively each request is
-// answered as soon as it is polled.
-unsafe fn Result<DeviceStatus, GpuError> device(ref Instance instance, const ref Surface surface) {
+// An adapter that can present to `surface`; natively the request is answered as soon as it is polled.
+unsafe fn Result<Adapter, GpuError> adapterFor(ref Instance instance, const ref Surface surface) {
     AdapterRequest asked = instance.requestAdapter(options: AdapterOptions.forSurface(surface: surface,
                                                                                        power: PowerPreference::HighPerformance));
     int32 polls = 0;
@@ -45,7 +47,7 @@ unsafe fn Result<DeviceStatus, GpuError> device(ref Instance instance, const ref
         AdapterStatus a = asked.poll();
         match (give a) {
             case Pending: { }
-            case Ready(adapter: adapter): { return deviceFrom(adapter: adapter); }
+            case Ready(adapter: adapter): { return Result::Ok(value: give adapter); }
             case Failed(error: e): { return Result::Err(error: give e); }
         };
         polls = polls + 1;
@@ -53,6 +55,7 @@ unsafe fn Result<DeviceStatus, GpuError> device(ref Instance instance, const ref
     return Result::Err(error: GpuError::Refused(words: "the adapter request never settled"));
 }
 
+// A device from `adapter` with WebGPU's defaults.
 unsafe fn Result<DeviceStatus, GpuError> deviceFrom(ref Adapter adapter) {
     DeviceRequest request = adapter.requestDevice(options: DeviceOptions.defaults());
     int32 polls = 0;
@@ -66,6 +69,26 @@ unsafe fn Result<DeviceStatus, GpuError> deviceFrom(ref Adapter adapter) {
         polls = polls + 1;
     }
     return Result::Err(error: GpuError::Refused(words: "the device request never settled"));
+}
+
+// What configuring at the window's framebuffer size came to: the surface is ready, the window has no area (skip frames
+// until it has), or the surface refused, which ends the program.
+type enum Fit { Ready, NoArea, Refused }
+
+unsafe fn Fit fit(ref Surface surface, const ref Device device, const ref SurfaceConfig config, const ref Window window) {
+    Size px = window.framebufferSize();
+    if (px.width <= 0 || px.height <= 0) { return Fit::NoArea; }
+    Result<Unit, ConfigureError> done = surface.configure(device: device, config: config, width: cast<uint32>(px.width),
+                                                          height: cast<uint32>(px.height));
+    return match (done) {
+        case Ok(value: u): Fit::Ready;
+        case Err(error: e): {
+            match (e) {
+                case NoArea: { return Fit::NoArea; }
+                case _: { string why = e.message(); println(s: "clear: the surface refused: ${why}"); return Fit::Refused; }
+            };
+        }
+    };
 }
 
 unsafe fn uint8 run() {
@@ -85,8 +108,19 @@ unsafe fn uint8 run() {
         case Ok(value: s): give s;
         case Err(error: e): { string why = e.message(); println(s: "clear: ${why}"); return 1; }
     };
-    Result<DeviceStatus, GpuError> asked = device(instance: instance, surface: surface);
-    DeviceStatus status = match (give asked) {
+    Result<Adapter, GpuError> found = adapterFor(instance: instance, surface: surface);
+    Adapter adapter = match (give found) {
+        case Ok(value: a): give a;
+        case Err(error: e): { string why = e.message(); println(s: "clear: no adapter: ${why}"); return 1; }
+    };
+    Result<SurfaceCapabilities, GpuError> asked = surface.capabilities(adapter: adapter);
+    SurfaceCapabilities caps = match (give asked) {
+        case Ok(value: c): give c;
+        case Err(error: e): { string why = e.message(); println(s: "clear: ${why}"); return 1; }
+    };
+    SurfaceConfig config = caps.preferred();
+    Result<DeviceStatus, GpuError> requested = deviceFrom(adapter: adapter);
+    DeviceStatus status = match (give requested) {
         case Ok(value: s): give s;
         case Err(error: e): { string why = e.message(); println(s: "clear: ${why}"); return 1; }
     };
@@ -94,14 +128,15 @@ unsafe fn uint8 run() {
         case Pending: { println(s: "clear: no device"); return 1; }
         case Failed(error: e): { string why = e.message(); println(s: "clear: no device: ${why}"); return 1; }
         case Ready(device: dev, queue: queue): {
-            Size px = window.framebufferSize();
-            surface.configure(device: dev, width: cast<uint32>(px.width), height: cast<uint32>(px.height), format: FORMAT);
+            Fit fitted = fit(surface: surface, device: dev, config: config, window: window);
+            if (fitted == Fit::Refused) { return 1; }
+            bool ready = fitted == Fit::Ready;
             int32 frames = 0;
             int32 skipped = 0;
             bool running = true;
             while (running) {
                 window.pump();
-                bool reconfigure = false;
+                bool reconfigure = !ready;
                 bool polling = true;
                 while (polling) {
                     Optional<Event> next = window.pollEvent();
@@ -118,12 +153,12 @@ unsafe fn uint8 run() {
                     };
                 }
                 if (reconfigure) {
-                    Size now = window.framebufferSize();
-                    if (now.width > 0 && now.height > 0) {
-                        surface.configure(device: dev, width: cast<uint32>(now.width), height: cast<uint32>(now.height),
-                                          format: FORMAT);
-                    }
+                    Fit again = fit(surface: surface, device: dev, config: config, window: window);
+                    if (again == Fit::Refused) { return 1; }
+                    ready = again == Fit::Ready;
                 }
+                // A minimised window: wait as an occluded acquire does (32 ms natively), rather than spin.
+                if (!ready) { sleep(d: Duration.fromMillis(ms: 32)); continue; }
                 Result<SurfaceTexture, SurfaceError> acquired = surface.acquire();
                 match (give acquired) {
                     case Ok(value: frame): {
@@ -140,18 +175,11 @@ unsafe fn uint8 run() {
                     case Err(error: e): {
                         skipped = skipped + 1;
                         match (e) {
-                            case Outdated: { reconfigure = true; }
-                            case Lost: { reconfigure = true; }
+                            case Outdated: { ready = false; }
+                            case Lost: { ready = false; }
                             case Failed: { println(s: "clear: the surface failed"); running = false; }
                             case _: { }
                         };
-                        if (reconfigure) {
-                            Size now = window.framebufferSize();
-                            if (now.width > 0 && now.height > 0) {
-                                surface.configure(device: dev, width: cast<uint32>(now.width),
-                                                  height: cast<uint32>(now.height), format: FORMAT);
-                            }
-                        }
                     }
                 };
                 if (limit > 0 && frames >= limit) { running = false; }

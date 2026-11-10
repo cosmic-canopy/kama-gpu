@@ -123,5 +123,9 @@ int32_t gpuseam_surface_acquire(WGPUSurface surface, void **texture, int32_t *su
 // Show what was drawn. On the web the browser presents when the frame returns (emdawnwebgpu aborts on an explicit
 // present), so it does nothing there.
 void gpuseam_surface_present(WGPUSurface surface);
+// A view of every mip level and layer of `texture`, in `format` (a WGPUTextureFormat): the texture's own, or the sRGB or
+// linear form it was made to be viewed in. Undefined (0) is the texture's own. Built from the header's own
+// WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT, so no "undefined" sentinel has to be mirrored in kama.
+WGPUTextureView gpuseam_texture_view_in(WGPUTexture texture, int32_t format);
 
 #endif

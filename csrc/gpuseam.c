@@ -471,3 +471,9 @@ void gpuseam_surface_present(WGPUSurface surface) {
     (void)surface;
 #endif
 }
+
+WGPUTextureView gpuseam_texture_view_in(WGPUTexture texture, int32_t format) {
+    WGPUTextureViewDescriptor d = WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT;
+    d.format = (WGPUTextureFormat)format;
+    return wgpuTextureCreateView(texture, &d);
+}

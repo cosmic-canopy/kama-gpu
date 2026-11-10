@@ -14,11 +14,18 @@
 // - A device gets WebGPU's default limits and no feature unless its `DeviceOptions` raise them, never its adapter's,
 //   so a program that runs on one machine does not silently depend on that machine's adapter.
 // - `adopt` and `raw` on every handle let a program bind more of webgpu.h with its own externs.
+// - A surface is configured from what it offers: `surface.capabilities(adapter:)` answers, `preferred()` makes a
+//   `SurfaceConfig` a program may change, and `configure` checks it before WebGPU sees it, refusing in a
+//   `ConfigureError` what wgpu-native would abort the process on. Frames are drawn sRGB by default, through a view
+//   format where the surface's own format is linear, as a browser's canvas always is.
 //
 // It starts at what an offscreen clear and its readback touch, and grows toward the whole of webgpu.h.
+// `TextureFormat` is generated with the bindings (src/formats.gen.kama).
 
 import {
+    TextureFormat,
     std::collections::DynamicArray,
+    std::memory::Shared,
     std::encoding::utf8::decode, std::encoding::utf8::Utf8Error,
     gpu::native::createInstance, gpu::native::instanceAddRef, gpu::native::instanceRelease,
     gpu::native::adapterAddRef, gpu::native::adapterRelease, gpu::native::adapterGetLimits,
@@ -36,7 +43,7 @@ import {
     gpu::native::WGPURenderPassColorAttachment, gpu::native::WGPUTexelCopyTextureInfo,
     gpu::native::WGPUTexelCopyBufferInfo, gpu::native::WGPUExtent3D,
     gpu::native::WGPUBufferUsage, gpu::native::WGPUTextureUsage, gpu::native::WGPUMapMode,
-    gpu::native::WGPUTextureFormat, gpu::native::WGPUTextureDimension, gpu::native::WGPULoadOp,
+    gpu::native::WGPUTextureDimension, gpu::native::WGPULoadOp,
     gpu::native::WGPUStoreOp, gpu::native::WGPUTextureAspect, gpu::native::WGPUPowerPreference,
     gpu::native::WGPULimits, gpu::native::WGPUFeatureName, gpu::native::WGPUBackendType, gpu::native::WGPUAdapterType,
     gpu::native::SEAM_PENDING, gpu::native::SEAM_FAILED,
@@ -51,7 +58,9 @@ import {
     gpu::native::SURFACE_OK, gpu::native::SURFACE_OCCLUDED, gpu::native::SURFACE_OUTDATED, gpu::native::SURFACE_LOST,
     gpu::native::SURFACE_TIMEOUT, gpu::native::createSurface, gpu::native::acquireSurface, gpu::native::presentSurface,
     gpu::native::surfaceAddRef, gpu::native::surfaceRelease, gpu::native::surfaceConfigure,
-    gpu::native::WGPUSurfaceConfiguration, gpu::native::WGPUCompositeAlphaMode, gpu::native::WGPUPresentMode,
+    gpu::native::surfaceGetCapabilities, gpu::native::surfaceCapabilitiesFreeMembers, gpu::native::textureViewIn,
+    gpu::native::WGPUSurfaceConfiguration, gpu::native::WGPUSurfaceCapabilities, gpu::native::WGPUStatus,
+    gpu::native::WGPUCompositeAlphaMode, gpu::native::WGPUPresentMode,
     window::Window, window::NativeWindow, window::NativeKind,
 };
 
@@ -60,9 +69,9 @@ export {
     Limits, Feature, FeatureSet, DeviceOptions,
     Device, Queue, DeviceRequest, DeviceStatus, GpuError, PowerPreference,
     Buffer, BufferUsage, BufferRead, ReadStatus,
-    Texture, TextureFormat, TextureUsage, TextureView,
+    Texture, TextureUsage, TextureView,
     CommandEncoder, RenderPass, CommandBuffer, Color,
-    Surface, SurfaceTexture, SurfaceError,
+    Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
     uncapturedErrors, lastErrorMessage, lostDevices,
 };
 
@@ -418,21 +427,6 @@ type value DeviceOptions {
     public ctor defaults() { }
 }
 
-// A texel format. The set grows as the package does; `Texture.adopt` takes any.
-type enum TextureFormat { RGBA8Unorm, RGBA8UnormSrgb, BGRA8Unorm, BGRA8UnormSrgb, RGBA16Float, Depth24Plus, Depth32Float }
-
-fn int32 formatValue(TextureFormat f) {
-    return match (f) {
-        case RGBA8Unorm: WGPUTextureFormat::RGBA8Unorm;
-        case RGBA8UnormSrgb: WGPUTextureFormat::RGBA8UnormSrgb;
-        case BGRA8Unorm: WGPUTextureFormat::BGRA8Unorm;
-        case BGRA8UnormSrgb: WGPUTextureFormat::BGRA8UnormSrgb;
-        case RGBA16Float: WGPUTextureFormat::RGBA16Float;
-        case Depth24Plus: WGPUTextureFormat::Depth24Plus;
-        case Depth32Float: WGPUTextureFormat::Depth32Float;
-    };
-}
-
 // Usage flags, OR'd together: `BufferUsage::MapRead | BufferUsage::CopyDst`.
 type value BufferUsage {
     public comptime uint64 MapRead = WGPUBufferUsage::MapRead;
@@ -636,10 +630,13 @@ type enum DeviceStatus { Pending, Ready(Device device, Queue queue), Failed(GpuE
 // A device on its way. Dropping it while it is still pending is safe: the seam frees it when its callback fires.
 type resource DeviceRequest {
     UnsafePtr slot;
+    UnsafePtr adapter;   // the adapter it was asked of, on which it holds a reference, handed to the device it gives
 
     friend Adapter::requestDevice[start];
 
     unsafe ctor start(UnsafePtr instance, UnsafePtr adapter, const ref DeviceOptions options) {
+        this.adapter = adapter;
+        if (adapter != null) { adapterAddRef(adapter: adapter); }
         WGPULimits limits = required(want: options.limits);
         InlineArray<int32>#(64) names = [0; 64];
         int32 count = 0;
@@ -666,18 +663,43 @@ type resource DeviceRequest {
         UnsafePtr device = deviceRequestTakeDevice(request: this.slot);
         if (device == null) { return DeviceStatus::Failed(error: GpuError::Taken); }
         UnsafePtr queue = deviceGetQueue(device: device);
-        return DeviceStatus::Ready(device: Device.adopt(raw: device), queue: Queue.adopt(raw: queue));
+        return DeviceStatus::Ready(device: Device.of(raw: device, adapter: this.adapter), queue: Queue.adopt(raw: queue));
     }
 
-    unsafe ~DeviceRequest() { deviceRequestDrop(request: this.slot); }
+    unsafe ~DeviceRequest() {
+        deviceRequestDrop(request: this.slot);
+        if (this.adapter != null) { adapterRelease(adapter: this.adapter); }
+    }
 }
 
+// A device holds a reference on the adapter it came from: webgpu.h cannot answer it (neither leg has
+// `wgpuDeviceGetAdapter`), and a surface it configures is checked against what the surface offers that adapter.
 type resource Device implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    UnsafePtr adapter;
 
-    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    public unsafe ctor copy(ref Device source) { this.handle = source.handle; deviceAddRef(device: this.handle); }
+    friend DeviceRequest::poll[of];
+    friend Surface::configure[adapterHandle];
+
+    // A device made outside this package, with the adapter it was requested of.
+    public unsafe ctor adopt(UnsafePtr raw, const ref Adapter adapter) {
+        this.handle = raw;
+        this.adapter = adapter.raw();
+        if (this.adapter != null) { adapterAddRef(adapter: this.adapter); }
+    }
+    unsafe ctor of(UnsafePtr raw, UnsafePtr adapter) {
+        this.handle = raw;
+        this.adapter = adapter;
+        if (adapter != null) { adapterAddRef(adapter: adapter); }
+    }
+    public unsafe ctor copy(ref Device source) {
+        this.handle = source.handle;
+        this.adapter = source.adapter;
+        deviceAddRef(device: this.handle);
+        if (this.adapter != null) { adapterAddRef(adapter: this.adapter); }
+    }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
+    unsafe const fn UnsafePtr adapterHandle() { return this.adapter; }
 
     // The limits it was given: WebGPU's defaults, unless its request raised them.
     public unsafe const fn Limits limits() {
@@ -709,7 +731,7 @@ type resource Device implements Copyable<This>(bare: give) {
         d.size.width = width;
         d.size.height = height;
         d.size.depthOrArrayLayers = 1;
-        d.format = formatValue(f: format);
+        d.format = format.value();
         d.mipLevelCount = 1;
         d.sampleCount = 1;
         return Texture.adopt(raw: deviceCreateTexture(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))));
@@ -727,7 +749,10 @@ type resource Device implements Copyable<This>(bare: give) {
         pollDevice(device: this.handle, wait: w);
     }
 
-    unsafe ~Device() { if (this.handle != null) { deviceRelease(device: this.handle); } }
+    unsafe ~Device() {
+        if (this.handle != null) { deviceRelease(device: this.handle); }
+        if (this.adapter != null) { adapterRelease(adapter: this.adapter); }
+    }
 }
 
 type resource Queue implements Copyable<This>(bare: give) {
@@ -941,9 +966,297 @@ type enum SurfaceError implements Error {
     }
 }
 
-// A surface on a window, which WebGPU presents into. Drop it before the window it was made on.
-type resource Surface implements Copyable<This>(bare: give) {
+// When a surface's frames reach the screen (webgpu.h's `WGPUPresentMode`). Fifo waits for the display's refresh, never
+// tears, and every surface offers it; FifoRelaxed shows a late frame at once, and may tear; Immediate never waits, and
+// may tear; Mailbox never tears and never waits, the newest frame winning. The web offers Fifo only.
+type enum PresentMode {
+    Fifo, FifoRelaxed, Immediate, Mailbox;
+
+    public const fn string name() {
+        return match (this) {
+            case Fifo: "Fifo";
+            case FifoRelaxed: "FifoRelaxed";
+            case Immediate: "Immediate";
+            case Mailbox: "Mailbox";
+        };
+    }
+}
+
+fn int32 presentValue(PresentMode m) {
+    return match (m) {
+        case Fifo: WGPUPresentMode::Fifo;
+        case FifoRelaxed: WGPUPresentMode::FifoRelaxed;
+        case Immediate: WGPUPresentMode::Immediate;
+        case Mailbox: WGPUPresentMode::Mailbox;
+    };
+}
+
+fn Optional<PresentMode> presentModeOf(int32 v) {
+    if (v == WGPUPresentMode::Fifo) { return Optional::Some(value: PresentMode::Fifo); }
+    if (v == WGPUPresentMode::FifoRelaxed) { return Optional::Some(value: PresentMode::FifoRelaxed); }
+    if (v == WGPUPresentMode::Immediate) { return Optional::Some(value: PresentMode::Immediate); }
+    if (v == WGPUPresentMode::Mailbox) { return Optional::Some(value: PresentMode::Mailbox); }
+    return Optional::None;
+}
+
+// How a surface's alpha is composited (webgpu.h's `WGPUCompositeAlphaMode`). Its `Auto` is left out, since webgpu.h
+// gives it two meanings ("an alias for the first element" of a surface's alpha modes, and "Inherit in native, Opaque in
+// Wasm"); `preferred()` names the surface's first instead.
+type enum AlphaMode {
+    Opaque, Premultiplied, Unpremultiplied, Inherit;
+
+    public const fn string name() {
+        return match (this) {
+            case Opaque: "Opaque";
+            case Premultiplied: "Premultiplied";
+            case Unpremultiplied: "Unpremultiplied";
+            case Inherit: "Inherit";
+        };
+    }
+}
+
+fn int32 alphaValue(AlphaMode m) {
+    return match (m) {
+        case Opaque: WGPUCompositeAlphaMode::Opaque;
+        case Premultiplied: WGPUCompositeAlphaMode::Premultiplied;
+        case Unpremultiplied: WGPUCompositeAlphaMode::Unpremultiplied;
+        case Inherit: WGPUCompositeAlphaMode::Inherit;
+    };
+}
+
+fn Optional<AlphaMode> alphaModeOf(int32 v) {
+    if (v == WGPUCompositeAlphaMode::Opaque) { return Optional::Some(value: AlphaMode::Opaque); }
+    if (v == WGPUCompositeAlphaMode::Premultiplied) { return Optional::Some(value: AlphaMode::Premultiplied); }
+    if (v == WGPUCompositeAlphaMode::Unpremultiplied) { return Optional::Some(value: AlphaMode::Unpremultiplied); }
+    if (v == WGPUCompositeAlphaMode::Inherit) { return Optional::Some(value: AlphaMode::Inherit); }
+    return Optional::None;
+}
+
+// Why a surface was not configured. The package checks a configuration before WebGPU sees it, because wgpu-native
+// aborts the process on one it refuses (measured 2026-11-10, for each of these).
+type enum ConfigureError implements Error {
+    NoArea,                    // a width or height of 0, as a minimised window has: configure again when it has an area
+    TooLarge(uint32 most),     // wider or taller than the device's maxTextureDimension2D, `most`, which DeviceOptions raise
+    NotOffered(string words);  // a choice the surface does not offer, named
+
+    public const fn string message() {
+        return match (this) {
+            case NoArea: "the window has no area: configure again when it has one";
+            case TooLarge(most: m): "larger than the device allows: ${m} texels on a side at most";
+            case NotOffered(words: w): copy w;
+        };
+    }
+}
+
+fn string joined(const ref string acc, const ref string next) {
+    if (acc.isEmpty()) { return copy next; }
+    return "${acc}, ${next}";
+}
+
+// TextureUsage flags by name.
+fn string usageNames(uint64 usage) {
+    string acc = "";
+    if ((usage & TextureUsage::RenderAttachment) != 0) { acc = joined(acc: acc, next: "RenderAttachment"); }
+    if ((usage & TextureUsage::TextureBinding) != 0) { acc = joined(acc: acc, next: "TextureBinding"); }
+    if ((usage & TextureUsage::StorageBinding) != 0) { acc = joined(acc: acc, next: "StorageBinding"); }
+    if ((usage & TextureUsage::CopySrc) != 0) { acc = joined(acc: acc, next: "CopySrc"); }
+    if ((usage & TextureUsage::CopyDst) != 0) { acc = joined(acc: acc, next: "CopyDst"); }
+    if (acc.isEmpty()) { return "none"; }
+    return acc;
+}
+
+// How a surface is configured. Made by `SurfaceCapabilities.preferred()`, and a program may change a field;
+// `Surface.configure` checks it against what the surface offers before WebGPU sees it.
+type value SurfaceConfig {
+    public TextureFormat format;       // the format of the surface's textures
+    public TextureFormat viewFormat;   // the format frames are drawn through: `format`, or its sRGB or linear form
+    public PresentMode present;
+    public AlphaMode alpha;
+    public uint64 usage;               // TextureUsage flags, OR'd together
+
+    friend SurfaceCapabilities::preferred[make];
+
+    ctor make(TextureFormat format, TextureFormat viewFormat, PresentMode present, AlphaMode alpha, uint64 usage) {
+        this.format = format;
+        this.viewFormat = viewFormat;
+        this.present = present;
+        this.alpha = alpha;
+        this.usage = usage;
+    }
+}
+
+// What a surface offers an adapter (webgpu.h's `WGPUSurfaceCapabilities`): its formats in its own order, which is its
+// preference, its present modes and alpha modes, and the usages its textures may have. A format the package does not
+// name (an implementation's own extension) is left out, never guessed. Each holds a format, Fifo, an alpha mode and
+// RenderAttachment, as webgpu.h promises; an answer without one is refused.
+type resource SurfaceCapabilities {
+    DynamicArray<TextureFormat> formatList;
+    DynamicArray<PresentMode> presentList;
+    DynamicArray<AlphaMode> alphaList;
+    uint64 usageBits;
+
+    friend Surface::configure[refuses];
+
+    // Capabilities from lists: what `Surface.capabilities` reads, and what a test hands in for a surface it cannot open
+    // (the web's, natively). Safe to hand in anything, since `configure` checks against the surface's own answer.
+    public ctor Result<SurfaceCapabilities, GpuError> of(DynamicArray<TextureFormat> formats,
+                                                        DynamicArray<PresentMode> presentModes,
+                                                        DynamicArray<AlphaMode> alphaModes, uint64 usages) {
+        if (formats.length() == 0) { return Result::Err(error: GpuError::Refused(words: "the surface offers no format")); }
+        bool fifo = false;
+        isize i = 0;
+        while (i < presentModes.length()) { if (presentModes[i] == PresentMode::Fifo) { fifo = true; } i = i + 1; }
+        if (!fifo) {
+            return Result::Err(error: GpuError::Refused(words: "the surface does not offer Fifo, which webgpu.h promises"));
+        }
+        if (alphaModes.length() == 0) { return Result::Err(error: GpuError::Refused(words: "the surface offers no alpha mode")); }
+        if ((usages & TextureUsage::RenderAttachment) == 0) {
+            return Result::Err(error: GpuError::Refused(words: "the surface does not offer RenderAttachment, which webgpu.h promises"));
+        }
+        return Result::Ok(value: SurfaceCapabilities.take(formats: give formats, presentModes: give presentModes,
+                                                          alphaModes: give alphaModes, usages: usages));
+    }
+    ctor take(DynamicArray<TextureFormat> formats, DynamicArray<PresentMode> presentModes, DynamicArray<AlphaMode> alphaModes,
+              uint64 usages) {
+        this.formatList = give formats;
+        this.presentList = give presentModes;
+        this.alphaList = give alphaModes;
+        this.usageBits = usages;
+    }
+
+    public const fn const ref DynamicArray<TextureFormat> formats() { return this.formatList; }
+    public const fn const ref DynamicArray<PresentMode> presentModes() { return this.presentList; }
+    public const fn const ref DynamicArray<AlphaMode> alphaModes() { return this.alphaList; }
+    public const fn uint64 usages() { return this.usageBits; }
+
+    // Where to start: the first format, drawn through its sRGB form when it has one (itself when it is one); Fifo; the
+    // first alpha mode; RenderAttachment.
+    public const fn SurfaceConfig preferred() {
+        TextureFormat f = this.formatList[0];
+        Optional<TextureFormat> s = f.srgb();
+        TextureFormat view = match (s) { case Some(value: v): v; case None: f; };
+        return SurfaceConfig.make(format: f, viewFormat: view, present: PresentMode::Fifo, alpha: this.alphaList[0],
+                                  usage: TextureUsage::RenderAttachment);
+    }
+
+    // Why the surface would refuse `config`, or "" when it offers everything `config` asks for.
+    const fn string refuses(const ref SurfaceConfig config) {
+        string formatName = config.format.name();
+        bool formatOffered = false;
+        string formats = "";
+        isize i = 0;
+        while (i < this.formatList.length()) {
+            if (this.formatList[i] == config.format) { formatOffered = true; }
+            string n = this.formatList[i].name();
+            formats = joined(acc: formats, next: n);
+            i = i + 1;
+        }
+        if (!formatOffered) { return "the surface does not offer format ${formatName}; it offers ${formats}"; }
+        if (config.viewFormat.linear() != config.format.linear()) {
+            string viewName = config.viewFormat.name();
+            return "view format ${viewName} is not ${formatName} or its sRGB or linear form: a view may change only sRGB-ness";
+        }
+        bool presentOffered = false;
+        string presents = "";
+        i = 0;
+        while (i < this.presentList.length()) {
+            if (this.presentList[i] == config.present) { presentOffered = true; }
+            string n = this.presentList[i].name();
+            presents = joined(acc: presents, next: n);
+            i = i + 1;
+        }
+        if (!presentOffered) {
+            string p = config.present.name();
+            return "the surface does not offer present mode ${p}; it offers ${presents}";
+        }
+        bool alphaOffered = false;
+        string alphas = "";
+        i = 0;
+        while (i < this.alphaList.length()) {
+            if (this.alphaList[i] == config.alpha) { alphaOffered = true; }
+            string n = this.alphaList[i].name();
+            alphas = joined(acc: alphas, next: n);
+            i = i + 1;
+        }
+        if (!alphaOffered) {
+            string a = config.alpha.name();
+            return "the surface does not offer alpha mode ${a}; it offers ${alphas}";
+        }
+        if (config.usage == 0) { return "no usage: a surface's textures need at least one"; }
+        if ((config.usage & this.usageBits) != config.usage) {
+            string asked = usageNames(usage: config.usage);
+            string offered = usageNames(usage: this.usageBits);
+            return "the surface does not offer usage ${asked}; it offers ${offered}";
+        }
+        return "";
+    }
+}
+
+// emdawnwebgpu (Dawn v20260423) never sets a surface's usages, so on the web the package answers what a WebGPU canvas
+// accepts for every format it offers. Once Dawn answers for itself, its answer stands.
+@compileFor(ARCH_WASM32)
+fn uint64 answeredUsages(uint64 got) {
+    if (got != 0) { return got; }
+    return TextureUsage::RenderAttachment | TextureUsage::TextureBinding | TextureUsage::CopySrc | TextureUsage::CopyDst;
+}
+@compileFor(!ARCH_WASM32)
+fn uint64 answeredUsages(uint64 got) { return got; }
+
+// What `surface` offers `adapter`, read out of C and freed there at once.
+unsafe fn Result<SurfaceCapabilities, GpuError> capabilitiesOf(UnsafePtr surface, UnsafePtr adapter) {
+    if (adapter == null) { return Result::Err(error: GpuError::Refused(words: "no adapter to ask what the surface offers")); }
+    WGPUSurfaceCapabilities raw = WGPUSurfaceCapabilities.zero();
+    int32 status = surfaceGetCapabilities(surface: surface, adapter: adapter, capabilities: cast<UnsafePtr>(addr(of: raw)));
+    if (status != WGPUStatus::Success) {
+        return Result::Err(error: GpuError::Refused(words: "the adapter cannot present to this surface"));
+    }
+    DynamicArray<TextureFormat> formats = DynamicArray.empty();
+    UnsafePtr<int32> fs = cast<UnsafePtr<int32>>(raw.formats);
+    isize i = 0;
+    while (i < cast<isize>(raw.formatCount)) {
+        Optional<TextureFormat> f = TextureFormat::of(value: fs[i]);
+        match (f) { case Some(value: x): { formats.add(item: x); } case None: { } };
+        i = i + 1;
+    }
+    DynamicArray<PresentMode> presents = DynamicArray.empty();
+    UnsafePtr<int32> ps = cast<UnsafePtr<int32>>(raw.presentModes);
+    i = 0;
+    while (i < cast<isize>(raw.presentModeCount)) {
+        Optional<PresentMode> p = presentModeOf(v: ps[i]);
+        match (p) { case Some(value: x): { presents.add(item: x); } case None: { } };
+        i = i + 1;
+    }
+    DynamicArray<AlphaMode> alphas = DynamicArray.empty();
+    UnsafePtr<int32> als = cast<UnsafePtr<int32>>(raw.alphaModes);
+    i = 0;
+    while (i < cast<isize>(raw.alphaModeCount)) {
+        Optional<AlphaMode> a = alphaModeOf(v: als[i]);
+        match (a) { case Some(value: x): { alphas.add(item: x); } case None: { } };
+        i = i + 1;
+    }
+    uint64 usages = answeredUsages(got: raw.usages);
+    surfaceCapabilitiesFreeMembers(surfaceCapabilities: raw);
+    return SurfaceCapabilities.of(formats: give formats, presentModes: give presents, alphaModes: give alphas, usages: usages);
+}
+
+// What every copy of a surface shares: the native surface, released with the last copy, and the view format it was last
+// configured to be drawn through, so a copy made before a configure draws as the configure asked.
+type resource SurfaceState {
     UnsafePtr handle;
+    int32 view = 0;   // WebGPU's number for the view format; Undefined (0) before a configure, which is the texture's own
+
+    public unsafe ctor make(UnsafePtr handle) { this.handle = handle; }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+    public const fn int32 viewFormat() { return this.view; }
+    public fn void configured(int32 view) { this.view = view; }
+
+    unsafe ~SurfaceState() { if (this.handle != null) { surfaceRelease(surface: this.handle); } }
+}
+
+// A surface on a window, which WebGPU presents into. Drop it before the window it was made on. A copy shares the
+// surface and how it was configured.
+type resource Surface implements Copyable<This>(bare: give) {
+    Shared<SurfaceState> state;
 
     public unsafe ctor Result<Surface, GpuError> create(const ref Instance instance, const ref Window window) {
         NativeWindow n = window.nativeHandle();
@@ -959,31 +1272,62 @@ type resource Surface implements Copyable<This>(bare: give) {
         if (h == null) { return Result::Err(error: GpuError::Refused(words: "no surface for this window on this system")); }
         return Result::Ok(value: Surface.adopt(raw: h));
     }
-    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    public unsafe ctor copy(ref Surface source) { this.handle = source.handle; surfaceAddRef(surface: this.handle); }
-    public unsafe const fn UnsafePtr raw() { return this.handle; }
+    public unsafe ctor adopt(UnsafePtr raw) {
+        Shared<SurfaceState> s = new SurfaceState.make(handle: raw);
+        this.state = give s;
+    }
+    public unsafe ctor copy(ref Surface source) { this.state = copy source.state; }
+    public unsafe const fn UnsafePtr raw() { return this.state.raw(); }
 
-    // Draw into it with `device`, `width` × `height` pixels (the window's framebuffer size) in `format`, presented in
-    // step with the display. Configure again when an acquire says Outdated or Lost, or the window is resized.
-    public unsafe fn void configure(const ref Device device, uint32 width, uint32 height, TextureFormat format) {
+    // What the surface offers `adapter`: its formats, present modes, alpha modes and usages.
+    public unsafe const fn Result<SurfaceCapabilities, GpuError> capabilities(const ref Adapter adapter) {
+        return capabilitiesOf(surface: this.raw(), adapter: adapter.raw());
+    }
+
+    // Draw into it with `device`, `width` × `height` texels (the window's framebuffer size), as `config` says.
+    // Configure again when an acquire says Outdated or Lost, or the window is resized. Everything is checked against
+    // what the surface offers the device's adapter before WebGPU sees it, and refused in a ConfigureError.
+    public unsafe fn Result<Unit, ConfigureError> configure(const ref Device device, const ref SurfaceConfig config,
+                                                           uint32 width, uint32 height) {
+        if (width == 0 || height == 0) { return Result::Err(error: ConfigureError::NoArea); }
+        Limits limits = device.limits();
+        uint32 most = limits.maxTextureDimension2D;
+        if (width > most || height > most) { return Result::Err(error: ConfigureError::TooLarge(most: most)); }
+        Result<SurfaceCapabilities, GpuError> asked = capabilitiesOf(surface: this.raw(), adapter: device.adapterHandle());
+        SurfaceCapabilities caps = match (give asked) {
+            case Ok(value: c): give c;
+            case Err(error: e): { string why = e.message(); return Result::Err(error: ConfigureError::NotOffered(words: give why)); }
+        };
+        string refusal = caps.refuses(config: config);
+        if (!refusal.isEmpty()) { return Result::Err(error: ConfigureError::NotOffered(words: give refusal)); }
         WGPUSurfaceConfiguration c = WGPUSurfaceConfiguration.zero();
         c.device = device.raw();
-        c.format = formatValue(f: format);
-        c.usage = WGPUTextureUsage::RenderAttachment;
+        c.format = config.format.value();
+        c.usage = config.usage;
         c.width = width;
         c.height = height;
-        c.alphaMode = WGPUCompositeAlphaMode::Auto;
-        c.presentMode = WGPUPresentMode::Fifo;
-        surfaceConfigure(surface: this.handle, config: cast<UnsafePtr>(addr(of: c)));
+        InlineArray<int32>#(1) views = [0; 1];
+        views[0] = config.viewFormat.value();
+        if (config.viewFormat != config.format) {
+            c.viewFormatCount = 1;
+            c.viewFormats = cast<UnsafePtr>(addr(of: views[0]));
+        }
+        c.alphaMode = alphaValue(m: config.alpha);
+        c.presentMode = presentValue(m: config.present);
+        surfaceConfigure(surface: this.raw(), config: cast<UnsafePtr>(addr(of: c)));
+        this.state.configured(view: config.viewFormat.value());
+        return Result::Ok(value: Unit::Unit);
     }
 
     // The next texture to draw into, or why there is none.
     public unsafe fn Result<SurfaceTexture, SurfaceError> acquire() {
         UnsafePtr texture = null;
         int32 suboptimal = 0;
-        int32 s = acquireSurface(surface: this.handle, texture: addr(of: texture), suboptimal: addr(of: suboptimal));
+        UnsafePtr h = this.raw();
+        int32 s = acquireSurface(surface: h, texture: addr(of: texture), suboptimal: addr(of: suboptimal));
         if (s == SURFACE_OK) {
-            return Result::Ok(value: SurfaceTexture.make(texture: texture, surface: this.handle, suboptimal: suboptimal != 0));
+            return Result::Ok(value: SurfaceTexture.make(texture: texture, surface: h, suboptimal: suboptimal != 0,
+                                                         view: this.state.viewFormat()));
         }
         if (s == SURFACE_OCCLUDED) { return Result::Err(error: SurfaceError::Occluded); }
         if (s == SURFACE_OUTDATED) { return Result::Err(error: SurfaceError::Outdated); }
@@ -991,38 +1335,42 @@ type resource Surface implements Copyable<This>(bare: give) {
         if (s == SURFACE_TIMEOUT) { return Result::Err(error: SurfaceError::Timeout); }
         return Result::Err(error: SurfaceError::Failed);
     }
-
-    unsafe ~Surface() { if (this.handle != null) { surfaceRelease(surface: this.handle); } }
 }
 
 // One frame's texture. `present()` shows it and spends it; a frame dropped without presenting is skipped.
 type resource SurfaceTexture {
-    UnsafePtr texture;
+    UnsafePtr image;     // the frame's texture, on which it holds the reference the acquire gave
     UnsafePtr surface;   // a reference held while the frame lives, for its present
     bool late;
+    int32 viewAs;        // the view format the surface was configured with, or Undefined (0): the texture's own
 
     friend Surface::acquire[make];
 
-    unsafe ctor make(UnsafePtr texture, UnsafePtr surface, bool suboptimal) {
-        this.texture = texture;
+    unsafe ctor make(UnsafePtr texture, UnsafePtr surface, bool suboptimal, int32 view) {
+        this.image = texture;
         this.surface = surface;
         this.late = suboptimal;
+        this.viewAs = view;
         surfaceAddRef(surface: surface);
     }
 
     // The surface still works but no longer matches the window: configure it again soon.
     public const fn bool suboptimal() { return this.late; }
 
-    // A view to render into.
-    public unsafe fn TextureView view() {
-        return TextureView.adopt(raw: textureCreateView(texture: this.texture, descriptor: null));
+    // A view to render into, in the view format the surface was configured with: sRGB-encoding by default.
+    public unsafe fn TextureView view() { return TextureView.adopt(raw: textureViewIn(texture: this.image, format: this.viewAs)); }
+
+    // The frame's texture itself, to copy from when the configured usage allows it.
+    public unsafe fn Texture texture() {
+        textureAddRef(texture: this.image);
+        return Texture.adopt(raw: this.image);
     }
 
     // Show the frame; it is spent, and its texture released after the present.
     public unsafe give fn void present() { presentSurface(surface: this.surface); }
 
     unsafe ~SurfaceTexture() {
-        if (this.texture != null) { textureRelease(texture: this.texture); }
+        if (this.image != null) { textureRelease(texture: this.image); }
         surfaceRelease(surface: this.surface);
     }
 }

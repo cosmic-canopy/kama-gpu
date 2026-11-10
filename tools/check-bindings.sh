@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# tools/check-bindings.sh — the WebGPU bindings are what the headers make, and their numbers are the headers'.
+# tools/check-bindings.sh — the WebGPU bindings, and the safe API's TextureFormat, are what the headers make, and their
+# numbers are the headers'.
 #
-#   tools/check-bindings.sh            # regenerate into out/, compare with src/native/webgpu.gen.kama, check constants
-#   tools/check-bindings.sh --write    # regenerate and replace src/native/webgpu.gen.kama (after a header moves)
+#   tools/check-bindings.sh            # regenerate into out/, compare with src/native/webgpu.gen.kama and
+#                                      # src/formats.gen.kama, check constants
+#   tools/check-bindings.sh --write    # regenerate and replace both (after a header moves or the generator changes)
 #
 # Run it from msys2 UCRT64 on Windows (kama's docs/platforms/windows.md), or any shell elsewhere. It needs:
 #   - kama: `kama` on PATH, or $KAMA, or ../kama/out/<platform>/kama.exe beside this repository;
@@ -46,19 +48,31 @@ web_h="$EMSDK_DIR/upstream/emscripten/cache/ports/emdawnwebgpu/emdawnwebgpu_pkg/
 out="$ROOT/out/check-bindings"
 mkdir -p "$out"
 "$KAMA" build tools/wgpugen/kama.json -o "$out/wgpugen" > "$out/build.log" 2>&1 || { cat "$out/build.log"; exit 1; }
-"$out/wgpugen" "$native_h" "$extras_h" "$web_h" "$out/webgpu.gen.kama" "$out/constants.gen.c" > "$out/wgpugen.log" \
+"$out/wgpugen" "$native_h" "$extras_h" "$web_h" "$out/webgpu.gen.kama" "$out/constants.gen.c" "$out/formats.gen.kama" \
+    > "$out/wgpugen.log" \
     || { cat "$out/wgpugen.log"; exit 1; }
 
 committed="$ROOT/src/native/webgpu.gen.kama"
+formats="$ROOT/src/formats.gen.kama"
 if [ "${1:-}" = "--write" ]; then
     cp "$out/webgpu.gen.kama" "$committed"
-    echo "check-bindings: wrote src/native/webgpu.gen.kama ($(head -1 "$out/wgpugen.log" | sed 's/^wgpugen: //'))"
-elif cmp -s "$out/webgpu.gen.kama" "$committed"; then
-    echo "check-bindings: ok   the bindings are what the headers make"
+    cp "$out/formats.gen.kama" "$formats"
+    echo "check-bindings: wrote src/native/webgpu.gen.kama and src/formats.gen.kama ($(head -1 "$out/wgpugen.log" | sed 's/^wgpugen: //'))"
 else
-    diff "$committed" "$out/webgpu.gen.kama" | head -20 || true
-    echo "check-bindings: FAIL src/native/webgpu.gen.kama is not what tools/wgpugen makes (run with --write after a header moves)" >&2
-    exit 1
+    if cmp -s "$out/webgpu.gen.kama" "$committed"; then
+        echo "check-bindings: ok   the bindings are what the headers make"
+    else
+        diff "$committed" "$out/webgpu.gen.kama" | head -20 || true
+        echo "check-bindings: FAIL src/native/webgpu.gen.kama is not what tools/wgpugen makes (run with --write after a header moves)" >&2
+        exit 1
+    fi
+    if cmp -s "$out/formats.gen.kama" "$formats"; then
+        echo "check-bindings: ok   TextureFormat is what the headers make"
+    else
+        diff "$formats" "$out/formats.gen.kama" | head -20 || true
+        echo "check-bindings: FAIL src/formats.gen.kama is not what tools/wgpugen makes (run with --write after a header moves)" >&2
+        exit 1
+    fi
 fi
 
 constants() {

@@ -9,7 +9,7 @@ export {
     mapAsync, mapPoll, mapMessage, mapDrop, mapBytes,
     errorCount, lastError, lostCount, pollDevice,
     SURFACE_OK, SURFACE_OCCLUDED, SURFACE_OUTDATED, SURFACE_LOST, SURFACE_TIMEOUT,
-    createSurface, acquireSurface, presentSurface,
+    createSurface, acquireSurface, presentSurface, textureViewIn,
 };
 
 extern "gpuseam.h";
@@ -100,6 +100,7 @@ unsafe fn void pollDevice(UnsafePtr device, int32 wait) { gpuseam_device_poll(de
 extern fn UnsafePtr gpuseam_create_surface(UnsafePtr instance, int32 kind, UnsafePtr display, UnsafePtr window);
 extern fn int32 gpuseam_surface_acquire(UnsafePtr surface, UnsafePtr<UnsafePtr> texture, UnsafePtr<int32> suboptimal);
 extern fn void gpuseam_surface_present(UnsafePtr surface);
+extern fn UnsafePtr gpuseam_texture_view_in(UnsafePtr texture, int32 format);
 
 unsafe fn UnsafePtr createSurface(UnsafePtr instance, int32 kind, UnsafePtr display, UnsafePtr window) {
     return gpuseam_create_surface(instance: instance, kind: kind, display: display, window: window);
@@ -108,3 +109,6 @@ unsafe fn int32 acquireSurface(UnsafePtr surface, UnsafePtr<UnsafePtr> texture, 
     return gpuseam_surface_acquire(surface: surface, texture: texture, suboptimal: suboptimal);
 }
 unsafe fn void presentSurface(UnsafePtr surface) { gpuseam_surface_present(surface: surface); }
+unsafe fn UnsafePtr textureViewIn(UnsafePtr texture, int32 format) {
+    return gpuseam_texture_view_in(texture: texture, format: format);
+}
