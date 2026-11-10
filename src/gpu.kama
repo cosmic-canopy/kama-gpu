@@ -14,6 +14,9 @@
 // - A device gets WebGPU's default limits and no feature unless its `DeviceOptions` raise them, never its adapter's,
 //   so a program that runs on one machine does not silently depend on that machine's adapter.
 // - `adopt` and `raw` on every handle let a program bind more of webgpu.h with its own externs.
+// - A device's uncaptured errors reach that device's holders: `device.takeErrors()` drains its channel, and
+//   `device.lost()` answers its loss. The seam keeps a state block per device, and every handle made from the device
+//   holds it, since wgpu-native reports a handle's error to its device's callback after the device's last release.
 // - A surface is configured from what it offers: `surface.capabilities(adapter:)` answers, `preferred()` makes a
 //   `SurfaceConfig` a program may change, and `configure` checks it before WebGPU sees it, refusing in a
 //   `ConfigureError` what wgpu-native would abort the process on. Frames are drawn sRGB by default, through a view
@@ -54,7 +57,11 @@ import {
     gpu::native::requestDeviceOf, gpu::native::deviceRequestPoll,
     gpu::native::deviceRequestTakeDevice, gpu::native::deviceRequestMessage, gpu::native::deviceRequestDrop,
     gpu::native::mapAsync, gpu::native::mapPoll, gpu::native::mapMessage, gpu::native::mapDrop, gpu::native::mapBytes,
-    gpu::native::errorCount, gpu::native::lastError, gpu::native::lostCount, gpu::native::pollDevice,
+    gpu::native::pollDevice, gpu::native::deviceRequestTakeState, gpu::native::LOSS_DESTROYED,
+    gpu::native::stateUnwatched, gpu::native::stateHold, gpu::native::stateRelease, gpu::native::stateWatched,
+    gpu::native::stateTakeErrors, gpu::native::errorsCount, gpu::native::errorsDropped, gpu::native::errorsKind,
+    gpu::native::errorsLength, gpu::native::errorsMessage, gpu::native::errorsFree, gpu::native::stateLost,
+    gpu::native::stateLostLength, gpu::native::stateLostMessage,
     gpu::native::SURFACE_OK, gpu::native::SURFACE_OCCLUDED, gpu::native::SURFACE_OUTDATED, gpu::native::SURFACE_LOST,
     gpu::native::SURFACE_TIMEOUT, gpu::native::createSurface, gpu::native::acquireSurface, gpu::native::presentSurface,
     gpu::native::surfaceAddRef, gpu::native::surfaceRelease, gpu::native::surfaceConfigure,
@@ -72,7 +79,7 @@ export {
     Texture, TextureUsage, TextureView,
     CommandEncoder, RenderPass, CommandBuffer, Color,
     Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
-    uncapturedErrors, lastErrorMessage, lostDevices,
+    GpuErrorKind, GpuErrorReport, DeviceErrors, DeviceLoss, LossReason,
 };
 
 comptime int32 MESSAGE_BYTES = 512;
@@ -112,18 +119,107 @@ unsafe fn string textOf(const ref InlineArray<uint8>#(512) buf, int32 length) {
     };
 }
 
-// Uncaptured errors (validation, out of memory) since the program started, on every device.
-unsafe fn int64 uncapturedErrors() { return errorCount(); }
-
-// The last uncaptured error's or lost device's words.
-unsafe fn string lastErrorMessage() {
-    InlineArray<uint8>#(512) buf = [0; 512];
-    int32 n = lastError(dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
-    return textOf(buf: buf, length: n);
+// The `length` bytes the seam keeps at `p`, as text.
+unsafe fn string textFrom(UnsafeConstPtr<uint8> p, int32 length) {
+    if (p == null || length <= 0) { return ""; }
+    DynamicArray<uint8> bytes = DynamicArray.empty();
+    isize n = cast<isize>(length);
+    bytes.reserve(n: n);
+    isize i = 0;
+    while (i < n) { bytes.add(item: p[i]); i = i + 1; }
+    Result<string, Utf8Error> r = decode(bytes: bytes.view());
+    match (give r) {
+        case Ok(value: s): { return give s; }
+        case Err(error: e): { return "(not UTF-8)"; }
+    };
 }
 
-// Devices lost for a reason other than their release, since the program started.
-unsafe fn int64 lostDevices() { return lostCount(); }
+// ---- a device's errors and its loss (GPU-1; AGENTS.gpu.md item 2) --------------------------------------------------
+
+// What kind of error WebGPU reported; Unknown is anything else.
+type enum GpuErrorKind { Validation, OutOfMemory, Internal, Unknown }
+
+fn GpuErrorKind kindFrom(int32 v) {
+    if (v == 0) { return GpuErrorKind::Validation; }
+    if (v == 1) { return GpuErrorKind::OutOfMemory; }
+    if (v == 2) { return GpuErrorKind::Internal; }
+    return GpuErrorKind::Unknown;
+}
+
+// One error WebGPU reported, in its own words, whole.
+type resource GpuErrorReport {
+    GpuErrorKind sort;
+    string words;
+
+    public ctor of(GpuErrorKind kind, string message) {
+        this.sort = kind;
+        this.words = give message;
+    }
+    public const fn GpuErrorKind kind() { return this.sort; }
+    public const fn string message() { return copy this.words; }
+}
+
+// What `device.takeErrors()` drained: the device's uncaptured errors since the last drain, the oldest first. A full
+// channel keeps the oldest 64, since the first error is usually the cause and the later ones its cascade, and counts the
+// rest in `dropped()`.
+type resource DeviceErrors {
+    DynamicArray<GpuErrorReport> items;
+    int64 overflow;
+    bool wired;
+
+    friend Device::takeErrors[make];
+
+    ctor make(DynamicArray<GpuErrorReport> reports, int64 dropped, bool watched) {
+        this.items = give reports;
+        this.overflow = dropped;
+        this.wired = watched;
+    }
+    public const fn const ref DynamicArray<GpuErrorReport> reports() { return this.items; }
+    public const fn int64 dropped() { return this.overflow; }
+    // False for a device adopted from elsewhere: it keeps the error callback its maker gave it (webgpu.h sets one only
+    // when a device is made), so its errors reach that callback and never this channel.
+    public const fn bool watched() { return this.wired; }
+    public const fn bool isEmpty() { return this.items.length() == 0 && this.overflow == 0; }
+}
+
+// Why a device was lost: Destroyed when it was destroyed on purpose.
+type enum LossReason { Unknown, Destroyed }
+
+// How a device was lost, in the implementation's words.
+type resource DeviceLoss {
+    LossReason why;
+    string words;
+
+    public ctor of(LossReason reason, string message) {
+        this.why = reason;
+        this.words = give message;
+    }
+    public const fn LossReason reason() { return this.why; }
+    public const fn string message() { return copy this.words; }
+}
+
+// A hold on a device's state block in the seam: its errors and its loss. Every handle made from a device keeps one,
+// since wgpu-native reports a handle's error to its device's callback even after the device's last release
+// (tests/facts, `afterrelease`), and the block is freed with the last hold. Empty for a handle adopted from elsewhere.
+type resource StateHold implements Copyable<This>(bare: give) {
+    UnsafePtr block;
+
+    // A hold the seam counted already: a device request's, or a new block's.
+    public unsafe ctor fromSeam(UnsafePtr block) { this.block = block; }
+    // Another hold on `block`, which may be null.
+    public unsafe ctor make(UnsafePtr block) {
+        this.block = block;
+        stateHold(state: block);
+    }
+    public unsafe ctor empty() { this.block = null; }
+    public unsafe ctor copy(ref StateHold source) {
+        this.block = source.block;
+        stateHold(state: this.block);
+    }
+    public unsafe const fn UnsafePtr raw() { return this.block; }
+
+    unsafe ~StateHold() { stateRelease(state: this.block); }
+}
 
 // ---- plain data ------------------------------------------------------------------------------------------------------
 
@@ -662,8 +758,10 @@ type resource DeviceRequest {
         }
         UnsafePtr device = deviceRequestTakeDevice(request: this.slot);
         if (device == null) { return DeviceStatus::Failed(error: GpuError::Taken); }
+        UnsafePtr state = deviceRequestTakeState(request: this.slot);
         UnsafePtr queue = deviceGetQueue(device: device);
-        return DeviceStatus::Ready(device: Device.fromRequest(raw: device, adapter: this.adapter), queue: Queue.adopt(raw: queue));
+        return DeviceStatus::Ready(device: Device.fromRequest(raw: device, adapter: this.adapter, block: state),
+                                   queue: Queue.fromDevice(raw: queue, block: state));
     }
 
     unsafe ~DeviceRequest() {
@@ -677,29 +775,69 @@ type resource DeviceRequest {
 type resource Device implements Copyable<This>(bare: give) {
     UnsafePtr handle;
     UnsafePtr adapter;
+    StateHold hold = StateHold.empty();   // its errors and its loss, shared with every handle made from it
 
     friend DeviceRequest::poll[fromRequest];
-    friend Surface::configure[adapterHandle];
+    friend Surface::configure[adapterHandle, stateBlock];
 
-    // A device made outside this package, with the adapter it was requested of.
+    // A device made outside this package, with the adapter it was requested of; it takes over one reference. It keeps
+    // the callbacks its maker gave it, since webgpu.h sets them only when a device is made, so its errors and its loss
+    // reach those and never this package: `takeErrors()` says so (`watched()` is false), and `lost()` answers None.
     public unsafe ctor adopt(UnsafePtr raw, const ref Adapter adapter) {
         this.handle = raw;
         this.adapter = adapter.raw();
         if (this.adapter != null) { adapterAddRef(adapter: this.adapter); }
+        this.hold = StateHold.fromSeam(block: stateUnwatched());
     }
-    unsafe ctor fromRequest(UnsafePtr raw, UnsafePtr adapter) {
+    unsafe ctor fromRequest(UnsafePtr raw, UnsafePtr adapter, UnsafePtr block) {
         this.handle = raw;
         this.adapter = adapter;
         if (adapter != null) { adapterAddRef(adapter: adapter); }
+        this.hold = StateHold.fromSeam(block: block);
     }
     public unsafe ctor copy(ref Device source) {
         this.handle = source.handle;
         this.adapter = source.adapter;
         deviceAddRef(device: this.handle);
         if (this.adapter != null) { adapterAddRef(adapter: this.adapter); }
+        this.hold = copy source.hold;
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
     unsafe const fn UnsafePtr adapterHandle() { return this.adapter; }
+    unsafe const fn UnsafePtr stateBlock() { return this.hold.raw(); }
+
+    // The uncaptured errors reported since the last call, the oldest first, from the device's calls and from every
+    // handle made from it, draining its channel; every copy of the device shares the one channel. Natively an error is
+    // here when the call that caused it returns; on the web, a task later.
+    public unsafe fn DeviceErrors takeErrors() {
+        DynamicArray<GpuErrorReport> list = DynamicArray.empty();
+        int64 dropped = 0;
+        UnsafePtr drained = stateTakeErrors(state: this.hold.raw());
+        if (drained != null) {
+            int32 n = errorsCount(errors: drained);
+            int32 i = 0;
+            while (i < n) {
+                string words = textFrom(p: errorsMessage(errors: drained, at: i), length: errorsLength(errors: drained, at: i));
+                list.add(item: GpuErrorReport.of(kind: kindFrom(v: errorsKind(errors: drained, at: i)), message: give words));
+                i = i + 1;
+            }
+            dropped = errorsDropped(errors: drained);
+            errorsFree(errors: drained);
+        }
+        return DeviceErrors.make(reports: give list, dropped: dropped, watched: stateWatched(state: this.hold.raw()) != 0);
+    }
+
+    // How the device was lost, once it is. Natively wgpu-native reports no loss, of a destroy or a release (tests/facts,
+    // `noloss`), so this answers None there.
+    public unsafe const fn Optional<DeviceLoss> lost() {
+        UnsafePtr block = this.hold.raw();
+        int32 l = stateLost(state: block);
+        if (l == 0) { return Optional::None; }
+        string words = textFrom(p: stateLostMessage(state: block), length: stateLostLength(state: block));
+        LossReason why = LossReason::Unknown;
+        if (l == LOSS_DESTROYED) { why = LossReason::Destroyed; }
+        return Optional::Some(value: DeviceLoss.of(reason: why, message: give words));
+    }
 
     // The limits it was given: WebGPU's defaults, unless its request raised them.
     public unsafe const fn Limits limits() {
@@ -720,7 +858,8 @@ type resource Device implements Copyable<This>(bare: give) {
         WGPUBufferDescriptor d = WGPUBufferDescriptor.zero();
         d.size = size;
         d.usage = usage;
-        return Buffer.adopt(raw: deviceCreateBuffer(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))));
+        return Buffer.fromDevice(raw: deviceCreateBuffer(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))),
+                                 block: this.hold.raw());
     }
 
     // A 2D texture, one mip level, one sample.
@@ -734,11 +873,13 @@ type resource Device implements Copyable<This>(bare: give) {
         d.format = format.value();
         d.mipLevelCount = 1;
         d.sampleCount = 1;
-        return Texture.adopt(raw: deviceCreateTexture(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))));
+        return Texture.fromDevice(raw: deviceCreateTexture(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))),
+                                  block: this.hold.raw());
     }
 
     public unsafe fn CommandEncoder createCommandEncoder() {
-        return CommandEncoder.adopt(raw: deviceCreateCommandEncoder(device: this.handle, descriptor: null));
+        return CommandEncoder.fromDevice(raw: deviceCreateCommandEncoder(device: this.handle, descriptor: null),
+                                         block: this.hold.raw());
     }
 
     // Natively, finish what the device can and fire its callbacks; `wait` blocks until its queue is empty. On the web
@@ -757,9 +898,21 @@ type resource Device implements Copyable<This>(bare: give) {
 
 type resource Queue implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
+    friend DeviceRequest::poll[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    public unsafe ctor copy(ref Queue source) { this.handle = source.handle; queueAddRef(queue: this.handle); }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
+    public unsafe ctor copy(ref Queue source) {
+        this.handle = source.handle;
+        queueAddRef(queue: this.handle);
+        this.hold = copy source.hold;
+    }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
     // Hand `commands` to the GPU; the command buffer is spent.
@@ -775,9 +928,21 @@ type resource Queue implements Copyable<This>(bare: give) {
 
 type resource Buffer implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
+    friend Device::createBuffer[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    public unsafe ctor copy(ref Buffer source) { this.handle = source.handle; bufferAddRef(buffer: this.handle); }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
+    public unsafe ctor copy(ref Buffer source) {
+        this.handle = source.handle;
+        bufferAddRef(buffer: this.handle);
+        this.hold = copy source.hold;
+    }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
     public unsafe const fn uint64 size() { return bufferGetSize(buffer: this.handle); }
 
@@ -837,14 +1002,27 @@ type resource BufferRead {
 
 type resource Texture implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
+    friend Device::createTexture[fromDevice];
+    friend SurfaceTexture::texture[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    public unsafe ctor copy(ref Texture source) { this.handle = source.handle; textureAddRef(texture: this.handle); }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
+    public unsafe ctor copy(ref Texture source) {
+        this.handle = source.handle;
+        textureAddRef(texture: this.handle);
+        this.hold = copy source.hold;
+    }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
     // A view of the whole texture.
     public unsafe fn TextureView createView() {
-        return TextureView.adopt(raw: textureCreateView(texture: this.handle, descriptor: null));
+        return TextureView.fromDevice(raw: textureCreateView(texture: this.handle, descriptor: null), block: this.hold.raw());
     }
 
     unsafe ~Texture() { if (this.handle != null) { textureRelease(texture: this.handle); } }
@@ -852,9 +1030,22 @@ type resource Texture implements Copyable<This>(bare: give) {
 
 type resource TextureView implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
+    friend Texture::createView[fromDevice];
+    friend SurfaceTexture::view[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    public unsafe ctor copy(ref TextureView source) { this.handle = source.handle; textureViewAddRef(textureView: this.handle); }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
+    public unsafe ctor copy(ref TextureView source) {
+        this.handle = source.handle;
+        textureViewAddRef(textureView: this.handle);
+        this.hold = copy source.hold;
+    }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
     unsafe ~TextureView() { if (this.handle != null) { textureViewRelease(textureView: this.handle); } }
@@ -864,11 +1055,20 @@ type resource TextureView implements Copyable<This>(bare: give) {
 
 type resource CommandEncoder implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
+    friend Device::createCommandEncoder[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
     public unsafe ctor copy(ref CommandEncoder source) {
         this.handle = source.handle;
         commandEncoderAddRef(commandEncoder: this.handle);
+        this.hold = copy source.hold;
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
@@ -886,8 +1086,9 @@ type resource CommandEncoder implements Copyable<This>(bare: give) {
         WGPURenderPassDescriptor d = WGPURenderPassDescriptor.zero();
         d.colorAttachmentCount = 1;
         d.colorAttachments = cast<UnsafePtr>(addr(of: att));
-        return RenderPass.adopt(raw: commandEncoderBeginRenderPass(commandEncoder: this.handle,
-                                                                   descriptor: cast<UnsafePtr>(addr(of: d))));
+        return RenderPass.fromDevice(raw: commandEncoderBeginRenderPass(commandEncoder: this.handle,
+                                                                        descriptor: cast<UnsafePtr>(addr(of: d))),
+                                     block: this.hold.raw());
     }
 
     // Copy a `width` × `height` region of `texture`'s first level into `buffer`, `bytesPerRow` apart (a multiple of 256).
@@ -911,7 +1112,8 @@ type resource CommandEncoder implements Copyable<This>(bare: give) {
 
     // The recorded commands; the encoder is spent.
     public unsafe give fn CommandBuffer finish() {
-        return CommandBuffer.adopt(raw: commandEncoderFinish(commandEncoder: this.handle, descriptor: null));
+        return CommandBuffer.fromDevice(raw: commandEncoderFinish(commandEncoder: this.handle, descriptor: null),
+                                        block: this.hold.raw());
     }
 
     unsafe ~CommandEncoder() { if (this.handle != null) { commandEncoderRelease(commandEncoder: this.handle); } }
@@ -919,11 +1121,20 @@ type resource CommandEncoder implements Copyable<This>(bare: give) {
 
 type resource RenderPass implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
+    friend CommandEncoder::beginRenderPass[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
     public unsafe ctor copy(ref RenderPass source) {
         this.handle = source.handle;
         renderPassEncoderAddRef(renderPassEncoder: this.handle);
+        this.hold = copy source.hold;
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
@@ -935,11 +1146,20 @@ type resource RenderPass implements Copyable<This>(bare: give) {
 
 type resource CommandBuffer implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
+    friend CommandEncoder::finish[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
     public unsafe ctor copy(ref CommandBuffer source) {
         this.handle = source.handle;
         commandBufferAddRef(commandBuffer: this.handle);
+        this.hold = copy source.hold;
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
@@ -1244,11 +1464,16 @@ unsafe fn Result<SurfaceCapabilities, GpuError> capabilitiesOf(UnsafePtr surface
 type resource SurfaceState {
     UnsafePtr handle;
     int32 view = 0;   // WebGPU's number for the view format; Undefined (0) before a configure, which is the texture's own
+    StateHold hold = StateHold.empty();   // the state of the device it was last configured with, which its frames hold
 
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
     public const fn int32 viewFormat() { return this.view; }
-    public fn void configured(int32 view) { this.view = view; }
+    public unsafe const fn UnsafePtr deviceState() { return this.hold.raw(); }
+    public unsafe fn void configured(int32 view, UnsafePtr block) {
+        this.view = view;
+        this.hold = StateHold.make(block: block);
+    }
 
     unsafe ~SurfaceState() { if (this.handle != null) { surfaceRelease(surface: this.handle); } }
 }
@@ -1315,7 +1540,7 @@ type resource Surface implements Copyable<This>(bare: give) {
         c.alphaMode = alphaValue(m: config.alpha);
         c.presentMode = presentValue(m: config.present);
         surfaceConfigure(surface: this.raw(), config: cast<UnsafePtr>(addr(of: c)));
-        this.state.configured(view: config.viewFormat.value());
+        this.state.configured(view: config.viewFormat.value(), block: device.stateBlock());
         return Result::Ok(value: Unit::Unit);
     }
 
@@ -1327,7 +1552,7 @@ type resource Surface implements Copyable<This>(bare: give) {
         int32 s = acquireSurface(surface: h, texture: addr(of: texture), suboptimal: addr(of: suboptimal));
         if (s == SURFACE_OK) {
             return Result::Ok(value: SurfaceTexture.make(texture: texture, surface: h, suboptimal: suboptimal != 0,
-                                                         view: this.state.viewFormat()));
+                                                         view: this.state.viewFormat(), block: this.state.deviceState()));
         }
         if (s == SURFACE_OCCLUDED) { return Result::Err(error: SurfaceError::Occluded); }
         if (s == SURFACE_OUTDATED) { return Result::Err(error: SurfaceError::Outdated); }
@@ -1343,27 +1568,31 @@ type resource SurfaceTexture {
     UnsafePtr surface;   // a reference held while the frame lives, for its present
     bool late;
     int32 viewAs;        // the view format the surface was configured with, or Undefined (0): the texture's own
+    StateHold hold = StateHold.empty();   // the state of the device the surface was configured with
 
     friend Surface::acquire[make];
 
-    unsafe ctor make(UnsafePtr texture, UnsafePtr surface, bool suboptimal, int32 view) {
+    unsafe ctor make(UnsafePtr texture, UnsafePtr surface, bool suboptimal, int32 view, UnsafePtr block) {
         this.image = texture;
         this.surface = surface;
         this.late = suboptimal;
         this.viewAs = view;
         surfaceAddRef(surface: surface);
+        this.hold = StateHold.make(block: block);
     }
 
     // The surface still works but no longer matches the window: configure it again soon.
     public const fn bool suboptimal() { return this.late; }
 
     // A view to render into, in the view format the surface was configured with: sRGB-encoding by default.
-    public unsafe fn TextureView view() { return TextureView.adopt(raw: textureViewIn(texture: this.image, format: this.viewAs)); }
+    public unsafe fn TextureView view() {
+        return TextureView.fromDevice(raw: textureViewIn(texture: this.image, format: this.viewAs), block: this.hold.raw());
+    }
 
     // The frame's texture itself, to copy from when the configured usage allows it.
     public unsafe fn Texture texture() {
         textureAddRef(texture: this.image);
-        return Texture.adopt(raw: this.image);
+        return Texture.fromDevice(raw: this.image, block: this.hold.raw());
     }
 
     // Show the frame; it is spent, and its texture released after the present.

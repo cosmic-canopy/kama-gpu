@@ -38,40 +38,177 @@ static int32_t copy_out(const char *src, int32_t length, uint8_t *dst, int32_t c
     return n;
 }
 
-// ---- errors, process-wide ----------------------------------------------------------------------------------------
+// ---- a device's state: its errors and its loss -----------------------------------------------------------------------
+//
+// One block per device, made with its request and handed to both its callbacks as their userdata. wgpu-native reports a
+// child's error to its device's callback after the device's last release (tests/facts, `afterrelease`), so the block is
+// held by every handle made from the device, not by the device's copies alone, and freed when the last lets it go. On
+// the web the lost callback holds it too, until it fires; natively it never fires (tests/facts, `noloss`).
 
-static atomic_llong g_errors;
-static atomic_llong g_lost;
-static atomic_flag g_error_lock = ATOMIC_FLAG_INIT;
-static char g_last_error[GPUSEAM_MESSAGE_BYTES];
-static int32_t g_last_error_length;
+#define GPUSEAM_RING 64
+
+typedef struct {
+    int32_t kind;    // GPUSEAM_KIND_*
+    char *message;   // its own allocation, the message whole; NULL when it had none or could not be kept
+    int32_t length;
+} gpuseam_report;
+
+struct gpuseam_state {
+    atomic_int holders;
+    atomic_flag lock;
+    int32_t watched;                    // 0 for an adopted device, whose errors reach its maker's callback
+    gpuseam_report ring[GPUSEAM_RING];  // the oldest at `head`
+    int32_t head;
+    int32_t count;
+    int64_t dropped;                    // what did not fit since the last drain
+    atomic_int lost;                    // 0, else GPUSEAM_LOSS_*, published once the message is kept
+    char *lost_message;
+    int32_t lost_length;
+};
+
+// A drain: the ring's reports, moved out of it.
+struct gpuseam_errors {
+    int32_t count;
+    int64_t dropped;
+    gpuseam_report reports[GPUSEAM_RING];
+};
+
+static atomic_llong g_states_alive;
+
+static void state_lock(gpuseam_state *s) {
+    while (atomic_flag_test_and_set_explicit(&s->lock, memory_order_acquire)) { }
+}
+static void state_unlock(gpuseam_state *s) { atomic_flag_clear_explicit(&s->lock, memory_order_release); }
+
+static int32_t kind_of(WGPUErrorType type) {
+    switch (type) {
+        case WGPUErrorType_Validation: return GPUSEAM_KIND_VALIDATION;
+        case WGPUErrorType_OutOfMemory: return GPUSEAM_KIND_OUT_OF_MEMORY;
+        case WGPUErrorType_Internal: return GPUSEAM_KIND_INTERNAL;
+        default: return GPUSEAM_KIND_UNKNOWN;
+    }
+}
+
+// A message kept whole, in an allocation of its own.
+static gpuseam_report report_of(int32_t kind, WGPUStringView v) {
+    gpuseam_report r = { kind, NULL, 0 };
+    if (v.data == NULL) return r;
+    size_t n = v.length == WGPU_STRLEN ? strlen(v.data) : v.length;
+    if (n == 0) return r;
+    if (n > INT32_MAX) n = INT32_MAX;
+    r.message = (char *)malloc(n);
+    if (r.message == NULL) return r;
+    memcpy(r.message, v.data, n);
+    r.length = (int32_t)n;
+    return r;
+}
+
+// Into the ring, under the lock: kept while there is room, the oldest first, and counted once it is full, since the first
+// error is usually the cause and the later ones its cascade. The report is moved: its message is the ring's, or freed.
+static void ring_put(gpuseam_state *s, gpuseam_report *r) {
+    if (s->count < GPUSEAM_RING) {
+        s->ring[(s->head + s->count) % GPUSEAM_RING] = *r;
+        s->count += 1;
+    } else {
+        s->dropped += 1;
+        free(r->message);
+    }
+    r->message = NULL;
+    r->length = 0;
+}
+
+static gpuseam_state *state_new(int32_t watched) {
+    gpuseam_state *s = (gpuseam_state *)calloc(1, sizeof *s);
+    if (s == NULL) return NULL;
+    atomic_init(&s->holders, 1);
+    atomic_flag_clear(&s->lock);
+    atomic_init(&s->lost, 0);
+    s->watched = watched;
+    atomic_fetch_add_explicit(&g_states_alive, 1, memory_order_relaxed);
+    return s;
+}
+
+gpuseam_state *gpuseam_state_unwatched(void) { return state_new(0); }
+
+void gpuseam_state_hold(gpuseam_state *s) {
+    if (s != NULL) atomic_fetch_add_explicit(&s->holders, 1, memory_order_relaxed);
+}
+
+void gpuseam_state_release(gpuseam_state *s) {
+    if (s == NULL) return;
+    if (atomic_fetch_sub_explicit(&s->holders, 1, memory_order_acq_rel) != 1) return;
+    for (int32_t i = 0; i < s->count; i++) free(s->ring[(s->head + i) % GPUSEAM_RING].message);
+    free(s->lost_message);
+    free(s);
+    atomic_fetch_sub_explicit(&g_states_alive, 1, memory_order_relaxed);
+}
+
+int64_t gpuseam_states_alive(void) { return (int64_t)atomic_load_explicit(&g_states_alive, memory_order_relaxed); }
 
 static void on_uncaptured_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringView message, void *u1, void *u2) {
-    (void)device; (void)type; (void)u1; (void)u2;
-    while (atomic_flag_test_and_set_explicit(&g_error_lock, memory_order_acquire)) { }
-    g_last_error_length = keep_message(message, g_last_error);
-    atomic_flag_clear_explicit(&g_error_lock, memory_order_release);
-    atomic_fetch_add_explicit(&g_errors, 1, memory_order_release);
+    (void)device; (void)u2;
+    gpuseam_state *s = (gpuseam_state *)u1;
+    gpuseam_report r = report_of(kind_of(type), message);
+    state_lock(s);
+    ring_put(s, &r);
+    state_unlock(s);
 }
 
 static void on_device_lost(WGPUDevice const *device, WGPUDeviceLostReason reason, WGPUStringView message, void *u1, void *u2) {
-    (void)device; (void)u1; (void)u2;
-    // released on purpose, or its instance gone first: not a loss anyone must handle
-    if (reason == WGPUDeviceLostReason_Destroyed || reason == WGPUDeviceLostReason_CallbackCancelled) return;
-    while (atomic_flag_test_and_set_explicit(&g_error_lock, memory_order_acquire)) { }
-    g_last_error_length = keep_message(message, g_last_error);
-    atomic_flag_clear_explicit(&g_error_lock, memory_order_release);
-    atomic_fetch_add_explicit(&g_lost, 1, memory_order_release);
+    (void)device; (void)u2;
+    gpuseam_state *s = (gpuseam_state *)u1;
+    // its instance gone first is not a loss anyone must handle
+    if (reason != WGPUDeviceLostReason_CallbackCancelled && atomic_load_explicit(&s->lost, memory_order_acquire) == 0) {
+        gpuseam_report r = report_of(GPUSEAM_KIND_UNKNOWN, message);
+        s->lost_message = r.message;
+        s->lost_length = r.length;
+        int32_t why = reason == WGPUDeviceLostReason_Destroyed ? GPUSEAM_LOSS_DESTROYED : GPUSEAM_LOSS_UNKNOWN;
+        atomic_store_explicit(&s->lost, why, memory_order_release);
+    }
+#ifdef __EMSCRIPTEN__
+    gpuseam_state_release(s);   // the hold the lost callback kept until it fired
+#endif
 }
 
-int64_t gpuseam_error_count(void) { return (int64_t)atomic_load_explicit(&g_errors, memory_order_acquire); }
-int64_t gpuseam_lost_count(void) { return (int64_t)atomic_load_explicit(&g_lost, memory_order_acquire); }
+int32_t gpuseam_state_watched(gpuseam_state *s) { return s != NULL && s->watched; }
 
-int32_t gpuseam_last_error(uint8_t *dst, int32_t capacity) {
-    while (atomic_flag_test_and_set_explicit(&g_error_lock, memory_order_acquire)) { }
-    int32_t n = copy_out(g_last_error, g_last_error_length, dst, capacity);
-    atomic_flag_clear_explicit(&g_error_lock, memory_order_release);
-    return n;
+gpuseam_errors *gpuseam_state_take_errors(gpuseam_state *s) {
+    if (s == NULL) return NULL;
+    state_lock(s);
+    int empty = s->count == 0 && s->dropped == 0;
+    state_unlock(s);
+    if (empty) return NULL;
+    gpuseam_errors *e = (gpuseam_errors *)malloc(sizeof *e);
+    if (e == NULL) return NULL;   // the reports stay in the ring for the next drain
+    state_lock(s);
+    e->count = s->count;
+    e->dropped = s->dropped;
+    for (int32_t i = 0; i < s->count; i++) e->reports[i] = s->ring[(s->head + i) % GPUSEAM_RING];
+    s->head = 0;
+    s->count = 0;
+    s->dropped = 0;
+    state_unlock(s);
+    return e;
+}
+
+int32_t gpuseam_errors_count(gpuseam_errors *e) { return e == NULL ? 0 : e->count; }
+int64_t gpuseam_errors_dropped(gpuseam_errors *e) { return e == NULL ? 0 : e->dropped; }
+int32_t gpuseam_errors_kind(gpuseam_errors *e, int32_t at) { return e->reports[at].kind; }
+int32_t gpuseam_errors_length(gpuseam_errors *e, int32_t at) { return e->reports[at].length; }
+const uint8_t *gpuseam_errors_message(gpuseam_errors *e, int32_t at) { return (const uint8_t *)e->reports[at].message; }
+
+void gpuseam_errors_free(gpuseam_errors *e) {
+    if (e == NULL) return;
+    for (int32_t i = 0; i < e->count; i++) free(e->reports[i].message);
+    free(e);
+}
+
+int32_t gpuseam_state_lost(gpuseam_state *s) {
+    return s == NULL ? 0 : (int32_t)atomic_load_explicit(&s->lost, memory_order_acquire);
+}
+int32_t gpuseam_state_lost_length(gpuseam_state *s) { return gpuseam_state_lost(s) != 0 ? s->lost_length : 0; }
+const uint8_t *gpuseam_state_lost_message(gpuseam_state *s) {
+    return gpuseam_state_lost(s) != 0 ? (const uint8_t *)s->lost_message : NULL;
 }
 
 // ---- an adapter on its way ----------------------------------------------------------------------------------------
@@ -213,6 +350,7 @@ struct gpuseam_device_request {
     WGPUInstance instance;   // the adapter's instance, for its events, or NULL; a reference held while the slot lives
     WGPUAdapter adapter;     // a reference held while the slot lives
     WGPUDevice device;
+    gpuseam_state *errors;   // the device's state, held until the device is taken
     char message[GPUSEAM_MESSAGE_BYTES];
     int32_t message_length;
 };
@@ -221,6 +359,7 @@ static void request_free(gpuseam_device_request *r) {
     if (r->device != NULL) wgpuDeviceRelease(r->device);
     if (r->adapter != NULL) wgpuAdapterRelease(r->adapter);
     if (r->instance != NULL) wgpuInstanceRelease(r->instance);
+    gpuseam_state_release(r->errors);
     free(r);
 }
 
@@ -246,6 +385,11 @@ gpuseam_device_request *gpuseam_adapter_request_device(WGPUInstance instance, WG
                                                        int32_t feature_count) {
     gpuseam_device_request *r = (gpuseam_device_request *)calloc(1, sizeof *r);
     if (r == NULL) return NULL;
+    r->errors = state_new(1);
+    if (r->errors == NULL) { free(r); return NULL; }
+#ifdef __EMSCRIPTEN__
+    gpuseam_state_hold(r->errors);   // the lost callback's, released when it fires
+#endif
     atomic_init(&r->state, GPUSEAM_PENDING);
     if (instance != NULL) wgpuInstanceAddRef(instance);
     r->instance = instance;
@@ -258,7 +402,9 @@ gpuseam_device_request *gpuseam_adapter_request_device(WGPUInstance instance, WG
     dd.requiredFeatures = (const WGPUFeatureName *)features;
     dd.deviceLostCallbackInfo.mode = WGPUCallbackMode_AllowSpontaneous;
     dd.deviceLostCallbackInfo.callback = on_device_lost;
+    dd.deviceLostCallbackInfo.userdata1 = r->errors;
     dd.uncapturedErrorCallbackInfo.callback = on_uncaptured_error;
+    dd.uncapturedErrorCallbackInfo.userdata1 = r->errors;
     WGPURequestDeviceCallbackInfo ci;
     memset(&ci, 0, sizeof ci);
     ci.mode = WGPUCallbackMode_AllowSpontaneous;
@@ -282,6 +428,13 @@ WGPUDevice gpuseam_device_request_take_device(gpuseam_device_request *r) {
     WGPUDevice d = r->device;
     r->device = NULL;
     return d;
+}
+
+gpuseam_state *gpuseam_device_request_take_state(gpuseam_device_request *r) {
+    if (atomic_load_explicit(&r->state, memory_order_acquire) != GPUSEAM_READY) return NULL;
+    gpuseam_state *s = r->errors;
+    r->errors = NULL;
+    return s;
 }
 
 int32_t gpuseam_device_request_message(gpuseam_device_request *r, uint8_t *dst, int32_t capacity) {

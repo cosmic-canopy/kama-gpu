@@ -5,6 +5,15 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Errors per device (2026-11-10, kama 0.9.911; GPU-1, AGENTS.gpu.md item 2). **Breaking:** `uncapturedErrors()`,
+  `lastErrorMessage()` and `lostDevices()`, which counted every device's errors together, are gone.
+  - `device.takeErrors()` drains a `DeviceErrors`: its `GpuErrorReport`s (`kind()`, a `GpuErrorKind`, and
+    `message()`, whole), `dropped()` (the channel keeps the oldest 64) and `watched()`, false for an adopted device.
+  - `device.lost()` answers an `Optional<DeviceLoss>` with its `LossReason` and message.
+  - Every handle made from a device holds the device's state in the seam, since wgpu-native reports a handle's error to
+    its device's callback after the device's last release.
+  - `tools/check-facts.sh` holds what wgpu-native does that the seam is built on, from `tests/facts/wgpufacts.c`.
+  - `examples/clear` reports its device's errors.
 - **Breaking:** the public constructors are named by kama's rule (2026-11-10, kama 0.9.911, its SPEC § Construction,
   KR-367): `Instance.create()` is `Instance.make()`, `Surface.create(instance:, window:)` is `Surface.make(…)`,
   `FeatureSet.none()` is `FeatureSet.empty()`, `SurfaceCapabilities.of(…)` is `SurfaceCapabilities.make(…)` (it checks

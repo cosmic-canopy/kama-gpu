@@ -26,10 +26,12 @@ import {
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError,
     gpu::PowerPreference, gpu::Buffer, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::Texture,
     gpu::TextureFormat, gpu::TextureUsage, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass,
-    gpu::CommandBuffer, gpu::Color, gpu::uncapturedErrors, gpu::lastErrorMessage, gpu::lostDevices,
+    gpu::CommandBuffer, gpu::Color,
+    gpu::DeviceErrors, gpu::GpuErrorReport, gpu::GpuErrorKind, gpu::DeviceLoss, gpu::LossReason,
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::Size,
+    addDeviceRef, statesAlive,
 };
 
 comptime uint32 SIDE = 64;
@@ -462,10 +464,12 @@ type resource Check implements App {
 
     unsafe fn int32 step() {
         if (this.stage < 3 && this.began.elapsed().asMillis() > TIMEOUT_MS) {
-            int64 lost = lostDevices();
-            string last = lastErrorMessage();
-            this.verdict(name: "the GPU answers within 10 s",
-                         why: "timed out at stage ${this.stage} (devices lost: ${lost}; last message: ${last})");
+            string lost = "no device yet";
+            match (this.device) {
+                case Some(value: d): { lost = lossSaid(loss: d.lost()); }
+                case None: { }
+            };
+            this.verdict(name: "the GPU answers within 10 s", why: "timed out at stage ${this.stage} (the device: ${lost})");
             this.stage = 3;
         }
         if (this.stage == 0) { this.awaitAdapter(); }
@@ -551,6 +555,7 @@ type resource Check implements App {
             }
             case None: { println(s: "skip a feature the adapter lacks: it has every candidate"); }
         };
+        errorCases(t: this, adapter: adapter);
     }
 
     unsafe fn void awaitDevices() {
@@ -849,6 +854,13 @@ type resource Check implements App {
     // Every handle released by its destructor, then the verdict on uncaptured errors and the totals.
     unsafe fn int32 finish() {
         surfaceCases(t: this);
+        match (this.device) {
+            case Some(value: d): {
+                DeviceErrors errs = d.takeErrors();
+                this.verdict(name: "no uncaptured WebGPU error on the clear's device", why: errorsSaid(errs: errs));
+            }
+            case None: { }
+        };
         this.read = Optional::None;
         this.readback = Optional::None;
         this.queue = Optional::None;
@@ -861,13 +873,9 @@ type resource Check implements App {
         this.adapter = Optional::None;
         this.adapterRequest = Optional::None;
         this.instance = Optional::None;
-        int64 errors = uncapturedErrors();
-        if (errors == 0) {
-            this.verdict(name: "no uncaptured WebGPU error", why: "");
-        } else {
-            string last = lastErrorMessage();
-            this.verdict(name: "no uncaptured WebGPU error", why: "${errors}, the last: ${last}");
-        }
+        int64 alive = statesAlive();
+        this.verdict(name: "every device's state is freed with its last handle",
+                     why: alive == 0 ? "" : "${alive} still alive after every handle was dropped");
         println(s: "gpu tests: ${this.runs} cases, ${this.failures} failed");
         exitStatus = this.failures > 0 ? 1 : 0;
         endOnTheWeb(failed: this.failures > 0);
@@ -931,6 +939,8 @@ unsafe fn void surfaceCases(ref Check t) {
                 Size px = window.framebufferSize();
                 configureCases(t: t, surface: surface, early: early, caps: caps, device: d, queue: q,
                                width: cast<uint32>(px.width), height: cast<uint32>(px.height));
+                DeviceErrors errs = d.takeErrors();
+                t.verdict(name: "no uncaptured WebGPU error on the surface's device", why: errorsSaid(errs: errs));
                 return;
             }
             case Failed(error: e): { string why = e.message(); t.verdict(name: "a device for the surface", why: why); return; }
@@ -1196,6 +1206,207 @@ unsafe fn Result<int32, GpuError> drawGrey(ref Surface surface, ref Device devic
         i = i + 4;
     }
     return Result::Ok(value: grey);
+}
+
+// ---- a device's errors (GPU-1): natively, where an error is in the channel when the call that caused it returns --------
+
+fn string kindName(GpuErrorKind k) {
+    return match (k) {
+        case Validation: "Validation";
+        case OutOfMemory: "OutOfMemory";
+        case Internal: "Internal";
+        case Unknown: "Unknown";
+    };
+}
+
+// A drain, for a verdict on a device that must have none: "" when it is empty.
+fn string errorsSaid(const ref DeviceErrors errs) {
+    if (errs.isEmpty()) { return ""; }
+    isize n = errs.reports().length();
+    int64 dropped = errs.dropped();
+    if (n == 0) { return "${dropped} dropped"; }
+    string earliest = errs.reports()[0].message();
+    return "${n} reported and ${dropped} dropped, the first: ${earliest}";
+}
+
+// A drain, for a verdict: "" when it holds exactly `want` reports, each of `kind`, and dropped none.
+fn string holds(const ref DeviceErrors errs, isize want, GpuErrorKind kind) {
+    isize n = errs.reports().length();
+    int64 dropped = errs.dropped();
+    if (n != want) { return "${n} reported, not ${want}"; }
+    if (dropped != 0) { return "${dropped} dropped"; }
+    isize i = 0;
+    while (i < n) {
+        GpuErrorKind got = errs.reports()[i].kind();
+        if (got != kind) {
+            string name = kindName(k: got);
+            return "report ${i} is ${name}";
+        }
+        string words = errs.reports()[i].message();
+        if (words.isEmpty()) { return "report ${i} has no words"; }
+        i = i + 1;
+    }
+    return "";
+}
+
+fn string lossSaid(const ref Optional<DeviceLoss> loss) {
+    return match (loss) {
+        case Some(value: l): l.message();
+        case None: "not lost";
+    };
+}
+
+// MapRead may be combined only with CopyDst: a validation error.
+unsafe fn Buffer badBuffer(ref Device device) {
+    return device.createBuffer(size: 16, usage: BufferUsage::MapRead | BufferUsage::Storage);
+}
+
+// A texture with no width: a validation error in other words.
+unsafe fn Texture badTexture(ref Device device) {
+    return device.createTexture(width: 0, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding);
+}
+
+// An encoder holding a copy out of a texture made without CopySrc: an error its finish reports.
+unsafe fn CommandEncoder badCopy(ref Device device) {
+    Texture source = device.createTexture(width: 4, height: 4, format: TextureFormat::RGBA8Unorm,
+                                          usage: TextureUsage::TextureBinding);
+    Buffer target = device.createBuffer(size: cast<uint64>(ROW) * 4, usage: BufferUsage::CopyDst);
+    CommandEncoder encoder = device.createCommandEncoder();
+    encoder.copyTextureToBuffer(texture: source, buffer: target, width: 4, height: 4, bytesPerRow: ROW);
+    return give encoder;
+}
+
+@compileFor(ARCH_WASM32)
+unsafe fn void errorCases(ref Check t, ref Adapter adapter) {
+    println(s: "skip the error cases: the web reports an error a task later, and its leg runs in a browser with GPU-3");
+}
+
+// A device asked of `adapter`; natively it is answered as soon as it is polled.
+@compileFor(!ARCH_WASM32)
+unsafe fn Optional<Device> deviceNow(ref Check t, ref Adapter adapter, const ref string purpose) {
+    DeviceRequest request = adapter.requestDevice(options: DeviceOptions.defaults());
+    int32 polls = 0;
+    while (polls < 1000) {
+        DeviceStatus s = request.poll();
+        match (give s) {
+            case Pending: { }
+            case Ready(device: d, queue: q): { return Optional::Some(value: give d); }
+            case Failed(error: e): { string why = e.message(); t.verdict(name: purpose, why: why); return Optional::None; }
+        };
+        polls = polls + 1;
+    }
+    t.verdict(name: purpose, why: "the request never settled");
+    return Optional::None;
+}
+
+@compileFor(!ARCH_WASM32)
+unsafe fn void errorCases(ref Check t, ref Adapter adapter) {
+    Optional<Device> asked = deviceNow(t: t, adapter: adapter, purpose: "a device for the error cases");
+    Device a = match (give asked) {
+        case Some(value: d): give d;
+        case None: { return; }
+    };
+    Optional<Device> askedAgain = deviceNow(t: t, adapter: adapter, purpose: "a second device for the error cases");
+    Device b = match (give askedAgain) {
+        case Some(value: d): give d;
+        case None: { return; }
+    };
+
+    Buffer bad = badBuffer(device: a);
+    DeviceErrors got = a.takeErrors();
+    string one = holds(errs: got, want: 1, kind: GpuErrorKind::Validation);
+    if (one.isEmpty()) {
+        // wgpu-native's words begin with the call and end with the usages asked for: kept whole, not cut
+        string words = got.reports()[0].message();
+        if (!words.contains(substring: "MAP") || !words.contains(substring: "STORAGE)")) { one = "in other words: ${words}"; }
+    }
+    t.verdict(name: "an uncaptured error is in its device's channel when the call returns, whole, in WebGPU's words", why: one);
+    t.verdict(name: "a device's channel is watched", why: got.watched() ? "" : "watched() is false");
+    DeviceErrors again = a.takeErrors();
+    t.verdict(name: "a drain empties the channel", why: errorsSaid(errs: again));
+
+    Buffer onB = badBuffer(device: b);
+    DeviceErrors onA = a.takeErrors();
+    DeviceErrors fromB = b.takeErrors();
+    string apart = holds(errs: fromB, want: 1, kind: GpuErrorKind::Validation);
+    if (!onA.isEmpty()) { apart = "the other device's error reached this one"; }
+    t.verdict(name: "two devices' errors are kept apart", why: apart);
+
+    Device copied = copy a;
+    Buffer viaOriginal = badBuffer(device: a);
+    DeviceErrors shared = copied.takeErrors();
+    DeviceErrors afterShared = a.takeErrors();
+    string share = holds(errs: shared, want: 1, kind: GpuErrorKind::Validation);
+    if (share.isEmpty() && !afterShared.isEmpty()) { share = "the original's channel still held it"; }
+    t.verdict(name: "a device's copies share one channel: an error made through one is drained through another", why: share);
+
+    Optional<DeviceLoss> loss = a.lost();
+    t.verdict(name: "a live device is not lost", why: loss.isSome() ? "lost(): " + lossSaid(loss: loss) : "");
+
+    // A full channel: 64 errors in one set of words, then 36 in another. The oldest are kept, the rest counted.
+    Texture flat = badTexture(device: b);
+    DeviceErrors flatErrors = b.takeErrors();
+    string later = "";
+    if (flatErrors.reports().length() == 1) { later = flatErrors.reports()[0].message(); }
+    int32 i = 0;
+    while (i < 64) { Buffer x = badBuffer(device: a); i = i + 1; }
+    i = 0;
+    while (i < 36) { Texture y = badTexture(device: a); i = i + 1; }
+    DeviceErrors full = a.takeErrors();
+    isize kept = full.reports().length();
+    int64 dropped = full.dropped();
+    string ring = "";
+    if (later.isEmpty()) { ring = "a texture with no width gave no single error to tell the later ones by"; }
+    else if (kept != 64) { ring = "${kept} kept, not 64"; }
+    else if (dropped != 36) { ring = "${dropped} dropped, not 36"; }
+    else {
+        isize k = 0;
+        while (k < kept) {
+            string words = full.reports()[k].message();
+            if (words == later) { ring = "a later report was kept, at ${k}"; }
+            k = k + 1;
+        }
+    }
+    t.verdict(name: "a full channel keeps the oldest 64 reports and counts the rest", why: ring);
+    DeviceErrors emptied = a.takeErrors();
+    t.verdict(name: "a drain starts the count of what was dropped again", why: errorsSaid(errs: emptied));
+
+    // An adopted device keeps its maker's callback: its errors reach the package's channel of the device it came from.
+    addDeviceRef(device: a.raw());
+    Device adopted = Device.adopt(raw: a.raw(), adapter: adapter);
+    Buffer viaAdopted = badBuffer(device: adopted);
+    DeviceErrors unseen = adopted.takeErrors();
+    DeviceErrors maker = a.takeErrors();
+    string adopt = "";
+    if (unseen.watched()) { adopt = "watched() is true"; }
+    else if (!unseen.isEmpty()) { adopt = "the adopted device's channel holds an error"; }
+    else { adopt = holds(errs: maker, want: 1, kind: GpuErrorKind::Validation); }
+    t.verdict(name: "an adopted device says its errors are not watched, and they reach its maker", why: adopt);
+
+    outlivesCase(t: t, adapter: adapter);
+}
+
+// A device's state outlives the device while a handle made from it lives: wgpu-native reports the handle's errors to the
+// device's callback after the device's last release (tests/facts, `afterrelease`).
+@compileFor(!ARCH_WASM32)
+unsafe fn void outlivesCase(ref Check t, ref Adapter adapter) {
+    Optional<Device> made = deviceNow(t: t, adapter: adapter, purpose: "a device to drop before its encoder");
+    int64 before = statesAlive();
+    Optional<CommandEncoder> kept = Optional::None;
+    match (give made) {
+        case Some(value: d): { kept = Optional::Some(value: badCopy(device: d)); }
+        case None: { return; }
+    };
+    int64 between = statesAlive();
+    t.verdict(name: "a device's state outlives the device while a handle made from it lives",
+              why: between == before ? "" : "${before} alive before the device was dropped, ${between} after");
+    match (give kept) {
+        case Some(value: encoder): { CommandBuffer commands = give encoder.finish(); }
+        case None: { }
+    };
+    int64 after = statesAlive();
+    t.verdict(name: "an error after the device is dropped is taken safely, and the state freed with the last handle",
+              why: after == before - 1 ? "" : "${before} alive before, ${after} after the last handle");
 }
 
 // The status `main` returns natively, set by `finish`: the loop owns the app and drops it when `run` returns.

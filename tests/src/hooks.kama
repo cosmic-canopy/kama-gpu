@@ -1,0 +1,13 @@
+// What the tests reach past the safe API for, through externs of their own, as any program may: `adopt` takes over a
+// reference, so adopting a device the package also holds needs an `AddRef` first, and the seam counts its live device
+// state blocks, so a test can see one outlive its device and be freed with its last handle.
+
+export { addDeviceRef, statesAlive };
+
+extern "gpuseam.h";
+
+extern fn void wgpuDeviceAddRef(UnsafePtr device);
+extern fn int64 gpuseam_states_alive();
+
+unsafe fn void addDeviceRef(UnsafePtr device) { wgpuDeviceAddRef(device: device); }
+unsafe fn int64 statesAlive() { return gpuseam_states_alive(); }

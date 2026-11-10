@@ -1,13 +1,16 @@
-// The C seam (csrc/gpuseam.h), as kama: the asynchronous slots and the process-wide error count. An extern never leaves
+// The C seam (csrc/gpuseam.h), as kama: the asynchronous slots and each device's state block. An extern never leaves
 // its file, so each is published through a wrapper, as the generated bindings are.
 
 export {
     SEAM_PENDING, SEAM_READY, SEAM_FAILED,
     requestAdapter, adapterRequestPoll, adapterRequestTake, adapterRequestMessage, adapterRequestDrop,
     adapterInfoText, adapterInfoNumbers, adapterFeatureNames, deviceFeatureNames,
-    requestDeviceOf, deviceRequestPoll, deviceRequestTakeDevice, deviceRequestMessage, deviceRequestDrop,
+    requestDeviceOf, deviceRequestPoll, deviceRequestTakeDevice, deviceRequestTakeState, deviceRequestMessage,
+    deviceRequestDrop,
     mapAsync, mapPoll, mapMessage, mapDrop, mapBytes,
-    errorCount, lastError, lostCount, pollDevice,
+    pollDevice,
+    LOSS_DESTROYED, stateUnwatched, stateHold, stateRelease, stateWatched, stateTakeErrors, errorsCount,
+    errorsDropped, errorsKind, errorsLength, errorsMessage, errorsFree, stateLost, stateLostLength, stateLostMessage,
     SURFACE_OK, SURFACE_OCCLUDED, SURFACE_OUTDATED, SURFACE_LOST, SURFACE_TIMEOUT,
     createSurface, acquireSurface, presentSurface, textureViewIn,
 };
@@ -17,6 +20,8 @@ extern "gpuseam.h";
 comptime int32 SEAM_PENDING = 0;
 comptime int32 SEAM_READY = 1;
 comptime int32 SEAM_FAILED = 2;
+
+comptime int32 LOSS_DESTROYED = 2;   // GPUSEAM_LOSS_DESTROYED; GPUSEAM_LOSS_UNKNOWN is 1, and 0 not lost
 
 comptime int32 SURFACE_OK = 0;
 comptime int32 SURFACE_OCCLUDED = 1;
@@ -38,6 +43,7 @@ extern fn UnsafePtr gpuseam_adapter_request_device(UnsafePtr instance, UnsafePtr
                                                    UnsafePtr<int32> features, int32 feature_count);
 extern fn int32 gpuseam_device_request_poll(UnsafePtr request);
 extern fn UnsafePtr gpuseam_device_request_take_device(UnsafePtr request);
+extern fn UnsafePtr gpuseam_device_request_take_state(UnsafePtr request);
 extern fn int32 gpuseam_device_request_message(UnsafePtr request, UnsafePtr<uint8> dst, int32 capacity);
 extern fn void gpuseam_device_request_drop(UnsafePtr request);
 extern fn UnsafePtr gpuseam_map_async(UnsafePtr buffer, uint64 mode, usize offset, usize size);
@@ -45,9 +51,20 @@ extern fn int32 gpuseam_map_poll(UnsafePtr map);
 extern fn int32 gpuseam_map_message(UnsafePtr map, UnsafePtr<uint8> dst, int32 capacity);
 extern fn void gpuseam_map_drop(UnsafePtr map);
 extern fn UnsafeConstPtr<uint8> gpuseam_map_bytes(UnsafePtr map);
-extern fn int64 gpuseam_error_count();
-extern fn int32 gpuseam_last_error(UnsafePtr<uint8> dst, int32 capacity);
-extern fn int64 gpuseam_lost_count();
+extern fn UnsafePtr gpuseam_state_unwatched();
+extern fn void gpuseam_state_hold(UnsafePtr state);
+extern fn void gpuseam_state_release(UnsafePtr state);
+extern fn int32 gpuseam_state_watched(UnsafePtr state);
+extern fn UnsafePtr gpuseam_state_take_errors(UnsafePtr state);
+extern fn int32 gpuseam_errors_count(UnsafePtr errors);
+extern fn int64 gpuseam_errors_dropped(UnsafePtr errors);
+extern fn int32 gpuseam_errors_kind(UnsafePtr errors, int32 at);
+extern fn int32 gpuseam_errors_length(UnsafePtr errors, int32 at);
+extern fn UnsafeConstPtr<uint8> gpuseam_errors_message(UnsafePtr errors, int32 at);
+extern fn void gpuseam_errors_free(UnsafePtr errors);
+extern fn int32 gpuseam_state_lost(UnsafePtr state);
+extern fn int32 gpuseam_state_lost_length(UnsafePtr state);
+extern fn UnsafeConstPtr<uint8> gpuseam_state_lost_message(UnsafePtr state);
 extern fn void gpuseam_device_poll(UnsafePtr device, int32 wait);
 
 unsafe fn UnsafePtr requestAdapter(UnsafePtr instance, UnsafePtr compatible, int32 power) {
@@ -79,6 +96,7 @@ unsafe fn UnsafePtr requestDeviceOf(UnsafePtr instance, UnsafePtr adapter, Unsaf
 }
 unsafe fn int32 deviceRequestPoll(UnsafePtr request) { return gpuseam_device_request_poll(request: request); }
 unsafe fn UnsafePtr deviceRequestTakeDevice(UnsafePtr request) { return gpuseam_device_request_take_device(request: request); }
+unsafe fn UnsafePtr deviceRequestTakeState(UnsafePtr request) { return gpuseam_device_request_take_state(request: request); }
 unsafe fn int32 deviceRequestMessage(UnsafePtr request, UnsafePtr<uint8> dst, int32 capacity) {
     return gpuseam_device_request_message(request: request, dst: dst, capacity: capacity);
 }
@@ -92,9 +110,20 @@ unsafe fn int32 mapMessage(UnsafePtr map, UnsafePtr<uint8> dst, int32 capacity) 
 }
 unsafe fn void mapDrop(UnsafePtr map) { gpuseam_map_drop(map: map); }
 unsafe fn UnsafeConstPtr<uint8> mapBytes(UnsafePtr map) { return gpuseam_map_bytes(map: map); }
-unsafe fn int64 errorCount() { return gpuseam_error_count(); }
-unsafe fn int32 lastError(UnsafePtr<uint8> dst, int32 capacity) { return gpuseam_last_error(dst: dst, capacity: capacity); }
-unsafe fn int64 lostCount() { return gpuseam_lost_count(); }
+unsafe fn UnsafePtr stateUnwatched() { return gpuseam_state_unwatched(); }
+unsafe fn void stateHold(UnsafePtr state) { gpuseam_state_hold(state: state); }
+unsafe fn void stateRelease(UnsafePtr state) { gpuseam_state_release(state: state); }
+unsafe fn int32 stateWatched(UnsafePtr state) { return gpuseam_state_watched(state: state); }
+unsafe fn UnsafePtr stateTakeErrors(UnsafePtr state) { return gpuseam_state_take_errors(state: state); }
+unsafe fn int32 errorsCount(UnsafePtr errors) { return gpuseam_errors_count(errors: errors); }
+unsafe fn int64 errorsDropped(UnsafePtr errors) { return gpuseam_errors_dropped(errors: errors); }
+unsafe fn int32 errorsKind(UnsafePtr errors, int32 at) { return gpuseam_errors_kind(errors: errors, at: at); }
+unsafe fn int32 errorsLength(UnsafePtr errors, int32 at) { return gpuseam_errors_length(errors: errors, at: at); }
+unsafe fn UnsafeConstPtr<uint8> errorsMessage(UnsafePtr errors, int32 at) { return gpuseam_errors_message(errors: errors, at: at); }
+unsafe fn void errorsFree(UnsafePtr errors) { gpuseam_errors_free(errors: errors); }
+unsafe fn int32 stateLost(UnsafePtr state) { return gpuseam_state_lost(state: state); }
+unsafe fn int32 stateLostLength(UnsafePtr state) { return gpuseam_state_lost_length(state: state); }
+unsafe fn UnsafeConstPtr<uint8> stateLostMessage(UnsafePtr state) { return gpuseam_state_lost_message(state: state); }
 unsafe fn void pollDevice(UnsafePtr device, int32 wait) { gpuseam_device_poll(device: device, wait: wait); }
 
 extern fn UnsafePtr gpuseam_create_surface(UnsafePtr instance, int32 kind, UnsafePtr display, UnsafePtr window);

@@ -63,9 +63,44 @@ top level. Natively kama finds wgpu-native's SDK at `$KAMA_WGPU_DIR`. Everything
   - `createBuffer(size:, usage:)`, `createTexture(width:, height:, format:, usage:)` and `createCommandEncoder()`;
   - `poll(wait:)`: natively it finishes what it can and fires the device's callbacks, `wait` blocking until its queue
     is empty; on the web it does nothing, since the browser's event loop does it between frames.
-- **`Device.adopt(raw:, adapter:)`** takes a device made elsewhere, with the adapter it came from.
-- **Errors are counted for the whole process:** `uncapturedErrors()`, `lastErrorMessage()` and `lostDevices()`. A device
-  dropped by its last release, or one whose instance went first, is not counted as lost.
+- **`Device.adopt(raw:, adapter:)`** takes a device made elsewhere, with the adapter it came from. It keeps the callbacks
+  its maker gave it, since webgpu.h sets them only when a device is made, so its errors and its loss never reach this
+  package (below).
+
+## A device's errors and its loss
+
+Each device's uncaptured errors reach that device's holders, and no other device's. The seam keeps a state block per
+device, made with its request and handed to both of its callbacks.
+
+- **`device.takeErrors() -> DeviceErrors`** drains the device's channel:
+  - `reports()`, the errors since the last drain, the oldest first, each a `GpuErrorReport` with `kind()` (a
+    `GpuErrorKind`: `Validation`, `OutOfMemory`, `Internal` or `Unknown`) and `message()`, the implementation's words
+    whole;
+  - `dropped()`: the channel holds 64 reports, keeps the oldest when full (the first error is usually the cause, the
+    later ones its cascade), and counts the rest;
+  - `watched()`, false for an adopted device, whose errors reach its maker's callback;
+  - `isEmpty()`.
+
+  Every copy of a device shares one channel. Natively an error is in it when the call that caused it returns; on the
+  web, a task later.
+- **`device.lost() -> Optional<DeviceLoss>`,** with its `reason()` (a `LossReason`: `Unknown` or `Destroyed`) and its
+  `message()`. A device whose instance went first is not lost. Natively wgpu-native reports no loss at all, of a
+  destroy or a release, so `lost()` answers None there.
+- **Every handle made from a device holds its state block:** a queue, a buffer, a texture, a view, an encoder, a pass,
+  a command buffer and a surface's frame. wgpu-native reports a handle's error to its device's callback after the
+  device's last release, so the block lives until the last of them is dropped, and its errors land in a block nobody
+  reads. A handle `adopt`ed from elsewhere holds none.
+
+What the seam is built on is held by `tools/check-facts.sh` (`tests/facts/wgpufacts.c`), natively, case by case, so a
+wgpu-native that changes it fails the gate by name:
+- an uncaptured error reaches its device's callback inside the call that caused it, on the calling thread, with that
+  device's userdata, and nothing more arrives later;
+- an encoder's error is reported inside its `finish`, not at the bad command;
+- a child reports to its device's callback after the device's last release;
+- no loss is reported: not at a destroy, a poll, the device's last release or its last child's;
+- five calls end the process, each matched by its panic's words: an error on a device with no uncaptured callback,
+  an `Internal` error scope pushed, an error scope popped with none pushed, `wgpuInstanceWaitAny`, and a command buffer
+  whose `finish` failed submitted.
 
 Measured natively, each held by the tests per leg:
 - wgpu-native answers a device request at once;
@@ -159,8 +194,9 @@ What each leg's surface answers, measured natively and read for the web (2026-11
 `tools/test.sh` is the gate. It runs:
 - `tools/check-bindings.sh`: the bindings, `TextureFormat` and `COVERAGE.md` against what the headers and the safe API
   make, the coverage rules on their fixture, and the constants;
+- `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 22 facts, natively;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`: 45 cases natively with a display (28 without), debug and release;
+- `tests/`, one program run as a `std::app` `App`: 58 cases natively with a display, debug and release;
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
   `KAMA_WINDOW_NO_DISPLAY` is set;
 - the xfail, an encoder used after `finish()`, which must be refused for the move;

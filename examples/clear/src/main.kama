@@ -1,7 +1,7 @@
 // clear: a window cleared to a slowly changing colour every frame, on @kama/gpu and @kama/window. Escape or the close
 // button quits; a resize reconfigures the surface, and while the window has no area (minimised) frames are skipped.
 // `clear --frames N` presents N frames and exits, for a check that needs no hand on the keyboard. It prints how many
-// frames it presented and whether WebGPU reported an error, and its exit status is 1 when it did.
+// frames it presented and how many errors WebGPU reported to its device, and its exit status is 1 when it did.
 //
 // The surface is configured from what it offers the adapter: `caps.preferred()`, its first format drawn through its
 // sRGB form, so the colours are the same on every leg.
@@ -18,7 +18,7 @@ import {
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::PowerPreference,
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::ConfigureError, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass, gpu::CommandBuffer, gpu::Color,
-    gpu::uncapturedErrors, gpu::lastErrorMessage,
+    gpu::DeviceErrors,
     window::Window, window::WindowError, window::Event, window::Key, window::Size,
 };
 
@@ -184,13 +184,16 @@ unsafe fn uint8 run() {
                 };
                 if (limit > 0 && frames >= limit) { running = false; }
             }
-            int64 errors = uncapturedErrors();
+            DeviceErrors reported = dev.takeErrors();
+            isize kept = reported.reports().length();
+            int64 dropped = reported.dropped();
+            int64 errors = cast<int64>(kept) + dropped;
             println(s: "clear: ${frames} frames presented, ${skipped} acquires skipped, ${errors} WebGPU errors");
-            if (errors > 0) {
-                string last = lastErrorMessage();
-                println(s: "clear: the last: ${last}");
-                return 1;
+            if (kept > 0) {
+                string first = reported.reports()[0].message();
+                println(s: "clear: the first: ${first}");
             }
+            if (errors > 0) { return 1; }
             return 0;
         }
     };

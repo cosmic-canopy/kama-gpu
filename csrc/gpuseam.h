@@ -6,8 +6,10 @@
 // it with an acquire-load and never hands WebGPU a kama function. A slot dropped while its callback is still owed is
 // abandoned, not freed: the callback frees it when it fires. (kama's design, ROADMAP_DETAIL.md § 8, s8-gpu-wrapper.)
 //
-// Uncaptured errors and a device lost for a reason other than its release are counted process-wide, the last
-// message kept; a test reads the count after a frame to prove the frame was valid.
+// Each device has a state block here, made with its request and given to its error and loss callbacks: a ring of its
+// uncaptured errors, kept whole, and its loss. Every handle made from the device holds the block, since wgpu-native
+// reports a child's error to its device's callback after the device's last release (tests/facts), and the block is
+// freed when the last holder lets it go.
 //
 // This header reaches every C file of a consumer's build (kama emits each extern header into one shared header), so it
 // declares and never defines.
@@ -28,6 +30,9 @@
 #define GPUSEAM_PENDING 0
 #define GPUSEAM_READY 1
 #define GPUSEAM_FAILED 2
+
+// A device's state block (below).
+typedef struct gpuseam_state gpuseam_state;
 
 // ---- an adapter on its way: WebGPU's first step ----
 
@@ -62,9 +67,9 @@ int32_t gpuseam_device_features(WGPUDevice device, int32_t *dst, int32_t capacit
 typedef struct gpuseam_device_request gpuseam_device_request;
 
 // Ask `adapter` for a device with `limits` (NULL, or a WGPULimits whose undefined fields take WebGPU's defaults) and
-// `feature_count` WGPUFeatureNames, its uncaptured errors and its loss counted process-wide. `instance` is the one the
-// adapter came from, whose events a poll processes, or NULL for an adapter adopted from elsewhere. The slot holds a
-// reference on each while it lives. NULL only when the slot cannot be allocated.
+// `feature_count` WGPUFeatureNames, its uncaptured errors and its loss kept in a state block of its own. `instance` is the
+// one the adapter came from, whose events a poll processes, or NULL for an adapter adopted from elsewhere. The slot holds
+// a reference on each while it lives. NULL only when the slot cannot be allocated.
 gpuseam_device_request *gpuseam_adapter_request_device(WGPUInstance instance, WGPUAdapter adapter,
                                                        const WGPULimits *limits, const int32_t *features,
                                                        int32_t feature_count);
@@ -72,6 +77,8 @@ gpuseam_device_request *gpuseam_adapter_request_device(WGPUInstance instance, WG
 int32_t gpuseam_device_request_poll(gpuseam_device_request *request);
 // A READY request's device, handed over once (NULL after).
 WGPUDevice gpuseam_device_request_take_device(gpuseam_device_request *request);
+// A READY request's device state, with the hold the request kept, handed over once (NULL after).
+gpuseam_state *gpuseam_device_request_take_state(gpuseam_device_request *request);
 // A FAILED request's words, copied into `dst` (at most `capacity` bytes, UTF-8, not terminated): their length.
 int32_t gpuseam_device_request_message(gpuseam_device_request *request, uint8_t *dst, int32_t capacity);
 // Done with the slot: freed now, or abandoned to its callback if one is still owed. A device not taken is released.
@@ -91,11 +98,44 @@ void gpuseam_map_drop(gpuseam_map *map);
 // A READY map's bytes, read-only (the web's GetMappedRange refuses a read-only map, so this is the const range).
 const uint8_t *gpuseam_map_bytes(gpuseam_map *map);
 
-// ---- errors, process-wide ----
+// ---- a device's state: its errors and its loss ----
 
-int64_t gpuseam_error_count(void);
-int32_t gpuseam_last_error(uint8_t *dst, int32_t capacity);
-int64_t gpuseam_lost_count(void);
+// A report's kind, and a loss's reason.
+#define GPUSEAM_KIND_VALIDATION 0
+#define GPUSEAM_KIND_OUT_OF_MEMORY 1
+#define GPUSEAM_KIND_INTERNAL 2
+#define GPUSEAM_KIND_UNKNOWN 3
+#define GPUSEAM_LOSS_UNKNOWN 1
+#define GPUSEAM_LOSS_DESTROYED 2
+
+typedef struct gpuseam_errors gpuseam_errors;
+
+// A block for a device adopted from elsewhere, whose callbacks were its maker's: nothing reaches it, and it says so.
+// NULL only when it cannot be allocated.
+gpuseam_state *gpuseam_state_unwatched(void);
+// Another holder, or one fewer: the block is freed with its last. Both take NULL.
+void gpuseam_state_hold(gpuseam_state *state);
+void gpuseam_state_release(gpuseam_state *state);
+// How many blocks are alive in the process, for a test that one is freed with its last holder.
+int64_t gpuseam_states_alive(void);
+// Whether the device's callbacks reach the block: 0 for an adopted device, and for NULL.
+int32_t gpuseam_state_watched(gpuseam_state *state);
+
+// The device's uncaptured errors since the last drain, the oldest first, moved out of its ring: at most 64, and how many
+// did not fit. NULL when there are none (or no memory for the drain, when they stay for the next).
+gpuseam_errors *gpuseam_state_take_errors(gpuseam_state *state);
+int32_t gpuseam_errors_count(gpuseam_errors *errors);
+int64_t gpuseam_errors_dropped(gpuseam_errors *errors);
+// Report `at`'s GPUSEAM_KIND_*, and its words, whole (UTF-8, not terminated; NULL with length 0 when it had none).
+int32_t gpuseam_errors_kind(gpuseam_errors *errors, int32_t at);
+int32_t gpuseam_errors_length(gpuseam_errors *errors, int32_t at);
+const uint8_t *gpuseam_errors_message(gpuseam_errors *errors, int32_t at);
+void gpuseam_errors_free(gpuseam_errors *errors);
+
+// 0 while the device is not lost, else its GPUSEAM_LOSS_*, and the words it was lost with.
+int32_t gpuseam_state_lost(gpuseam_state *state);
+int32_t gpuseam_state_lost_length(gpuseam_state *state);
+const uint8_t *gpuseam_state_lost_message(gpuseam_state *state);
 
 // ---- driving the callbacks ----
 
