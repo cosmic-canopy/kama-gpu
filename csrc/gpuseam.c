@@ -64,6 +64,19 @@ struct gpuseam_state {
     atomic_int lost;                    // 0, else GPUSEAM_LOSS_*, published once the message is kept
     char *lost_message;
     int32_t lost_length;
+    gpuseam_scope *top;                 // its error scopes, the innermost first, of every thread (each holds the block)
+};
+
+struct gpuseam_scope {
+    gpuseam_scope *below;    // the next older scope of the same device, on any thread
+    gpuseam_state *state;    // a hold on it
+    WGPUDevice device;       // a reference, for the web's pop
+    const void *thread;      // the thread that pushed it
+    int32_t filter;          // GPUSEAM_FILTER_*, the GPUSEAM_KIND_* it catches
+    int32_t orphaned;        // its holder is done with it: popped once no scope above it on its thread is left
+    int32_t caught;          // it holds an error: natively the first that matched, on the web the browser's answer
+    gpuseam_report error;
+    atomic_int popped;       // once popped: PENDING while the web's answer is owed, READY, FAILED, or ABANDONED
 };
 
 // A drain: the ring's reports, moved out of it.
@@ -145,11 +158,32 @@ void gpuseam_state_release(gpuseam_state *s) {
 
 int64_t gpuseam_states_alive(void) { return (int64_t)atomic_load_explicit(&g_states_alive, memory_order_relaxed); }
 
+// The thread a scope was pushed on, by the address of a thread-local of its own.
+static _Thread_local char t_thread;
+#define THIS_THREAD ((const void *)&t_thread)
+
+// Natively an error goes to the innermost scope on its thread whose filter matches it: every error measured reaches the
+// callback inside the call that caused it, on the calling thread (tests/facts, `inthecall`). A scope keeps the first
+// and swallows the rest, as WebGPU's does. Past every scope, an error goes to the channel. On the web the browser's
+// scopes have taken what they catch before this callback runs.
 static void on_uncaptured_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringView message, void *u1, void *u2) {
     (void)device; (void)u2;
     gpuseam_state *s = (gpuseam_state *)u1;
     gpuseam_report r = report_of(kind_of(type), message);
     state_lock(s);
+#ifndef __EMSCRIPTEN__
+    for (gpuseam_scope *sc = s->top; sc != NULL; sc = sc->below) {
+        if (sc->thread != THIS_THREAD || sc->filter != r.kind) continue;
+        if (!sc->caught) {
+            sc->error = r;
+            sc->caught = 1;
+        } else {
+            free(r.message);
+        }
+        state_unlock(s);
+        return;
+    }
+#endif
     ring_put(s, &r);
     state_unlock(s);
 }
@@ -201,6 +235,186 @@ void gpuseam_errors_free(gpuseam_errors *e) {
     if (e == NULL) return;
     for (int32_t i = 0; i < e->count; i++) free(e->reports[i].message);
     free(e);
+}
+
+// ---- a device's error scopes ---------------------------------------------------------------------------------------
+//
+// Natively the seam keeps them, over the uncaptured callback, so neither of wgpu-native's aborting scope paths (an
+// Internal filter, a pop with none pushed) is reachable. On the web they are the browser's, and the seam keeps their
+// order, so a pop out of order is refused on both legs and the browser's stack is popped only from its top.
+
+static void scope_free(gpuseam_scope *sc) {
+    free(sc->error.message);
+    wgpuDeviceRelease(sc->device);
+    gpuseam_state_release(sc->state);
+    free(sc);
+}
+
+// The innermost scope `thread` has open on the device, under the lock.
+static gpuseam_scope *innermost(gpuseam_state *s, const void *thread) {
+    for (gpuseam_scope *sc = s->top; sc != NULL; sc = sc->below) {
+        if (sc->thread == thread) return sc;
+    }
+    return NULL;
+}
+
+static void unlink_scope(gpuseam_state *s, gpuseam_scope *sc) {
+    gpuseam_scope **at = &s->top;
+    while (*at != sc) at = &(*at)->below;
+    *at = sc->below;
+    sc->below = NULL;
+}
+
+// Under the lock: pop the orphans now innermost on `thread`, so the stack never jams. What one had caught goes to the
+// channel, natively now and on the web when the browser answers its pop. They are handed back in the order popped,
+// linked through `below`, for the caller to finish outside the lock.
+static gpuseam_scope *collapse(gpuseam_state *s, const void *thread) {
+    gpuseam_scope *done = NULL;
+    gpuseam_scope **tail = &done;
+    for (;;) {
+        gpuseam_scope *sc = innermost(s, thread);
+        if (sc == NULL || !sc->orphaned) break;
+        unlink_scope(s, sc);
+#ifndef __EMSCRIPTEN__
+        if (sc->caught) {
+            ring_put(s, &sc->error);
+            sc->caught = 0;
+        }
+#endif
+        *tail = sc;
+        tail = &sc->below;
+    }
+    return done;
+}
+
+#ifdef __EMSCRIPTEN__
+static WGPUErrorFilter filter_value(int32_t filter) {
+    if (filter == GPUSEAM_FILTER_OUT_OF_MEMORY) return WGPUErrorFilter_OutOfMemory;
+    if (filter == GPUSEAM_FILTER_INTERNAL) return WGPUErrorFilter_Internal;
+    return WGPUErrorFilter_Validation;
+}
+
+static void browser_pop(gpuseam_scope *sc, WGPUPopErrorScopeCallback callback) {
+    WGPUPopErrorScopeCallbackInfo ci;
+    memset(&ci, 0, sizeof ci);
+    ci.mode = WGPUCallbackMode_AllowSpontaneous;
+    ci.callback = callback;
+    ci.userdata1 = sc;
+    wgpuDevicePopErrorScope(sc->device, ci);
+}
+
+// An orphan's answer: what it caught goes to the channel.
+static void on_orphan_popped(WGPUPopErrorScopeStatus status, WGPUErrorType type, WGPUStringView message, void *u1, void *u2) {
+    (void)u2;
+    gpuseam_scope *sc = (gpuseam_scope *)u1;
+    if (status == WGPUPopErrorScopeStatus_Success && type != WGPUErrorType_NoError) {
+        gpuseam_report r = report_of(kind_of(type), message);
+        state_lock(sc->state);
+        ring_put(sc->state, &r);
+        state_unlock(sc->state);
+    }
+    scope_free(sc);
+}
+
+static void on_scope_popped(WGPUPopErrorScopeStatus status, WGPUErrorType type, WGPUStringView message, void *u1, void *u2) {
+    (void)u2;
+    gpuseam_scope *sc = (gpuseam_scope *)u1;
+    int outcome = GPUSEAM_READY;
+    if (status != WGPUPopErrorScopeStatus_Success) {
+        sc->error = report_of(GPUSEAM_KIND_UNKNOWN, message);
+        outcome = GPUSEAM_FAILED;
+    } else if (type != WGPUErrorType_NoError) {
+        sc->error = report_of(kind_of(type), message);
+        sc->caught = 1;
+    }
+    int expected = GPUSEAM_PENDING;
+    if (!atomic_compare_exchange_strong_explicit(&sc->popped, &expected, outcome, memory_order_acq_rel, memory_order_acquire)) {
+        scope_free(sc);   // ABANDONED
+    }
+}
+#endif
+
+// The orphans `collapse` handed back: freed natively, popped in the browser on the web.
+static void finish_orphans(gpuseam_scope *done) {
+    while (done != NULL) {
+        gpuseam_scope *next = done->below;
+#ifdef __EMSCRIPTEN__
+        browser_pop(done, on_orphan_popped);
+#else
+        scope_free(done);
+#endif
+        done = next;
+    }
+}
+
+gpuseam_scope *gpuseam_scope_push(gpuseam_state *s, WGPUDevice device, int32_t filter) {
+    if (s == NULL || device == NULL) return NULL;
+    gpuseam_scope *sc = (gpuseam_scope *)calloc(1, sizeof *sc);
+    if (sc == NULL) return NULL;
+    gpuseam_state_hold(s);
+    sc->state = s;
+    wgpuDeviceAddRef(device);
+    sc->device = device;
+    sc->thread = THIS_THREAD;
+    sc->filter = filter;
+    atomic_init(&sc->popped, GPUSEAM_PENDING);
+#ifdef __EMSCRIPTEN__
+    wgpuDevicePushErrorScope(device, filter_value(filter));
+#endif
+    state_lock(s);
+    sc->below = s->top;
+    s->top = sc;
+    state_unlock(s);
+    return sc;
+}
+
+int32_t gpuseam_scope_pop(gpuseam_scope *sc) {
+    gpuseam_state *s = sc->state;
+    state_lock(s);
+    if (innermost(s, sc->thread) != sc) {
+        sc->orphaned = 1;   // its holder is done with it: popped once the scopes above it are
+        state_unlock(s);
+        return GPUSEAM_SCOPE_OUT_OF_ORDER;
+    }
+    unlink_scope(s, sc);
+    gpuseam_scope *done = collapse(s, sc->thread);
+    state_unlock(s);
+#ifdef __EMSCRIPTEN__
+    browser_pop(sc, on_scope_popped);
+#else
+    atomic_store_explicit(&sc->popped, GPUSEAM_READY, memory_order_release);
+#endif
+    finish_orphans(done);
+    return 0;
+}
+
+void gpuseam_scope_abandon(gpuseam_scope *sc) {
+    if (sc == NULL) return;
+    gpuseam_state *s = sc->state;
+    state_lock(s);
+    sc->orphaned = 1;
+    gpuseam_scope *done = collapse(s, sc->thread);
+    state_unlock(s);
+    finish_orphans(done);
+}
+
+int32_t gpuseam_scope_poll(gpuseam_scope *sc) { return (int32_t)atomic_load_explicit(&sc->popped, memory_order_acquire); }
+int32_t gpuseam_scope_caught(gpuseam_scope *sc) { return gpuseam_scope_poll(sc) == GPUSEAM_READY && sc->caught; }
+int32_t gpuseam_scope_kind(gpuseam_scope *sc) { return gpuseam_scope_poll(sc) == GPUSEAM_PENDING ? 0 : sc->error.kind; }
+int32_t gpuseam_scope_length(gpuseam_scope *sc) {
+    return gpuseam_scope_poll(sc) == GPUSEAM_PENDING ? 0 : sc->error.length;
+}
+const uint8_t *gpuseam_scope_message(gpuseam_scope *sc) {
+    return gpuseam_scope_poll(sc) == GPUSEAM_PENDING ? NULL : (const uint8_t *)sc->error.message;
+}
+
+void gpuseam_scope_drop_popped(gpuseam_scope *sc) {
+    if (sc == NULL) return;
+    int expected = GPUSEAM_PENDING;
+    if (atomic_compare_exchange_strong_explicit(&sc->popped, &expected, GPUSEAM_ABANDONED, memory_order_acq_rel, memory_order_acquire)) {
+        return;   // the web's answer is still owed, and frees the scope when it comes
+    }
+    scope_free(sc);
 }
 
 int32_t gpuseam_state_lost(gpuseam_state *s) {

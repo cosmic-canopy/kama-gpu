@@ -7,7 +7,7 @@ is the git log and [CHANGELOG.md](CHANGELOG.md).
 
 **Where it stands** (2026-11-10, kama 0.9.911): offscreen work and a surface on an `@kama/window` window, natively on
 Windows over Vulkan, on wgpu-native v29.0.1.1. The web leg (emdawnwebgpu, Dawn v20260423.175430) builds and has not
-run. It calls 53 of webgpu.h's 206 functions. Not published.
+run. It calls 55 of webgpu.h's 206 functions. Not published.
 
 ## Using it
 
@@ -90,6 +90,25 @@ device, made with its request and handed to both of its callbacks.
   a command buffer and a surface's frame. wgpu-native reports a handle's error to its device's callback after the
   device's last release, so the block lives until the last of them is dropped, and its errors land in a block nobody
   reads. A handle `adopt`ed from elsewhere holds none.
+- **Error scopes: `device.pushErrorScope(filter:) -> ErrorScope`,** with `ErrorFilter` `Validation`, `OutOfMemory` or
+  `Internal`. A scope catches the errors of the calls made on its thread while it is open, the device's and every
+  handle's made from it, by WebGPU's rules:
+  - it keeps the first error its filter matches, and swallows the rest;
+  - an error it does not match goes to the scope beneath it, and past the last to the channel;
+  - `scope.pop() -> Result<ScopePop, GpuError>` consumes the scope, and `ScopePop.poll()` answers a `PopStatus`:
+    `Pending`, `Ready(caught)` with the `Optional<GpuErrorReport>` it caught, or `Failed(error)`. Natively it is ready
+    at once; on the web, a task later;
+  - scopes pop in the reverse of the order they were pushed. A pop out of order is refused with
+    `GpuError::OutOfOrder`; the scope is spent all the same, and is popped once the scopes above it are, so the stack
+    never jams;
+  - a scope dropped unpopped pops itself. What a scope its holder never popped had caught goes to the channel, never
+    nowhere;
+  - an `ErrorScope` is not `Sendable`: it belongs to the thread that pushed it.
+
+  Natively the seam keeps the scopes itself, a stack per thread in the device's block, over the uncaptured callback,
+  which every error measured reaches inside the call that caused it. So neither of wgpu-native's aborting scope paths,
+  an `Internal` filter and a pop with none pushed, is reachable. On the web the scopes are the browser's, and the seam
+  keeps their order. An adopted device's errors reach its maker's callback, so natively its scopes catch nothing.
 
 What the seam is built on is held by `tools/check-facts.sh` (`tests/facts/wgpufacts.c`), natively, case by case, so a
 wgpu-native that changes it fails the gate by name:
@@ -196,7 +215,7 @@ What each leg's surface answers, measured natively and read for the web (2026-11
   make, the coverage rules on their fixture, and the constants;
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 22 facts, natively;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`: 58 cases natively with a display, debug and release;
+- `tests/`, one program run as a `std::app` `App`: 67 cases natively with a display, debug and release;
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
   `KAMA_WINDOW_NO_DISPLAY` is set;
 - the xfail, an encoder used after `finish()`, which must be refused for the move;

@@ -17,6 +17,8 @@
 // - A device's uncaptured errors reach that device's holders: `device.takeErrors()` drains its channel, and
 //   `device.lost()` answers its loss. The seam keeps a state block per device, and every handle made from the device
 //   holds it, since wgpu-native reports a handle's error to its device's callback after the device's last release.
+//   `device.pushErrorScope(filter:)` catches the errors of the calls made while it is open; natively the seam keeps the
+//   scopes, so none of wgpu-native's aborting scope paths is reachable.
 // - A surface is configured from what it offers: `surface.capabilities(adapter:)` answers, `preferred()` makes a
 //   `SurfaceConfig` a program may change, and `configure` checks it before WebGPU sees it, refusing in a
 //   `ConfigureError` what wgpu-native would abort the process on. Frames are drawn sRGB by default, through a view
@@ -62,6 +64,9 @@ import {
     gpu::native::stateTakeErrors, gpu::native::errorsCount, gpu::native::errorsDropped, gpu::native::errorsKind,
     gpu::native::errorsLength, gpu::native::errorsMessage, gpu::native::errorsFree, gpu::native::stateLost,
     gpu::native::stateLostLength, gpu::native::stateLostMessage,
+    gpu::native::scopePush, gpu::native::scopePop, gpu::native::scopeAbandon, gpu::native::scopePopPoll,
+    gpu::native::scopeCaught, gpu::native::scopeKind, gpu::native::scopeLength, gpu::native::scopeMessage,
+    gpu::native::scopeDropPopped,
     gpu::native::SURFACE_OK, gpu::native::SURFACE_OCCLUDED, gpu::native::SURFACE_OUTDATED, gpu::native::SURFACE_LOST,
     gpu::native::SURFACE_TIMEOUT, gpu::native::createSurface, gpu::native::acquireSurface, gpu::native::presentSurface,
     gpu::native::surfaceAddRef, gpu::native::surfaceRelease, gpu::native::surfaceConfigure,
@@ -79,7 +84,7 @@ export {
     Texture, TextureUsage, TextureView,
     CommandEncoder, RenderPass, CommandBuffer, Color,
     Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
-    GpuErrorKind, GpuErrorReport, DeviceErrors, DeviceLoss, LossReason,
+    GpuErrorKind, GpuErrorReport, DeviceErrors, DeviceLoss, LossReason, ErrorFilter, ErrorScope, ScopePop, PopStatus,
 };
 
 comptime int32 MESSAGE_BYTES = 512;
@@ -96,13 +101,15 @@ comptime int32 FEATURES_MAX = 64;
 type enum GpuError implements Error {
     NoInstance,             // WebGPU gave no instance
     Refused(string words),  // the adapter, the device or a map was refused, in the implementation's words
-    Taken;                  // what a request gave was handed over already
+    Taken,                  // what a request gave was handed over already
+    OutOfOrder;             // an error scope was popped while one pushed after it on its thread was still open
 
     public const fn string message() {
         return match (this) {
             case NoInstance: "WebGPU gave no instance";
             case Refused(words: w): copy w;
             case Taken: "what this request gave was already taken";
+            case OutOfOrder: "an error scope was popped while one pushed after it on the same thread was still open";
         };
     }
 }
@@ -196,6 +203,71 @@ type resource DeviceLoss {
     }
     public const fn LossReason reason() { return this.why; }
     public const fn string message() { return copy this.words; }
+}
+
+// Which errors an error scope catches.
+type enum ErrorFilter { Validation, OutOfMemory, Internal }
+
+fn int32 filterValue(ErrorFilter f) {
+    return match (f) {
+        case Validation: 0;
+        case OutOfMemory: 1;
+        case Internal: 2;
+    };
+}
+
+// What a popped scope caught: the first error its filter matched, or None.
+type enum PopStatus { Pending, Ready(Optional<GpuErrorReport> caught), Failed(GpuError error) }
+
+// An error scope: the errors of the calls made on this thread while it is open, from `device.pushErrorScope(filter:)`
+// to `pop()`. It catches the first error its filter matches and swallows the rest, as WebGPU's does; an error it does
+// not match goes to the scope beneath it, and past the last to the device's channel. Scopes pop in the reverse of the
+// order they were pushed. One dropped unpopped pops itself, and what it caught goes to the channel. Not `Sendable`: a
+// scope belongs to the thread that pushed it. Natively the seam keeps the scopes; on the web they are the browser's.
+type resource ErrorScope {
+    UnsafePtr slot;
+
+    friend Device::pushErrorScope[start];
+
+    unsafe ctor start(UnsafePtr block, UnsafePtr device, ErrorFilter filter) {
+        this.slot = scopePush(state: block, device: device, filter: filterValue(f: filter));
+    }
+
+    // Close the scope, and ask what it caught. Refused with OutOfOrder while a scope pushed after it on this thread is
+    // still open: the scope is spent all the same, is popped once those are, and what it caught goes to the channel.
+    public unsafe give fn Result<ScopePop, GpuError> pop() {
+        UnsafePtr s = this.slot;
+        this.slot = null;
+        if (s != null && scopePop(pushed: s) != 0) { return Result::Err(error: GpuError::OutOfOrder); }
+        return Result::Ok(value: ScopePop.start(slot: s));
+    }
+
+    unsafe ~ErrorScope() { scopeAbandon(pushed: this.slot); }
+}
+
+// What a popped scope caught: natively ready at once, on the web a task later.
+type resource ScopePop {
+    UnsafePtr slot;
+
+    friend ErrorScope::pop[start];
+
+    unsafe ctor start(UnsafePtr slot) { this.slot = slot; }
+
+    public unsafe const fn PopStatus poll() {
+        if (this.slot == null) { return PopStatus::Failed(error: GpuError::Refused(words: "out of memory for the scope")); }
+        int32 s = scopePopPoll(pushed: this.slot);
+        if (s == SEAM_PENDING) { return PopStatus::Pending; }
+        string words = textFrom(p: scopeMessage(pushed: this.slot), length: scopeLength(pushed: this.slot));
+        if (s == SEAM_FAILED) {
+            if (words.isEmpty()) { words = "the scope's pop failed"; }
+            return PopStatus::Failed(error: GpuError::Refused(words: give words));
+        }
+        if (scopeCaught(pushed: this.slot) == 0) { return PopStatus::Ready(caught: Optional::None); }
+        GpuErrorReport report = GpuErrorReport.of(kind: kindFrom(v: scopeKind(pushed: this.slot)), message: give words);
+        return PopStatus::Ready(caught: Optional::Some(value: give report));
+    }
+
+    unsafe ~ScopePop() { scopeDropPopped(pushed: this.slot); }
 }
 
 // A hold on a device's state block in the seam: its errors and its loss. Every handle made from a device keeps one,
@@ -825,6 +897,13 @@ type resource Device implements Copyable<This>(bare: give) {
             errorsFree(errors: drained);
         }
         return DeviceErrors.make(reports: give list, dropped: dropped, watched: stateWatched(state: this.hold.raw()) != 0);
+    }
+
+    // Open an error scope on this thread: it catches the errors of the calls made while it is open (the device's own,
+    // and every handle's made from it) that `filter` matches, until it is popped. An adopted device's errors reach its
+    // maker's callback, so natively its scopes catch nothing.
+    public unsafe fn ErrorScope pushErrorScope(ErrorFilter filter) {
+        return ErrorScope.start(block: this.hold.raw(), device: this.handle, filter: filter);
     }
 
     // How the device was lost, once it is. Natively wgpu-native reports no loss, of a destroy or a release (tests/facts,

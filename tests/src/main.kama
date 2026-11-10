@@ -28,6 +28,7 @@ import {
     gpu::TextureFormat, gpu::TextureUsage, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass,
     gpu::CommandBuffer, gpu::Color,
     gpu::DeviceErrors, gpu::GpuErrorReport, gpu::GpuErrorKind, gpu::DeviceLoss, gpu::LossReason,
+    gpu::ErrorFilter, gpu::ErrorScope, gpu::ScopePop, gpu::PopStatus,
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::Size,
@@ -1383,7 +1384,151 @@ unsafe fn void errorCases(ref Check t, ref Adapter adapter) {
     else { adopt = holds(errs: maker, want: 1, kind: GpuErrorKind::Validation); }
     t.verdict(name: "an adopted device says its errors are not watched, and they reach its maker", why: adopt);
 
+    scopeCases(t: t, adapter: adapter);
     outlivesCase(t: t, adapter: adapter);
+}
+
+// A scope popped, natively answered at once: "" when it caught an error of `kind`, its words left in `words`, or, with
+// `kind` None, when it caught nothing.
+@compileFor(!ARCH_WASM32)
+unsafe fn string caughtBy(Result<ScopePop, GpuError> popped, Optional<GpuErrorKind> kind, ref string words) {
+    string why = "";
+    match (give popped) {
+        case Ok(value: answer): {
+            PopStatus status = answer.poll();
+            match (give status) {
+                case Pending: { why = "still pending, where natively a pop is answered at once"; }
+                case Failed(error: e): { string said = e.message(); why = "the pop failed: ${said}"; }
+                case Ready(caught: c): {
+                    match (give c) {
+                        case Some(value: report): {
+                            words = report.message();
+                            GpuErrorKind got = report.kind();
+                            match (kind) {
+                                case Some(value: k): {
+                                    if (got != k) { string name = kindName(k: got); why = "it caught a ${name} error"; }
+                                }
+                                case None: { why = "it caught an error: " + report.message(); }
+                            };
+                        }
+                        case None: { if (kind.isSome()) { why = "it caught nothing"; } }
+                    };
+                }
+            };
+        }
+        case Err(error: e): { string said = e.message(); why = "the pop was refused: ${said}"; }
+    };
+    return why;
+}
+
+// A scope pushed, an error made in it, and the scope dropped unpopped.
+@compileFor(!ARCH_WASM32)
+unsafe fn void dropScope(ref Device device) {
+    ErrorScope open = device.pushErrorScope(filter: ErrorFilter::Validation);
+    Buffer bad = badBuffer(device: device);
+}
+
+// Error scopes, which the seam keeps natively: WebGPU's rules, and none of wgpu-native's aborting paths reachable.
+@compileFor(!ARCH_WASM32)
+unsafe fn void scopeCases(ref Check t, ref Adapter adapter) {
+    Optional<Device> asked = deviceNow(t: t, adapter: adapter, purpose: "a device for the scope cases");
+    Device d = match (give asked) {
+        case Some(value: x): give x;
+        case None: { return; }
+    };
+    string words = "";
+
+    ErrorScope s1 = d.pushErrorScope(filter: ErrorFilter::Validation);
+    Buffer b1 = badBuffer(device: d);
+    Result<ScopePop, GpuError> p1 = give s1.pop();
+    string one = caughtBy(popped: give p1, kind: Optional::Some(value: GpuErrorKind::Validation), words: words);
+    DeviceErrors after1 = d.takeErrors();
+    if (one.isEmpty() && !after1.isEmpty()) { one = "the channel got it too"; }
+    t.verdict(name: "a scope catches an error made while it is open, and the channel does not", why: one);
+
+    ErrorScope outer2 = d.pushErrorScope(filter: ErrorFilter::Validation);
+    ErrorScope inner2 = d.pushErrorScope(filter: ErrorFilter::OutOfMemory);
+    Buffer b2 = badBuffer(device: d);
+    Result<ScopePop, GpuError> pi2 = give inner2.pop();
+    string innerWhy = caughtBy(popped: give pi2, kind: Optional::None, words: words);
+    Result<ScopePop, GpuError> po2 = give outer2.pop();
+    string two = caughtBy(popped: give po2, kind: Optional::Some(value: GpuErrorKind::Validation), words: words);
+    if (!innerWhy.isEmpty()) { two = "the OutOfMemory scope: " + innerWhy; }
+    t.verdict(name: "an error a scope's filter does not match passes to the scope beneath it", why: two);
+
+    ErrorScope s3 = d.pushErrorScope(filter: ErrorFilter::OutOfMemory);
+    Buffer b3 = badBuffer(device: d);
+    Result<ScopePop, GpuError> p3 = give s3.pop();
+    string three = caughtBy(popped: give p3, kind: Optional::None, words: words);
+    DeviceErrors after3 = d.takeErrors();
+    if (three.isEmpty()) { three = holds(errs: after3, want: 1, kind: GpuErrorKind::Validation); }
+    t.verdict(name: "past every scope, an error reaches the channel", why: three);
+
+    Texture flat = badTexture(device: d);
+    DeviceErrors flatErrors = d.takeErrors();
+    string later = "";
+    if (flatErrors.reports().length() == 1) { later = flatErrors.reports()[0].message(); }
+    ErrorScope s4 = d.pushErrorScope(filter: ErrorFilter::Validation);
+    Buffer b4 = badBuffer(device: d);
+    Texture t4 = badTexture(device: d);
+    Result<ScopePop, GpuError> p4 = give s4.pop();
+    string kept = "";
+    string four = caughtBy(popped: give p4, kind: Optional::Some(value: GpuErrorKind::Validation), words: kept);
+    DeviceErrors after4 = d.takeErrors();
+    if (four.isEmpty() && later.isEmpty()) { four = "a texture with no width gave no single error to tell the later one by"; }
+    else if (four.isEmpty() && kept == later) { four = "it kept the later error"; }
+    else if (four.isEmpty() && !after4.isEmpty()) { four = "the later error reached the channel"; }
+    t.verdict(name: "a scope keeps the first error it catches and swallows the rest", why: four);
+
+    ErrorScope s5 = d.pushErrorScope(filter: ErrorFilter::Validation);
+    Result<ScopePop, GpuError> p5 = give s5.pop();
+    t.verdict(name: "a scope that caught nothing answers None", why: caughtBy(popped: give p5, kind: Optional::None, words: words));
+
+    ErrorScope s6 = d.pushErrorScope(filter: ErrorFilter::Internal);
+    Buffer b6 = badBuffer(device: d);
+    Result<ScopePop, GpuError> p6 = give s6.pop();
+    string six = caughtBy(popped: give p6, kind: Optional::None, words: words);
+    DeviceErrors after6 = d.takeErrors();
+    if (six.isEmpty()) { six = holds(errs: after6, want: 1, kind: GpuErrorKind::Validation); }
+    t.verdict(name: "an Internal scope is taken natively, where wgpu-native's own would end the process", why: six);
+
+    ErrorScope outer7 = d.pushErrorScope(filter: ErrorFilter::Validation);
+    ErrorScope inner7 = d.pushErrorScope(filter: ErrorFilter::Validation);
+    Result<ScopePop, GpuError> po7 = give outer7.pop();
+    bool outOfOrder = match (po7) {
+        case Err(error: e): match (e) { case OutOfOrder: true; case _: false; };
+        case Ok(value: p): false;
+    };
+    Buffer b7 = badBuffer(device: d);
+    Result<ScopePop, GpuError> pi7 = give inner7.pop();
+    string seven = caughtBy(popped: give pi7, kind: Optional::Some(value: GpuErrorKind::Validation), words: words);
+    Buffer b7b = badBuffer(device: d);
+    DeviceErrors after7 = d.takeErrors();
+    if (!outOfOrder) { seven = "the pop out of order was not refused with OutOfOrder"; }
+    else if (seven.isEmpty()) { seven = holds(errs: after7, want: 1, kind: GpuErrorKind::Validation); }
+    t.verdict(name: "a pop out of order is refused, and the stack does not jam", why: seven);
+
+    ErrorScope outer8 = d.pushErrorScope(filter: ErrorFilter::Validation);
+    Buffer b8 = badBuffer(device: d);
+    ErrorScope inner8 = d.pushErrorScope(filter: ErrorFilter::OutOfMemory);
+    Result<ScopePop, GpuError> po8 = give outer8.pop();
+    DeviceErrors held8 = d.takeErrors();
+    Result<ScopePop, GpuError> pi8 = give inner8.pop();
+    DeviceErrors after8 = d.takeErrors();
+    string eight = holds(errs: after8, want: 1, kind: GpuErrorKind::Validation);
+    if (!held8.isEmpty()) { eight = "it reached the channel before the scope above it was popped"; }
+    t.verdict(name: "what an orphaned scope caught reaches the channel once the scopes above it are popped", why: eight);
+
+    dropScope(device: d);
+    DeviceErrors after9 = d.takeErrors();
+    Buffer b9 = badBuffer(device: d);
+    DeviceErrors again9 = d.takeErrors();
+    string nine = holds(errs: after9, want: 1, kind: GpuErrorKind::Validation);
+    if (nine.isEmpty()) {
+        string next = holds(errs: again9, want: 1, kind: GpuErrorKind::Validation);
+        if (!next.isEmpty()) { nine = "the next error: " + next; }
+    }
+    t.verdict(name: "a scope dropped unpopped pops itself, and what it caught reaches the channel", why: nine);
 }
 
 // A device's state outlives the device while a handle made from it lives: wgpu-native reports the handle's errors to the

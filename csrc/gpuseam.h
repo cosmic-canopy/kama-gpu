@@ -31,8 +31,9 @@
 #define GPUSEAM_READY 1
 #define GPUSEAM_FAILED 2
 
-// A device's state block (below).
+// A device's state block, and an error scope (below).
 typedef struct gpuseam_state gpuseam_state;
+typedef struct gpuseam_scope gpuseam_scope;
 
 // ---- an adapter on its way: WebGPU's first step ----
 
@@ -131,6 +132,33 @@ int32_t gpuseam_errors_kind(gpuseam_errors *errors, int32_t at);
 int32_t gpuseam_errors_length(gpuseam_errors *errors, int32_t at);
 const uint8_t *gpuseam_errors_message(gpuseam_errors *errors, int32_t at);
 void gpuseam_errors_free(gpuseam_errors *errors);
+
+// ---- a device's error scopes ----
+
+// What a scope catches: the GPUSEAM_KIND_* of the same number.
+#define GPUSEAM_FILTER_VALIDATION 0
+#define GPUSEAM_FILTER_OUT_OF_MEMORY 1
+#define GPUSEAM_FILTER_INTERNAL 2
+#define GPUSEAM_SCOPE_OUT_OF_ORDER 1
+
+// Open a scope on the calling thread: natively the seam keeps it, catching the first error its filter matches; on the
+// web it is the browser's. It holds the block and a reference on `device`. NULL with no memory, or no block.
+gpuseam_scope *gpuseam_scope_push(gpuseam_state *state, WGPUDevice device, int32_t filter);
+// Pop it: 0, its answer then polled as a slot's; or GPUSEAM_SCOPE_OUT_OF_ORDER while a scope pushed after it on its
+// thread is open, when it is orphaned instead, popped once those are, and what it caught goes to the channel. Either way
+// the caller is done with the scope as pushed: a popped one is dropped with gpuseam_scope_drop_popped.
+int32_t gpuseam_scope_pop(gpuseam_scope *scope);
+// A scope dropped unpopped: orphaned, and popped as soon as it is the innermost on its thread.
+void gpuseam_scope_abandon(gpuseam_scope *scope);
+// A popped scope: GPUSEAM_PENDING (the web's answer owed), _READY or _FAILED; whether it caught an error, and that
+// error's GPUSEAM_KIND_* and words (a FAILED pop's words, too).
+int32_t gpuseam_scope_poll(gpuseam_scope *scope);
+int32_t gpuseam_scope_caught(gpuseam_scope *scope);
+int32_t gpuseam_scope_kind(gpuseam_scope *scope);
+int32_t gpuseam_scope_length(gpuseam_scope *scope);
+const uint8_t *gpuseam_scope_message(gpuseam_scope *scope);
+// Done with a popped scope: freed now, or abandoned to the web's answer if it is still owed.
+void gpuseam_scope_drop_popped(gpuseam_scope *scope);
 
 // 0 while the device is not lost, else its GPUSEAM_LOSS_*, and the words it was lost with.
 int32_t gpuseam_state_lost(gpuseam_state *state);
