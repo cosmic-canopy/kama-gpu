@@ -32,7 +32,7 @@ import {
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::Size,
-    addDeviceRef, statesAlive,
+    addDeviceRef, statesAlive, windowRecords, unfocusedNext,
 };
 
 comptime uint32 SIDE = 64;
@@ -348,6 +348,7 @@ fn string acquireFailures() {
     all.add(item: SurfaceError::Lost);
     all.add(item: SurfaceError::Timeout);
     all.add(item: SurfaceError::Failed);
+    all.add(item: SurfaceError::Closed);
     isize i = 0;
     while (i < all.length()) {
         string kind = match (all[i]) {
@@ -356,6 +357,7 @@ fn string acquireFailures() {
             case Lost: "Lost";
             case Timeout: "Timeout";
             case Failed: "Failed";
+            case Closed: "Closed";
         };
         string words = all[i].message();
         if (words.isEmpty()) { return "${kind} has no words"; }
@@ -385,6 +387,7 @@ fn string refusal(const ref Result<Unit, ConfigureError> got) {
                 case NoArea: { what = "NoArea"; }
                 case TooLarge(most: m): { what = "TooLarge ${m}"; }
                 case NotOffered(words: said): { what = "NotOffered"; }
+                case Closed: { what = "Closed"; }
             };
         }
     };
@@ -430,7 +433,7 @@ type resource Check implements App {
     public unsafe ctor make() {
         this.formatCases();
         this.capabilityCases();
-        this.verdict(name: "an acquire fails in one of five ways, each with its words", why: acquireFailures());
+        this.verdict(name: "an acquire fails in one of six ways, each with its words", why: acquireFailures());
         Result<Instance, GpuError> made = Instance.make();
         match (give made) {
             case Ok(value: inst): {
@@ -898,6 +901,7 @@ unsafe fn void surfaceCases(ref Check t) {
     string off = envOr(name: "KAMA_WINDOW_NO_DISPLAY", dflt: "");
     if (!off.isEmpty()) { println(s: "skip the surface cases: KAMA_WINDOW_NO_DISPLAY is set"); return; }
     // Declared in the order they must outlive each other: the window, then what presents to it.
+    unfocusedNext();
     Result<Window, WindowError> opened = Window.open(title: "@kama/gpu tests", width: 320, height: 200);
     Window window = match (give opened) {
         case Ok(value: opens): give opens;
@@ -940,6 +944,7 @@ unsafe fn void surfaceCases(ref Check t) {
                 Size px = window.framebufferSize();
                 configureCases(t: t, surface: surface, early: early, caps: caps, device: d, queue: q,
                                width: cast<uint32>(px.width), height: cast<uint32>(px.height));
+                closedCases(t: t, instance: instance, adapter: adapter, device: d, caps: caps);
                 DeviceErrors errs = d.takeErrors();
                 t.verdict(name: "no uncaptured WebGPU error on the surface's device", why: errorsSaid(errs: errs));
                 return;
@@ -949,6 +954,139 @@ unsafe fn void surfaceCases(ref Check t) {
         polls = polls + 1;
     }
     t.verdict(name: "a device for the surface", why: "the request never settled");
+}
+
+// ---- a surface holds its window (GPU-2) ------------------------------------------------------------------------------
+
+// A surface on a window of its own, the window dropped on the way out.
+@compileFor(!ARCH_WASM32)
+unsafe fn Result<Surface, GpuError> surfaceOutlivingWindow(const ref Instance instance) {
+    unfocusedNext();
+    Result<Window, WindowError> opened = Window.open(title: "@kama/gpu closed window", width: 160, height: 100);
+    Window window = match (give opened) {
+        case Ok(value: opens): give opens;
+        case Err(error: e): { string why = e.message(); return Result::Err(error: GpuError::Refused(words: give why)); }
+    };
+    return Surface.make(instance: instance, window: window);
+}
+
+// Adapter options made with such a surface, the surface dropped on the way out too.
+@compileFor(!ARCH_WASM32)
+unsafe fn Optional<AdapterOptions> optionsOutlivingWindow(const ref Instance instance) {
+    Result<Surface, GpuError> made = surfaceOutlivingWindow(instance: instance);
+    Optional<AdapterOptions> held = Optional::None;
+    match (give made) {
+        case Ok(value: s): { held = Optional::Some(value: AdapterOptions.withSurface(surface: s, power: PowerPreference::HighPerformance)); }
+        case Err(error: e): { string why = e.message(); println(s: "info no surface for the options: ${why}"); }
+    };
+    return give held;
+}
+
+// A frame acquired from a configured surface on a window of its own, the surface and the window dropped on the way out.
+@compileFor(!ARCH_WASM32)
+unsafe fn Optional<SurfaceTexture> frameOutlivingWindow(const ref Instance instance, ref Device device, const ref SurfaceConfig config) {
+    unfocusedNext();
+    Result<Window, WindowError> opened = Window.open(title: "@kama/gpu held frame", width: 160, height: 100);
+    Window window = match (give opened) {
+        case Ok(value: opens): give opens;
+        case Err(error: e): { string why = e.message(); println(s: "info no window for the held frame: ${why}"); return Optional::None; }
+    };
+    Result<Surface, GpuError> made = Surface.make(instance: instance, window: window);
+    Surface surface = match (give made) {
+        case Ok(value: s): give s;
+        case Err(error: e): { string why = e.message(); println(s: "info no surface for the held frame: ${why}"); return Optional::None; }
+    };
+    Size px = window.framebufferSize();
+    Result<Unit, ConfigureError> done = surface.configure(device: device, config: config, width: cast<uint32>(px.width),
+                                                          height: cast<uint32>(px.height));
+    match (done) {
+        case Ok(value: u): { }
+        case Err(error: e): { string why = e.message(); println(s: "info the held frame's surface refused: ${why}"); return Optional::None; }
+    };
+    Result<SurfaceTexture, SurfaceError> got = surface.acquire();
+    Optional<SurfaceTexture> frame = Optional::None;
+    match (give got) {
+        case Ok(value: f): { frame = Optional::Some(value: give f); }
+        case Err(error: e): { string why = e.message(); println(s: "info no frame to hold: ${why}"); }
+    };
+    return give frame;
+}
+
+// "" when the window records alive are `want`.
+unsafe fn string recordsAre(int32 want) {
+    int32 got = windowRecords();
+    if (got == want) { return ""; }
+    return "${got} window records alive, not ${want}";
+}
+
+// What an acquire answered, as a test compares it: "a frame", or the error's name.
+fn string acquireName(const ref Result<SurfaceTexture, SurfaceError> got) {
+    string what = "a frame";
+    match (got) {
+        case Ok(value: f): { }
+        case Err(error: e): {
+            match (e) {
+                case Occluded: { what = "Occluded"; }
+                case Outdated: { what = "Outdated"; }
+                case Lost: { what = "Lost"; }
+                case Timeout: { what = "Timeout"; }
+                case Failed: { what = "Failed"; }
+                case Closed: { what = "Closed"; }
+            };
+        }
+    };
+    return what;
+}
+
+// A surface, adapter options made with one, and a frame each hold their window's record after the window is dropped,
+// so its HWND stays valid under them: a configure on a destroyed one aborts wgpu-native (measured 2026-11-10). Once the
+// window is closed, nothing reaches it again.
+@compileFor(!ARCH_WASM32)
+unsafe fn void closedCases(ref Check t, const ref Instance instance, const ref Adapter adapter, ref Device device,
+                           const ref SurfaceCapabilities caps) {
+    int32 before = windowRecords();
+    Result<Surface, GpuError> made = surfaceOutlivingWindow(instance: instance);
+    match (give made) {
+        case Err(error: e): { string why = e.message(); t.verdict(name: "a surface on a window that then closes", why: why); return; }
+        case Ok(value: surface): {
+            t.verdict(name: "a surface holds its window's record after the window is dropped", why: recordsAre(want: before + 1));
+            SurfaceConfig config = caps.preferred();
+            Result<Unit, ConfigureError> r = surface.configure(device: device, config: config, width: 160, height: 100);
+            t.verdict(name: "a surface on a closed window refuses to configure, as Closed",
+                      why: expectRefusal(got: r, want: "Closed"));
+            Result<SurfaceTexture, SurfaceError> a = surface.acquire();
+            string got = acquireName(got: a);
+            if (got == "Closed") { t.verdict(name: "a surface on a closed window refuses to acquire, as Closed", why: ""); }
+            else { t.verdict(name: "a surface on a closed window refuses to acquire, as Closed", why: "got ${got}"); }
+            Result<SurfaceCapabilities, GpuError> c = surface.capabilities(adapter: adapter);
+            match (c) {
+                case Ok(value: k): { t.verdict(name: "a surface on a closed window refuses its capabilities", why: "it answered them"); }
+                case Err(error: e): { t.verdict(name: "a surface on a closed window refuses its capabilities", why: ""); }
+            };
+        }
+    };
+    t.verdict(name: "the surface's drop frees the closed window's record", why: recordsAre(want: before));
+
+    Optional<AdapterOptions> options = optionsOutlivingWindow(instance: instance);
+    match (give options) {
+        case None: { t.verdict(name: "adapter options with a surface on a window that then closes", why: "none"); }
+        case Some(value: o): {
+            t.verdict(name: "adapter options made with a surface hold its window's record", why: recordsAre(want: before + 1));
+        }
+    };
+    t.verdict(name: "the options' drop frees the record", why: recordsAre(want: before));
+
+    SurfaceConfig preferred = caps.preferred();
+    Optional<SurfaceTexture> frame = frameOutlivingWindow(instance: instance, device: device, config: preferred);
+    match (give frame) {
+        case None: { t.verdict(name: "a frame from a window that then closes", why: "no frame"); }
+        case Some(value: f): {
+            t.verdict(name: "a frame holds its window's record after its surface and window are dropped",
+                      why: recordsAre(want: before + 1));
+            give f.present();   // the window is closed: the frame is dropped, never presented
+        }
+    };
+    t.verdict(name: "the frame's drop frees the record", why: recordsAre(want: before));
 }
 
 // An adapter that can present to `surface`; natively the request is answered as soon as it is polled.

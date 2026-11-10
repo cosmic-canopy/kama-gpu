@@ -5,6 +5,11 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **A surface holds its window** (2026-11-10, kama 0.9.911; GPU-2, AGENTS.gpu.md item 9), on `@kama/window`'s counted
+  `NativeWindow`, so a surface, adapter options made with it and a frame each drop safely in either order with the
+  window. **Breaking:** `SurfaceError::Closed` and `ConfigureError::Closed`, which a surface answers once its window's
+  `Window` is dropped; `capabilities` is refused then, and a frame whose window closed is dropped by `present()`.
+  `tests/` gains 9 cases, and opens its windows unfocused.
 - Errors per device (2026-11-10, kama 0.9.911; GPU-1, AGENTS.gpu.md item 2). **Breaking:** `uncapturedErrors()`,
   `lastErrorMessage()` and `lostDevices()`, which counted every device's errors together, are gone.
   - `device.takeErrors()` drains a `DeviceErrors`: its `GpuErrorReport`s (`kind()`, a `GpuErrorKind`, and

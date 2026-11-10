@@ -161,8 +161,16 @@ Measured natively, each held by the tests per leg:
 
 A surface is what WebGPU presents into, made on an `@kama/window` window.
 
-- **`Surface.make(instance:, window:) -> Result<Surface, GpuError>`.** A copy shares the surface and how it was last
-  configured. **A surface must be dropped before its window,** because a `Window` does not count references yet.
+- **`Surface.make(instance:, window:) -> Result<Surface, GpuError>`.** A copy shares the surface, its window and how
+  it was last configured. **A surface holds its window** (a `NativeWindow`, `@kama/window`'s counted handle), so the two
+  drop in either order, and so do adapter options made with it and a frame from it.
+- **Once the window's `Window` is dropped, the window is closed, and the surface never reaches it again:**
+  - `configure` refuses with `ConfigureError::Closed`;
+  - `acquire` refuses with `SurfaceError::Closed`, where wgpu-native would hand out frames that go nowhere;
+  - `capabilities` is refused;
+  - a frame acquired before the close is dropped by `present()`, never presented.
+
+  The program drops the surface, and makes a new one on a live window if it wants one.
 - **`surface.capabilities(adapter:) -> Result<SurfaceCapabilities, GpuError>`:**
   - `formats()`, in the surface's order, which is its preference; a format the package does not name is left out,
     never guessed;
@@ -189,18 +197,21 @@ A surface is what WebGPU presents into, made on an `@kama/window` window.
   - `NoArea`: a width or height of 0, as a minimised window has; the routine answer is to skip frames until it has an
     area;
   - `TooLarge(most)`: past the device's `maxTextureDimension2D`, which `DeviceOptions` can raise up to the adapter's;
-  - `NotOffered(words)`: a choice the surface does not offer, named.
+  - `NotOffered(words)`: a choice the surface does not offer, named;
+  - `Closed`: the window is closed.
 - **`surface.acquire() -> Result<SurfaceTexture, SurfaceError>`.** `SurfaceError` is:
   - `Occluded`: the window is hidden or minimised; natively the acquire sleeps 32 ms first, so a loop that skips the
     frame does not spin;
   - `Outdated` and `Lost`: configure again;
   - `Timeout`: try the next frame;
-  - `Failed`: anything else.
+  - `Failed`: anything else;
+  - `Closed`: the window is closed, so drop the surface. It is the package's own; webgpu.h has no such status.
 - **A frame (`SurfaceTexture`):**
   - `view()` is in the configured view format;
   - `texture()` can be copied from;
   - `suboptimal()`;
-  - `present()` consumes the frame. On the web the seam skips the explicit present, which emdawnwebgpu aborts on.
+  - `present()` consumes the frame. On the web the seam skips the explicit present, which emdawnwebgpu aborts on, and
+    on every leg a frame whose window has closed is dropped instead.
 
 What each leg's surface answers, measured natively and read for the web (2026-11-10):
 
@@ -218,7 +229,8 @@ What each leg's surface answers, measured natively and read for the web (2026-11
   make, the coverage rules on their fixture, and the constants;
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 22 facts, natively;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`: 69 cases natively with a display (51 without), debug and release;
+- `tests/`, one program run as a `std::app` `App`: 78 cases natively with a display (51 without), debug and release.
+  Its windows open unfocused, through GLFW's hints, so a run never takes the keyboard (`tests/src/quiet.kama`);
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
   `KAMA_WINDOW_NO_DISPLAY` is set;
 - the xfail, an encoder used after `finish()`, which must be refused for the move;

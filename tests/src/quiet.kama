@@ -1,0 +1,20 @@
+file @compileFor(!ARCH_WASM32);
+// A stopgap until the package can open a window without taking the focus: the next system window the tests open is
+// shown unfocused, so a test run never takes the keyboard from someone typing (the owner, 2026-11-10: "it fights for
+// focus"). GLFW's own hints, set before each open: glfwInit does nothing when GLFW is already up, as the package's open
+// finds it, and the hints hold until the package's last window terminates GLFW.
+
+export { unfocusedNext };
+
+extern "<GLFW/glfw3.h>";
+extern fn int32 glfwInit();
+extern fn void glfwWindowHint(int32 hint, int32 value);
+extern const int32 GLFW_FOCUSED;
+extern const int32 GLFW_FOCUS_ON_SHOW;
+extern const int32 GLFW_FALSE;
+
+unsafe fn void unfocusedNext() {
+    if (glfwInit() == 0) { return; }
+    glfwWindowHint(hint: GLFW_FOCUSED, value: GLFW_FALSE);
+    glfwWindowHint(hint: GLFW_FOCUS_ON_SHOW, value: GLFW_FALSE);
+}

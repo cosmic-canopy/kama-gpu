@@ -40,7 +40,8 @@ in; *as an engine renderer* they stay out.
 **[SPEC.md](SPEC.md) is what the package is, [ROADMAP.md](ROADMAP.md) what comes next, and [COVERAGE.md](COVERAGE.md)
 which of webgpu.h it calls.** In short (2026-11-10, kama 0.9.911): offscreen work and a surface on a window run natively
 on Windows, the web leg builds and has not run, the safe API calls 55 of webgpu.h's 206 functions, and a device's
-errors reach its own holders (GPU-1, built). GPU-2, a surface holding its window, is next, after `@kama/window`'s WIN-1.
+errors reach its own holders (GPU-1, built), and a surface holds its window (GPU-2, built). GPU-3, the web leg, is
+next, after `@kama/window`'s web half (WIN-3).
 `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
@@ -316,11 +317,39 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       `tools/wgpugen` with the bindings, with its numbers both ways and its sRGB and linear forms, so a surface's answer
       is never cut on any platform and textures need no second growth. Naming only RGB10A2Unorm would have been a
       stopgap each platform's first run reopens.
-9. **Stopgap, GPU-2: the surface must be dropped before its window** (documented on `Surface`), because a `Window` is not
-   reference-counted, so a lifetime rule lives only in documentation, in a safe API. **The production answer:**
-   `@kama/window` counts references to a window's native record and destroys it on the last release, and a surface
-   holds one, so the two drop safely in either order. On Android the OS takes the window at `SurfaceLost` whatever is
-   counted: `std::app` says so first, and the surface is dropped in that call.
+9. **Built on 2026-11-10: a surface holds its window (GPU-2)** (kama 0.9.911), replacing the stopgap below, on
+   `@kama/window`'s WIN-1: a window's native record is counted, and its `NativeWindow` holds it (`../kama-window`'s
+   AGENTS.window.md item 6 has the probe and the four decisions, approved by the owner on 2026-11-10). Natively,
+   test-first:
+   - **9 new cases with a display** (78 in all);
+   - **6 of 7 mutations caught.** The seventh, a frame presented after its window closed, is equivalent natively:
+     presenting to the closed, hidden window succeeds. It matters on Android, where it is measured with WIN-13.
+
+   **What is held:**
+   - a surface's shared state holds the `NativeWindow` it was made from;
+   - so do adapter options made with a surface, and a frame, since each holds the native surface too.
+
+   The native surface is released before the window's hold, so a closed window's HWND outlives every `VkSurfaceKHR` on
+   it.
+
+   **What a closed window does to the surface** (decision 2): the surface never reaches the window again.
+   - `configure` refuses with `ConfigureError::Closed`;
+   - `acquire` refuses with `SurfaceError::Closed`. `Closed` is the package's own: webgpu.h has no such status;
+   - `capabilities` is refused with `GpuError::Refused`;
+   - `present()` drops a frame whose window closed since its acquire.
+
+   **What the mutations corrected.** The probe measured an abort when a surface is configured on a *destroyed* window.
+   With the window held, a closed window is hidden and its HWND valid, so wgpu-native configures it happily. `Closed`
+   is therefore the package's rule, not a guard against an abort: Android forbids touching the window (WIN-13), and a
+   program learns to drop the surface rather than spin on a configure that succeeds into a hidden window.
+
+   **Found on the way, measured 3 of 3 (the probe's `unconfigured` case):** an acquire on a surface never configured
+   aborts the process. wgpu-native panics with "Error in wgpuSurfaceGetCurrentTexture: Validation Error. Surface is not
+   configured for presentation". `surface.acquire()` before a successful `configure` reaches it today. It is not
+   GPU-2's, and is put to the owner.
+
+   **Stopgap, replaced: the surface had to be dropped before its window,** documented on `Surface`, because a `Window`
+   was not counted, so a lifetime rule lived only in documentation in a safe API.
 
 ## Where the truth is
 

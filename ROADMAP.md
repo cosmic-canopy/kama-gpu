@@ -16,13 +16,7 @@ in the git log.
 **The goal before 1.0 is every call in webgpu.h** ([AGENTS.gpu.md](AGENTS.gpu.md#what-this-is)), grown by the spec's
 sections in the order `@kama/graphics` pulls them.
 
-## NOW: the stopgaps that change the API
-
-| id | item | why |
-|---|---|---|
-| GPU-2 | **A surface holds its window**, once `@kama/window` counts a window's references (its WIN-1), so the two drop in either order | [AGENTS.gpu.md, item 9](AGENTS.gpu.md#where-this-departs-from-kamas-design-s8-gpu-wrapper) |
-
-## NEXT: the web leg, then the render pipeline set
+## NOW: the web leg, then the render pipeline set
 
 | id | item | why |
 |---|---|---|

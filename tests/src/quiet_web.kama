@@ -1,0 +1,6 @@
+file @compileFor(ARCH_WASM32);
+// On the web no test opens a system window, so there is no focus to keep (quiet.kama).
+
+export { unfocusedNext };
+
+fn void unfocusedNext() { }

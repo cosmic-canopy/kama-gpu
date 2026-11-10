@@ -648,10 +648,11 @@ type resource Instance implements Copyable<This>(bare: give) {
 }
 
 // What an adapter is asked for (WebGPU's `GPURequestAdapterOptions`): a power preference, and the surface it must
-// present to when there is one, on which it holds a reference.
+// present to when there is one, on which it holds a reference, and on its window.
 type resource AdapterOptions {
     int32 power;
     UnsafePtr surface;   // null for an adapter that need present nowhere
+    NativeWindow onWindow = NativeWindow.adopt(kind: NativeKind::None, display: null, window: null);
 
     friend Instance::requestAdapter[power, surface];
 
@@ -660,6 +661,7 @@ type resource AdapterOptions {
         this.power = powerValue(p: power);
         this.surface = surface.raw();
         surfaceAddRef(surface: this.surface);
+        this.onWindow = surface.heldWindow();
     }
 
     unsafe ~AdapterOptions() { if (this.surface != null) { surfaceRelease(surface: this.surface); } }
@@ -1259,10 +1261,11 @@ type resource CommandBuffer implements Copyable<This>(bare: give) {
 
 // Why an acquire gave no texture. Occluded: the window is hidden or minimised; natively the acquire slept 32 ms first,
 // so a loop that skips the frame does not spin. Outdated or Lost: configure again (at the window's new size). Timeout:
-// try the next frame. Failed: anything else webgpu.h reports. (The design's OutOfMemory is not here: neither leg's
-// webgpu.h reports it any more.)
+// try the next frame. Failed: anything else webgpu.h reports. Closed: the window's `Window` was dropped, so the surface
+// never reaches it again: drop the surface (the package's own; webgpu.h has no such status). (The design's OutOfMemory
+// is not here: neither leg's webgpu.h reports it any more.)
 type enum SurfaceError implements Error {
-    Occluded, Outdated, Lost, Timeout, Failed;
+    Occluded, Outdated, Lost, Timeout, Failed, Closed;
 
     public const fn string message() {
         return match (this) {
@@ -1271,6 +1274,7 @@ type enum SurfaceError implements Error {
             case Lost: "the surface was lost: configure it again";
             case Timeout: "no texture came in time";
             case Failed: "the surface failed";
+            case Closed: "the window is closed: drop the surface";
         };
     }
 }
@@ -1346,13 +1350,15 @@ fn Optional<AlphaMode> alphaModeOf(int32 v) {
 type enum ConfigureError implements Error {
     NoArea,                    // a width or height of 0, as a minimised window has: configure again when it has an area
     TooLarge(uint32 most),     // wider or taller than the device's maxTextureDimension2D, `most`, which DeviceOptions raise
-    NotOffered(string words);  // a choice the surface does not offer, named
+    NotOffered(string words),  // a choice the surface does not offer, named
+    Closed;                    // the window is closed, and nothing reaches it again: drop the surface
 
     public const fn string message() {
         return match (this) {
             case NoArea: "the window has no area: configure again when it has one";
             case TooLarge(most: m): "larger than the device allows: ${m} texels on a side at most";
             case NotOffered(words: w): copy w;
+            case Closed: "the window is closed: drop the surface";
         };
     }
 }
@@ -1548,15 +1554,26 @@ unsafe fn Result<SurfaceCapabilities, GpuError> capabilitiesOf(UnsafePtr surface
     return SurfaceCapabilities.make(formats: give formats, presentModes: give presents, alphaModes: give alphas, usages: usages);
 }
 
-// What every copy of a surface shares: the native surface, released with the last copy, and the view format it was last
-// configured to be drawn through, so a copy made before a configure draws as the configure asked.
+// What every copy of a surface shares: the native surface, released with the last copy, the window it presents to, held
+// so its system window outlives the surface, and the view format it was last configured to be drawn through, so a copy
+// made before a configure draws as the configure asked.
 type resource SurfaceState {
     UnsafePtr handle;
     int32 view = 0;   // WebGPU's number for the view format; Undefined (0) before a configure, which is the texture's own
     StateHold hold = StateHold.empty();   // the state of the device it was last configured with, which its frames hold
+    // The window, held (@kama/window's WIN-1); an adopted surface holds an adopted handle, which is always open.
+    NativeWindow onWindow = NativeWindow.adopt(kind: NativeKind::None, display: null, window: null);
 
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor fromWindow(UnsafePtr raw, NativeWindow window) {
+        this.handle = raw;
+        this.onWindow = give window;
+    }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
+    // False once the window's `Window` is dropped: nothing reaches the window after that.
+    public unsafe const fn bool windowOpen() { return this.onWindow.isOpen(); }
+    // Another hold on the window, for a frame or adapter options that hold the native surface too.
+    public unsafe const fn NativeWindow heldWindow() { return copy this.onWindow; }
     public const fn int32 viewFormat() { return this.view; }
     public unsafe const fn UnsafePtr deviceState() { return this.hold.raw(); }
     public unsafe fn void configured(int32 view, UnsafePtr block) {
@@ -1567,14 +1584,17 @@ type resource SurfaceState {
     unsafe ~SurfaceState() { if (this.handle != null) { surfaceRelease(surface: this.handle); } }
 }
 
-// A surface on a window, which WebGPU presents into. Drop it before the window it was made on. A copy shares the
-// surface and how it was configured.
+// A surface on a window, which WebGPU presents into. It holds the window, so the two drop in either order: once the
+// window's `Window` is dropped the window is closed, and the surface refuses everything that would reach it (Closed).
+// A copy shares the surface, its window and how it was configured.
 type resource Surface implements Copyable<This>(bare: give) {
     Shared<SurfaceState> state;
 
+    friend AdapterOptions::withSurface[heldWindow];
+
     public unsafe ctor Result<Surface, GpuError> make(const ref Instance instance, const ref Window window) {
         NativeWindow n = window.nativeHandle();
-        int32 kind = match (n.kind) {
+        int32 kind = match (n.kind()) {
             case None: 0;
             case Win32: 1;
             case X11: 2;
@@ -1582,27 +1602,37 @@ type resource Surface implements Copyable<This>(bare: give) {
             case Cocoa: 4;
             case Canvas: 5;
         };
-        UnsafePtr h = createSurface(instance: instance.raw(), kind: kind, display: n.display, window: n.window);
+        UnsafePtr h = createSurface(instance: instance.raw(), kind: kind, display: n.display(), window: n.window());
         if (h == null) { return Result::Err(error: GpuError::Refused(words: "no surface for this window on this system")); }
-        return Result::Ok(value: Surface.adopt(raw: h));
+        return Result::Ok(value: Surface.fromWindow(raw: h, window: give n));
     }
+    unsafe ctor fromWindow(UnsafePtr raw, NativeWindow window) {
+        Shared<SurfaceState> s = new SurfaceState.fromWindow(raw: raw, window: give window);
+        this.state = give s;
+    }
+    // A surface made elsewhere: its maker keeps the window alive while this lives.
     public unsafe ctor adopt(UnsafePtr raw) {
         Shared<SurfaceState> s = new SurfaceState.adopt(raw: raw);
         this.state = give s;
     }
     public unsafe ctor copy(ref Surface source) { this.state = copy source.state; }
     public unsafe const fn UnsafePtr raw() { return this.state.raw(); }
+    unsafe const fn NativeWindow heldWindow() { return this.state.heldWindow(); }
 
-    // What the surface offers `adapter`: its formats, present modes, alpha modes and usages.
+    // What the surface offers `adapter`: its formats, present modes, alpha modes and usages. Refused once the window
+    // is closed.
     public unsafe const fn Result<SurfaceCapabilities, GpuError> capabilities(const ref Adapter adapter) {
+        if (!this.state.windowOpen()) { return Result::Err(error: GpuError::Refused(words: "the window is closed")); }
         return capabilitiesOf(surface: this.raw(), adapter: adapter.raw());
     }
 
     // Draw into it with `device`, `width` × `height` texels (the window's framebuffer size), as `config` says.
     // Configure again when an acquire says Outdated or Lost, or the window is resized. Everything is checked against
-    // what the surface offers the device's adapter before WebGPU sees it, and refused in a ConfigureError.
+    // what the surface offers the device's adapter before WebGPU sees it, and refused in a ConfigureError: Closed once
+    // the window is closed, which the surface never reaches again.
     public unsafe fn Result<Unit, ConfigureError> configure(const ref Device device, const ref SurfaceConfig config,
                                                            uint32 width, uint32 height) {
+        if (!this.state.windowOpen()) { return Result::Err(error: ConfigureError::Closed); }
         if (width == 0 || height == 0) { return Result::Err(error: ConfigureError::NoArea); }
         Limits limits = device.limits();
         uint32 most = limits.maxTextureDimension2D;
@@ -1633,15 +1663,18 @@ type resource Surface implements Copyable<This>(bare: give) {
         return Result::Ok(value: Unit::Unit);
     }
 
-    // The next texture to draw into, or why there is none.
+    // The next texture to draw into, or why there is none: Closed once the window is closed, without asking WebGPU,
+    // which would hand out frames for the hidden window that go nowhere.
     public unsafe fn Result<SurfaceTexture, SurfaceError> acquire() {
+        if (!this.state.windowOpen()) { return Result::Err(error: SurfaceError::Closed); }
         UnsafePtr texture = null;
         int32 suboptimal = 0;
         UnsafePtr h = this.raw();
         int32 s = acquireSurface(surface: h, texture: addr(of: texture), suboptimal: addr(of: suboptimal));
         if (s == SURFACE_OK) {
             return Result::Ok(value: SurfaceTexture.make(texture: texture, surface: h, suboptimal: suboptimal != 0,
-                                                         view: this.state.viewFormat(), block: this.state.deviceState()));
+                                                         view: this.state.viewFormat(), block: this.state.deviceState(),
+                                                         window: this.state.heldWindow()));
         }
         if (s == SURFACE_OCCLUDED) { return Result::Err(error: SurfaceError::Occluded); }
         if (s == SURFACE_OUTDATED) { return Result::Err(error: SurfaceError::Outdated); }
@@ -1651,23 +1684,26 @@ type resource Surface implements Copyable<This>(bare: give) {
     }
 }
 
-// One frame's texture. `present()` shows it and spends it; a frame dropped without presenting is skipped.
+// One frame's texture. `present()` shows it and spends it; a frame dropped without presenting is skipped, and so is one
+// whose window has closed since the acquire.
 type resource SurfaceTexture {
     UnsafePtr image;     // the frame's texture, on which it holds the reference the acquire gave
     UnsafePtr surface;   // a reference held while the frame lives, for its present
     bool late;
     int32 viewAs;        // the view format the surface was configured with, or Undefined (0): the texture's own
     StateHold hold = StateHold.empty();   // the state of the device the surface was configured with
+    NativeWindow onWindow;                // the surface's window, held while the frame holds the surface
 
     friend Surface::acquire[make];
 
-    unsafe ctor make(UnsafePtr texture, UnsafePtr surface, bool suboptimal, int32 view, UnsafePtr block) {
+    unsafe ctor make(UnsafePtr texture, UnsafePtr surface, bool suboptimal, int32 view, UnsafePtr block, NativeWindow window) {
         this.image = texture;
         this.surface = surface;
         this.late = suboptimal;
         this.viewAs = view;
         surfaceAddRef(surface: surface);
         this.hold = StateHold.make(block: block);
+        this.onWindow = give window;
     }
 
     // The surface still works but no longer matches the window: configure it again soon.
@@ -1684,8 +1720,11 @@ type resource SurfaceTexture {
         return Texture.fromDevice(raw: this.image, block: this.hold.raw());
     }
 
-    // Show the frame; it is spent, and its texture released after the present.
-    public unsafe give fn void present() { presentSurface(surface: this.surface); }
+    // Show the frame; it is spent, and its texture released after the present. Once the window is closed it is dropped
+    // instead, never presented: nothing reaches a closed window.
+    public unsafe give fn void present() {
+        if (this.onWindow.isOpen()) { presentSurface(surface: this.surface); }
+    }
 
     unsafe ~SurfaceTexture() {
         if (this.image != null) { textureRelease(texture: this.image); }

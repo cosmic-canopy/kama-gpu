@@ -121,7 +121,6 @@ Done: `tests/` and the clear example green on each.
 
 kama's floor for a first publish is `tests/` green on every target the package claims, and `AGENTS.package.md` has
 the rest. Before it:
-- GPU-2, which changes the API;
 - GPU-3, so the web is a claimed target that passes;
 - `@kama/window` published first, so this depends on its version and a consumer stops naming it beside `@kama/gpu`.
 
