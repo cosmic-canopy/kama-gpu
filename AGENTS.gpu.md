@@ -14,8 +14,16 @@ in; *as an engine renderer* they stay out.
 
 **Every call in `webgpu.h` before 1.0** (the owner, 2026-11-10; kyoten's `../kyoten/docs/design/architecture.md`
 § Decided, how the libraries grow).
-- It is tracked by a coverage report `tools/wgpugen` prints: which of the header's functions the safe API wraps. The
-  report is to build.
+- It is tracked by a coverage report `tools/wgpugen` writes: which of the header's functions the safe API calls
+  (decided by the owner on 2026-11-10, as recommended: "I think this sounds good from what I can tell"; kyoten's
+  architecture.md § Decided, the eighth session's entry).
+  - A function is covered when the safe API calls it: a call site of its binding outside `src/native/`, as
+    `kama query --refs` answers, or a call in a seam function the safe API calls.
+  - 1.0 is all of webgpu.h: what both legs declare, and what only wgpu-native's webgpu.h has yet. `wgpu.h`'s
+    extensions are reported apart; whether any belongs in 1.0 is `@kama/graphics`' design pass's question.
+  - A `Destroy` stays uncovered until its row decides a safe form: no raw destroy rules out a raw one, not every one.
+  - Grouped by the spec's sections, written as a committed `COVERAGE.md`, and held as the bindings are:
+    `tools/check-bindings.sh` regenerates and compares it, and the covered count is a ratchet.
 - It grows by the spec's sections, in the order `@kama/graphics` pulls them: the render pipeline's set first (shader
   modules, pipelines and their layouts, bind groups, samplers, vertex and index buffers, depth and MSAA), then compute,
   queries and timestamps, and indirect draws.
@@ -144,7 +152,8 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
    | the instance released before the device | the device works on, and still reports | |
    | a `writeBuffer` past the end, a WGSL error | the uncaptured callback, inside the call | a task later |
 
-   **Drafted, to put to the owner before it is built:**
+   **Decided by the owner on 2026-11-10, each as recommended, before it was built** (1, 2 and 4: "Sounds good from
+   what I can tell" and "Sounds good"; 3 and 5: "I will take your recommendation"):
    1. **The channel:** per device, polled. `device.takeErrors()` drains a bounded ring of `GpuErrorReport { kind,
       message }` (`Validation`, `OutOfMemory`, `Internal`, `Unknown`) with a count of what it dropped, as
       `@kama/window`'s queue reports `Dropped(n)`, and `device.lost()` answers `Optional<DeviceLoss>`. The state block's
