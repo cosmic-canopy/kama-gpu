@@ -123,6 +123,49 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
    loss reach that device's holders through a state block the seam keeps per device, counted with the device's own
    copies (each `copy` is an `AddRef`). WebGPU's error scopes (`pushErrorScope`, `popErrorScope`) let a caller catch
    the errors of one call.
+
+   **Measured first, on 2026-11-10** (kama 0.9.911; a C probe in kyoten's `.scratch/item2-errors/`, one process per
+   case, wgpu-native v29.0.1.1 over Vulkan on an AMD Radeon 880M; the web read from emdawnwebgpu's source, Dawn
+   v20260423.175430, `library_webgpu.js` and `webgpu.cpp`, not yet run):
+
+   | | native, measured | web, read |
+   |---|---|---|
+   | an uncaptured error | the device's callback, **inside the call that caused it**, on the calling thread, with that device's userdata: two devices are kept apart | `device.onuncapturederror`, a browser event: a later task, never inside the call |
+   | where an encoder's error lands | at `wgpuCommandEncoderFinish`, not at the bad command | at `finish` too (WebGPU), reported a task later |
+   | a device with no uncaptured callback | **the process aborts** on its first error (wgpu-native's default handler panics, exit 127) | nothing: the browser's console |
+   | `PopErrorScope` | its callback runs inside the call in every callback mode, `WaitAnyOnly` included; future id 0 | `device.popErrorScope()`, a Promise: a task later |
+   | scope filters | an error passes an `OutOfMemory` scope to the `Validation` one beneath it, and with no matching scope reaches the uncaptured callback | the same (WebGPU) |
+   | `PushErrorScope(Internal)` | **aborts** ("invalid error filter") | supported |
+   | a pop with nothing pushed | **aborts** (an `unwrap` on `None`), where webgpu.h promises status `Error` | the Promise rejects; emdawnwebgpu reports `Success` with type `Unknown` |
+   | `wgpuInstanceWaitAny` | **aborts** ("not implemented") | aborts without ASYNCIFY ("Implement asyncify-free WaitAny for timeout=0") |
+   | submitting a command buffer whose `finish` failed | **aborts** ("Error in wgpuQueueSubmit"), inside an error scope too | a validation error, and nothing in the submit runs (WebGPU's rule, not read here) |
+   | `wgpuDeviceDestroy`, then the last release | **no lost callback, ever** (not at `ProcessEvents`, `DevicePoll(wait)` or release) | the lost callback, reason `Destroyed`, a task later; the last release destroys the device, so it fires then too, with a null device |
+   | a call on a destroyed device | a validation error, "Parent device is lost", for a good call as well | none: WebGPU stops reporting a lost device's errors (its rule, not read here) |
+   | the instance released before the device | the device works on, and still reports | |
+   | a `writeBuffer` past the end, a WGSL error | the uncaptured callback, inside the call | a task later |
+
+   **Drafted, to put to the owner before it is built:**
+   1. **The channel:** per device, polled. `device.takeErrors()` drains a bounded ring of `GpuErrorReport { kind,
+      message }` (`Validation`, `OutOfMemory`, `Internal`, `Unknown`) with a count of what it dropped, as
+      `@kama/window`'s queue reports `Dropped(n)`, and `device.lost()` answers `Optional<DeviceLoss>`. The state block's
+      handler fills both; it is counted with the device's copies. `uncapturedErrors()`, `lastErrorMessage()` and
+      `lostDevices()` go. Natively an error is in the ring when the call that caused it returns.
+   2. **Error scopes, one way on both legs:** `device.pushErrorScope(filter:)` gives an `ErrorScope`, and `scope.pop()`
+      consumes it into a polled request whose answer is `Optional<GpuErrorReport>` (natively ready at once, on the web a
+      task later). A pop out of order is refused, and a scope dropped unpopped pops itself. On the web they are the
+      browser's own. **Natively the seam keeps the scope stack itself,** over the uncaptured callback, which every
+      error measured reaches synchronously on the calling thread, so none of wgpu-native's three abort paths (an empty
+      pop, `Internal`, and with 3 a submit after a failed `finish`) is reachable, and the stack can be kept per thread.
+   3. **A command buffer whose `finish` failed is never submitted natively:** the seam notes an error during `finish`
+      and marks the buffer, the error goes on to the channel or the innermost scope, and `queue.submit` skips a marked
+      buffer, which is what a browser does after reporting it.
+   4. **Loss:** natively wgpu-native never reports a destroy or a release, so the block is freed at the last release;
+      a test holds that measured fact, so a wgpu-native that starts calling back fails it. On the web the lost callback
+      holds a reference on the block until it fires. Once the package has its own `destroy` (the coverage report's
+      `Destroy` row), errors on a destroyed device are dropped natively too, as the web drops them.
+   5. **Kept: nothing waits through `WaitAny`,** which aborts on both legs; every request stays `AllowSpontaneous` and
+      polled. An adopted device (`Device.adopt`) keeps the error callback its maker gave it, since webgpu.h sets it only
+      at creation, so its errors do not reach the package's channel; `takeErrors()` on one says so.
 3. **Kept, and to grow: a device gets WebGPU's default limits**, not the adapter's, so a program that runs on one
    machine does not silently depend on its adapter. A program that needs more names the limits and features it
    requires in the request, which fails when the adapter lacks them, as WebGPU's `requiredLimits` does.
