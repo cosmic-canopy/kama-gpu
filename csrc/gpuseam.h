@@ -165,6 +165,14 @@ int32_t gpuseam_state_lost(gpuseam_state *state);
 int32_t gpuseam_state_lost_length(gpuseam_state *state);
 const uint8_t *gpuseam_state_lost_message(gpuseam_state *state);
 
+// ---- finishing an encoder ----
+
+// `wgpuCommandEncoderFinish`, and in *failed whether the finish reported an error to `state`'s device. Natively it is
+// reported inside the call (tests/facts, `atfinish`), and a command buffer so marked is never submitted, since
+// wgpu-native ends the process on its submit; on the web the error arrives a task later, so *failed is 0 there and the
+// browser refuses the submit itself. `state` may be NULL (an encoder adopted from elsewhere): never marked.
+WGPUCommandBuffer gpuseam_encoder_finish(WGPUCommandEncoder encoder, gpuseam_state *state, int32_t *failed);
+
 // ---- driving the callbacks ----
 
 // Natively, let `device` finish queued work and fire its callbacks (`wait`: block until the queue is empty). On the web

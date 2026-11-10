@@ -1385,7 +1385,47 @@ unsafe fn void errorCases(ref Check t, ref Adapter adapter) {
     t.verdict(name: "an adopted device says its errors are not watched, and they reach its maker", why: adopt);
 
     scopeCases(t: t, adapter: adapter);
+    spoiledCases(t: t, adapter: adapter);
     outlivesCase(t: t, adapter: adapter);
+}
+
+// A command buffer whose finish reported an error is never submitted natively, where wgpu-native would end the process
+// (tests/facts, `abort-submit`); a browser refuses the same submit after reporting it.
+@compileFor(!ARCH_WASM32)
+unsafe fn void spoiledCases(ref Check t, ref Adapter adapter) {
+    DeviceRequest request = adapter.requestDevice(options: DeviceOptions.defaults());
+    int32 polls = 0;
+    while (polls < 1000) {
+        DeviceStatus s = request.poll();
+        match (give s) {
+            case Pending: { }
+            case Ready(device: d, queue: q): { spoiledWith(t: t, device: d, queue: q); return; }
+            case Failed(error: e): { string why = e.message(); t.verdict(name: "a device for the finish cases", why: why); return; }
+        };
+        polls = polls + 1;
+    }
+    t.verdict(name: "a device for the finish cases", why: "the request never settled");
+}
+
+@compileFor(!ARCH_WASM32)
+unsafe fn void spoiledWith(ref Check t, ref Device device, ref Queue queue) {
+    CommandEncoder encoder = badCopy(device: device);
+    CommandBuffer commands = give encoder.finish();
+    queue.submit(commands: give commands);
+    DeviceErrors errs = device.takeErrors();
+    t.verdict(name: "a command buffer whose finish reported an error is not submitted, and the error is in the channel",
+              why: holds(errs: errs, want: 1, kind: GpuErrorKind::Validation));
+
+    string words = "";
+    ErrorScope around = device.pushErrorScope(filter: ErrorFilter::Validation);
+    CommandEncoder again = badCopy(device: device);
+    CommandBuffer more = give again.finish();
+    queue.submit(commands: give more);
+    Result<ScopePop, GpuError> popped = give around.pop();
+    string inScope = caughtBy(popped: give popped, kind: Optional::Some(value: GpuErrorKind::Validation), words: words);
+    DeviceErrors after = device.takeErrors();
+    if (inScope.isEmpty() && !after.isEmpty()) { inScope = "the channel got it too"; }
+    t.verdict(name: "inside a scope too: the scope catches the finish's error, and the buffer is not submitted", why: inScope);
 }
 
 // A scope popped, natively answered at once: "" when it caught an error of `kind`, its words left in `words`, or, with

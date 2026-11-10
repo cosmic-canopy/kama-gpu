@@ -162,6 +162,11 @@ int64_t gpuseam_states_alive(void) { return (int64_t)atomic_load_explicit(&g_sta
 static _Thread_local char t_thread;
 #define THIS_THREAD ((const void *)&t_thread)
 
+// The device state whose encoder this thread is finishing, and whether that finish reported an error: natively an
+// encoder's error is reported inside its finish (tests/facts, `atfinish`), so the seam can mark the command buffer.
+static _Thread_local gpuseam_state *t_finishing;
+static _Thread_local int32_t t_finish_failed;
+
 // Natively an error goes to the innermost scope on its thread whose filter matches it: every error measured reaches the
 // callback inside the call that caused it, on the calling thread (tests/facts, `inthecall`). A scope keeps the first
 // and swallows the rest, as WebGPU's does. Past every scope, an error goes to the channel. On the web the browser's
@@ -169,6 +174,7 @@ static _Thread_local char t_thread;
 static void on_uncaptured_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringView message, void *u1, void *u2) {
     (void)device; (void)u2;
     gpuseam_state *s = (gpuseam_state *)u1;
+    if (t_finishing == s) t_finish_failed = 1;
     gpuseam_report r = report_of(kind_of(type), message);
     state_lock(s);
 #ifndef __EMSCRIPTEN__
@@ -734,6 +740,20 @@ void gpuseam_map_drop(gpuseam_map *m) {
     }
     if (expected == GPUSEAM_READY) wgpuBufferUnmap(m->buffer);
     map_free(m);
+}
+
+// ---- finishing an encoder -------------------------------------------------------------------------------------------
+
+WGPUCommandBuffer gpuseam_encoder_finish(WGPUCommandEncoder encoder, gpuseam_state *state, int32_t *failed) {
+    gpuseam_state *outer = t_finishing;
+    int32_t outer_failed = t_finish_failed;
+    t_finishing = state;
+    t_finish_failed = 0;
+    WGPUCommandBuffer commands = wgpuCommandEncoderFinish(encoder, NULL);
+    *failed = state != NULL && t_finish_failed;
+    t_finishing = outer;
+    t_finish_failed = outer_failed;
+    return commands;
 }
 
 // ---- driving the callbacks -------------------------------------------------------------------------------------------

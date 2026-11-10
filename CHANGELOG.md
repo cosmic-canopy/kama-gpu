@@ -16,6 +16,8 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     keeps the scopes, a stack per thread, so wgpu-native's aborting scope paths are unreachable.
   - Every handle made from a device holds the device's state in the seam, since wgpu-native reports a handle's error to
     its device's callback after the device's last release.
+  - Natively a command buffer whose `finish` reported an error is not submitted, since wgpu-native ends the process on
+    that submit; its error is in the channel or a scope already.
   - `tools/check-facts.sh` holds what wgpu-native does that the seam is built on, from `tests/facts/wgpufacts.c`.
   - `examples/clear` reports its device's errors.
 - **Breaking:** the public constructors are named by kama's rule (2026-11-10, kama 0.9.911, its SPEC § Construction,

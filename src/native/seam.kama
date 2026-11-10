@@ -11,7 +11,7 @@ export {
     pollDevice,
     LOSS_DESTROYED, stateUnwatched, stateHold, stateRelease, stateWatched, stateTakeErrors, errorsCount,
     errorsDropped, errorsKind, errorsLength, errorsMessage, errorsFree, stateLost, stateLostLength, stateLostMessage,
-    scopePush, scopePop, scopeAbandon, scopePopPoll, scopeCaught, scopeKind, scopeLength, scopeMessage, scopeDropPopped,
+    encoderFinish, scopePush, scopePop, scopeAbandon, scopePopPoll, scopeCaught, scopeKind, scopeLength, scopeMessage, scopeDropPopped,
     SURFACE_OK, SURFACE_OCCLUDED, SURFACE_OUTDATED, SURFACE_LOST, SURFACE_TIMEOUT,
     createSurface, acquireSurface, presentSurface, textureViewIn,
 };
@@ -76,6 +76,7 @@ extern fn int32 gpuseam_scope_length(UnsafePtr pushed);
 extern fn UnsafeConstPtr<uint8> gpuseam_scope_message(UnsafePtr pushed);
 extern fn void gpuseam_scope_drop_popped(UnsafePtr pushed);
 extern fn void gpuseam_device_poll(UnsafePtr device, int32 wait);
+extern fn UnsafePtr gpuseam_encoder_finish(UnsafePtr encoder, UnsafePtr state, UnsafePtr<int32> failed);
 
 unsafe fn UnsafePtr requestAdapter(UnsafePtr instance, UnsafePtr compatible, int32 power) {
     return gpuseam_request_adapter(instance: instance, compatible: compatible, power: power);
@@ -145,6 +146,9 @@ unsafe fn int32 scopeKind(UnsafePtr pushed) { return gpuseam_scope_kind(pushed: 
 unsafe fn int32 scopeLength(UnsafePtr pushed) { return gpuseam_scope_length(pushed: pushed); }
 unsafe fn UnsafeConstPtr<uint8> scopeMessage(UnsafePtr pushed) { return gpuseam_scope_message(pushed: pushed); }
 unsafe fn void scopeDropPopped(UnsafePtr pushed) { gpuseam_scope_drop_popped(pushed: pushed); }
+unsafe fn UnsafePtr encoderFinish(UnsafePtr encoder, UnsafePtr state, UnsafePtr<int32> failed) {
+    return gpuseam_encoder_finish(encoder: encoder, state: state, failed: failed);
+}
 unsafe fn void pollDevice(UnsafePtr device, int32 wait) { gpuseam_device_poll(device: device, wait: wait); }
 
 extern fn UnsafePtr gpuseam_create_surface(UnsafePtr instance, int32 kind, UnsafePtr display, UnsafePtr window);

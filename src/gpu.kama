@@ -41,7 +41,7 @@ import {
     gpu::native::textureAddRef, gpu::native::textureRelease, gpu::native::textureCreateView,
     gpu::native::textureViewAddRef, gpu::native::textureViewRelease,
     gpu::native::commandEncoderAddRef, gpu::native::commandEncoderRelease, gpu::native::commandEncoderBeginRenderPass,
-    gpu::native::commandEncoderFinish, gpu::native::commandEncoderCopyTextureToBuffer,
+    gpu::native::commandEncoderCopyTextureToBuffer, gpu::native::encoderFinish,
     gpu::native::renderPassEncoderAddRef, gpu::native::renderPassEncoderRelease, gpu::native::renderPassEncoderEnd,
     gpu::native::commandBufferAddRef, gpu::native::commandBufferRelease,
     gpu::native::WGPUBufferDescriptor, gpu::native::WGPUTextureDescriptor, gpu::native::WGPURenderPassDescriptor,
@@ -994,8 +994,11 @@ type resource Queue implements Copyable<This>(bare: give) {
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
-    // Hand `commands` to the GPU; the command buffer is spent.
+    // Hand `commands` to the GPU; the command buffer is spent. Natively a command buffer whose finish reported an error
+    // is not submitted, since wgpu-native would end the process (tests/facts, `abort-submit`): its error is in the
+    // device's channel or a scope already, and a browser refuses the same submit after reporting it.
     public unsafe fn void submit(CommandBuffer commands) {
+        if (commands.spoiled()) { return; }
         UnsafePtr one = commands.raw();
         queueSubmit(queue: this.handle, commandCount: 1, commands: cast<UnsafePtr>(addr(of: one)));
     }
@@ -1189,10 +1192,12 @@ type resource CommandEncoder implements Copyable<This>(bare: give) {
                                           copySize: cast<UnsafePtr>(addr(of: ext)));
     }
 
-    // The recorded commands; the encoder is spent.
+    // The recorded commands; the encoder is spent. An error the recording made is reported here, to the device's
+    // channel or the innermost scope that catches it, and natively such a command buffer is then never submitted.
     public unsafe give fn CommandBuffer finish() {
-        return CommandBuffer.fromDevice(raw: commandEncoderFinish(commandEncoder: this.handle, descriptor: null),
-                                        block: this.hold.raw());
+        int32 failed = 0;
+        UnsafePtr commands = encoderFinish(encoder: this.handle, state: this.hold.raw(), failed: addr(of: failed));
+        return CommandBuffer.fromDevice(raw: commands, block: this.hold.raw(), spoiled: failed != 0);
     }
 
     unsafe ~CommandEncoder() { if (this.handle != null) { commandEncoderRelease(commandEncoder: this.handle); } }
@@ -1226,19 +1231,24 @@ type resource RenderPass implements Copyable<This>(bare: give) {
 type resource CommandBuffer implements Copyable<This>(bare: give) {
     UnsafePtr handle;
     StateHold hold = StateHold.empty();   // its device's state, which its errors reach
+    bool marked = false;                  // natively, its finish reported an error: never submitted
 
     friend CommandEncoder::finish[fromDevice];
+    friend Queue::submit[spoiled];
 
     // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block, bool spoiled) {
         this.handle = raw;
         this.hold = StateHold.make(block: block);
+        this.marked = spoiled;
     }
+    const fn bool spoiled() { return this.marked; }
     public unsafe ctor copy(ref CommandBuffer source) {
         this.handle = source.handle;
         commandBufferAddRef(commandBuffer: this.handle);
         this.hold = copy source.hold;
+        this.marked = source.marked;
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 

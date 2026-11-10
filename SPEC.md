@@ -151,8 +151,11 @@ Measured natively, each held by the tests per leg:
   made memberwise: `Color.of(r:, g:, b:, a:)`) and stored. `pass.end()` consumes the pass.
 - **`encoder.copyTextureToBuffer(texture:, buffer:, width:, height:, bytesPerRow:)`:** a region of the texture's first
   level, `bytesPerRow` a multiple of 256.
-- **`encoder.finish() -> CommandBuffer`,** which consumes the encoder.
-- **`queue.submit(commands:)`,** which consumes the command buffer.
+- **`encoder.finish() -> CommandBuffer`,** which consumes the encoder. An error the recording made is reported here,
+  to the device's channel or the innermost scope that catches it (natively inside the call, measured).
+- **`queue.submit(commands:)`,** which consumes the command buffer. Natively a command buffer whose `finish` reported
+  an error is not submitted, since wgpu-native ends the process on that submit: its error is in the channel or a scope
+  already, and a browser refuses the same submit after reporting it.
 
 ## Surfaces
 
@@ -215,7 +218,7 @@ What each leg's surface answers, measured natively and read for the web (2026-11
   make, the coverage rules on their fixture, and the constants;
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 22 facts, natively;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`: 67 cases natively with a display, debug and release;
+- `tests/`, one program run as a `std::app` `App`: 69 cases natively with a display (51 without), debug and release;
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
   `KAMA_WINDOW_NO_DISPLAY` is set;
 - the xfail, an encoder used after `finish()`, which must be refused for the move;
