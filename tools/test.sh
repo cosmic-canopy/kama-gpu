@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tools/test.sh — @kama/gpu's gate: the tests program built debug and release and run natively, a window cleared for
 # 60 frames (skipped when KAMA_WINDOW_NO_DISPLAY is set), the xfail refused, the
-# wasm leg built, and the bindings checked against the headers.
+# wasm leg built, the bindings checked against the headers, and what wgpu-native does that the seam is built on
+# (tools/check-facts.sh).
 #
 #   tools/test.sh
 #
@@ -36,6 +37,9 @@ tools/check-roadmap.sh || failed=1
 
 step "the bindings"
 tools/check-bindings.sh || failed=1
+
+step "wgpu-native's facts (tests/facts)"
+tools/check-facts.sh || failed=1
 
 step "kama check"
 "$KAMA" check kama.json || failed=1

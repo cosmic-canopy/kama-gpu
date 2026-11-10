@@ -146,28 +146,54 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       polled. An adopted device (`Device.adopt`) keeps the error callback its maker gave it, since webgpu.h sets it only
       at creation, so its errors do not reach the package's channel; `takeErrors()` on one says so.
 
-   **Proposed on 2026-11-10, within the five, and not yet answered:** the next session confirms them before GPU-1 is
-   built.
+   **GPU-1's details, decided by the owner on 2026-11-10 (kyoten's ninth session), each as recommended,** before it
+   was built. Five were proposed the session before; reading the code refined four of them and found a sixth, and the
+   owner approved all six with the session's plan.
    1. **The types.** `device.takeErrors()` returns a `DeviceErrors`:
-      - its reports, each a `GpuErrorReport` with `kind()` (`ErrorKind`: `Validation`, `OutOfMemory`, `Internal` or
-        `Unknown`) and `message()`;
+      - its reports, each a `GpuErrorReport` with `kind()` and `message()`. The kind is a **`GpuErrorKind`**
+        (`Validation`, `OutOfMemory`, `Internal` or `Unknown`), not the proposal's `ErrorKind`, which is `std::io`'s
+        name and is used across std: a program handling a file error and a GPU error would have had to rename one;
       - `dropped()`, how many did not fit;
       - `watched()`, false for an adopted device.
 
-      `device.lost()` returns an `Optional<DeviceLoss>` with its reason and message, and a scope's filter is
-      `ErrorFilter` (`Validation`, `OutOfMemory`, `Internal`).
-   2. **A full ring keeps the oldest reports and counts the rest,** as `@kama/window`'s queue does.
-   3. **A scope keeps the first error that matches it,** as WebGPU's does; a later one in the same scope goes nowhere.
+      `device.lost()` returns an `Optional<DeviceLoss>` with its `reason()`, a `LossReason { Unknown, Destroyed }`, and
+      its `message()`. webgpu.h's `FailedCreation` fails the device request instead, and `CallbackCancelled` is the
+      instance going away, which is not a loss. A scope's filter is `ErrorFilter` (`Validation`, `OutOfMemory`,
+      `Internal`). `scope.pop()` gives `Result<ScopePop, GpuError>`, refused with a new `GpuError::OutOfOrder`, and
+      `ScopePop.poll()` answers a `PopStatus { Pending, Ready(Optional<GpuErrorReport> caught), Failed(GpuError error) }`,
+      read as `DeviceRequest` and `DeviceStatus` are.
+   2. **A full ring keeps the oldest reports and counts the rest,** as `@kama/window`'s queue does: the first error is
+      usually the cause, and the later ones its cascade. **The ring holds 64 reports per device, and each message is
+      kept whole,** allocated at its own length; the 512-byte cut stays only on request messages, since a WGSL error
+      can run past it and the cut would hide the line that matters.
+   3. **A scope keeps the first error that matches it,** as WebGPU's does; a later one in the same scope is swallowed by
+      it, reaching neither the pop nor the channel. Natively the seam implements the rule, so both legs agree.
    4. **A pop out of order is refused** in a `Result`. The scope it named is marked orphaned, and is popped once the
       scopes above it are, so the stack never jams. Natively each scope records its thread, and an error goes to that
-      thread's innermost matching scope.
-   5. **wgpu-native's measured behaviour is pinned by a C test in the gate,** made from the probe:
-      - errors reported inside the call, on the calling thread;
-      - no loss reported on a destroy or a release;
-      - the five aborts still aborting.
+      thread's innermost matching scope; an `ErrorScope` is not `Sendable`. **What a scope its holder never pops had
+      caught, an orphaned one or one dropped unpopped, goes to the device's channel, never nowhere:** the same rule
+      the ring keeps with `dropped()`.
+   5. **wgpu-native's measured behaviour is pinned by a C test in the gate,** made from the probe
+      (`tests/facts/wgpufacts.c`, run by `tools/check-facts.sh`, natively only):
+      - errors reported inside the call, on the calling thread, with that device's userdata, two devices kept apart;
+      - an encoder's error reported inside its `finish`, not at the bad command, which question 3's mark rests on;
+      - with 6, a child's error after the device's last release still reaching the device's callback;
+      - no loss reported on a destroy, a poll or a release, the device's or its last child's;
+      - the five aborts still aborting, **each matched by its panic's own words** as well as its exit, so a crash for
+        another reason fails: "wgpu uncaptured error", "invalid error filter", ``called `Option::unwrap()` on a
+        `None` value``, "not implemented" and "Error in wgpuQueueSubmit".
 
       A wgpu-native that changes any of these fails it loudly, rather than turning into a use-after-free or a crash in
       the package.
+   6. **(Found by reading the probe, then measured) every handle made from a device holds a reference on its state
+      block.** The probe's backtrace showed wgpu-native reporting through the device's error sink, and on 2026-11-10 a
+      new case measured it (`childafterrelease`): after the device's last release, an encoder's `finish`, a queue's
+      `writeBuffer` and a texture's `createView` each still report to the device's callback, with its userdata. Freeing
+      the block at the last `Device` copy, as question 4 above had it, would be a use-after-free. So `Queue`, `Buffer`,
+      `Texture`, `TextureView`, `CommandEncoder`, `RenderPass`, `CommandBuffer` and `SurfaceTexture` each hold one
+      reference when the package makes them, and the block is freed when the last holder drops it. An `adopt`ed handle
+      holds none, which its `unsafe` contract says. Errors from children whose device is gone land in a block nobody
+      reads, and are freed with it.
 3. **Kept, and to grow: a device gets WebGPU's default limits**, not the adapter's, so a program that runs on one
    machine does not silently depend on its adapter. A program that needs more names the limits and features it
    requires in the request, which fails when the adapter lacks them, as WebGPU's `requiredLimits` does.
