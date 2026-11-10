@@ -31,6 +31,9 @@ export PATH="$KAMA_WGPU_DIR/lib:$PATH"
 failed=0
 step() { echo; echo "== $*"; }
 
+step "the roadmap"
+tools/check-roadmap.sh || failed=1
+
 step "the bindings"
 tools/check-bindings.sh || failed=1
 

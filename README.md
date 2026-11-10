@@ -5,7 +5,8 @@ surface acquire is typed and names `Occluded`. It grows toward the whole of `web
 
 **Status: offscreen and a window work natively (Windows), not yet published.** A device, textures, buffers, a render
 pass that clears, a copy and a polled readback, and a surface on an `@kama/window` window with a typed acquire, tested
-by `tools/test.sh`; the triangle's pipeline set and the web run come next.
+by `tools/test.sh`. [SPEC.md](SPEC.md) is what it is, [ROADMAP.md](ROADMAP.md) what comes next, and
+[COVERAGE.md](COVERAGE.md) how much of `webgpu.h` it calls.
 The design is kama's (its `docs/ROADMAP_DETAIL.md` § 8, KR-25), and kyoten builds it as its first consumer.
 
 A consumer sets `"webgpu": true` in its own `kama.json` (kama reads that key from the root manifest only); natively,
