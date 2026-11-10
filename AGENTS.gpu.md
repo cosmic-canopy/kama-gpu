@@ -12,6 +12,15 @@ systems language ships one there, and `webgpu.h` still breaks between releases. 
 triangle touches and grows toward the whole of `webgpu.h`. Buffers, bindings and pipelines *as released handles* are
 in; *as an engine renderer* they stay out.
 
+**Every call in `webgpu.h` before 1.0** (the owner, 2026-11-10; kyoten's `../kyoten/docs/design/architecture.md`
+§ Decided, how the libraries grow).
+- It is tracked by a coverage report `tools/wgpugen` prints: which of the header's functions the safe API wraps. The
+  report is to build.
+- It grows by the spec's sections, in the order `@kama/graphics` pulls them: the render pipeline's set first (shader
+  modules, pipelines and their layouts, bind groups, samplers, vertex and index buffers, depth and MSAA), then compute,
+  queries and timestamps, and indirect draws.
+- This repository gets its own `SPEC.md` and `ROADMAP.md`, from this and the departures below.
+
 ## Where things stand (2026-11-10, kama 0.9.909)
 
 **Offscreen and a window work natively on Windows; the web run and the triangle's set do not exist yet.** Built:
