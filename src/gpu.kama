@@ -232,15 +232,15 @@ fn Optional<Feature> featureFrom(int32 v) {
     return Optional::None;
 }
 
-// Features, as a set: `FeatureSet.none().with(feature: Feature::TimestampQuery)`.
+// Features, as a set: `FeatureSet.empty().with(feature: Feature::TimestampQuery)`.
 type value FeatureSet {
     uint64 bits = 0;   // bit n is the feature whose webgpu.h number is n + 1
 
-    public ctor none() { }
+    public ctor empty() { }
 
     // This set and `feature`.
     public const fn FeatureSet with(Feature feature) {
-        FeatureSet more = FeatureSet.none();
+        FeatureSet more = FeatureSet.empty();
         more.bits = this.bits | (cast<uint64>(1) << (featureValue(f: feature) - 1));
         return more;
     }
@@ -252,7 +252,7 @@ type value FeatureSet {
 
 // The WGPUFeatureNames `count` of which a query copied into `names`, as a set; an implementation's own are left out.
 fn FeatureSet featuresFrom(const ref InlineArray<int32>#(64) names, int32 count) {
-    FeatureSet s = FeatureSet.none();
+    FeatureSet s = FeatureSet.empty();
     int32 i = 0;
     while (i < count && i < FEATURES_MAX) {
         Optional<Feature> f = featureFrom(v: names[cast<isize>(i)]);
@@ -422,7 +422,7 @@ fn WGPULimits required(const ref Limits want) {
 // fails, in the implementation's words.
 type value DeviceOptions {
     public Limits limits = Limits.defaults();
-    public FeatureSet features = FeatureSet.none();
+    public FeatureSet features = FeatureSet.empty();
 
     public ctor defaults() { }
 }
@@ -448,13 +448,13 @@ type value TextureUsage {
     public comptime uint64 RenderAttachment = WGPUTextureUsage::RenderAttachment;
 }
 
+// A colour, each channel 0 to 1, made memberwise: `Color.of(r: 0.1, g: 0.2, b: 0.3, a: 1.0)`.
+@generate(of)
 type value Color {
     public float64 r;
     public float64 g;
     public float64 b;
     public float64 a;
-
-    public ctor rgba(float64 r, float64 g, float64 b, float64 a) { this.r = r; this.g = g; this.b = b; this.a = a; }
 }
 
 // ---- the instance and the device -------------------------------------------------------------------------------------
@@ -462,7 +462,7 @@ type value Color {
 type resource Instance implements Copyable<This>(bare: give) {
     UnsafePtr handle;
 
-    public unsafe ctor Result<Instance, GpuError> create() {
+    public unsafe ctor Result<Instance, GpuError> make() {
         UnsafePtr h = createInstance(descriptor: null);
         if (h == null) { return Result::Err(error: GpuError::NoInstance); }
         return Result::Ok(value: Instance.adopt(raw: h));
@@ -488,7 +488,7 @@ type resource AdapterOptions {
     friend Instance::requestAdapter[power, surface];
 
     public unsafe ctor make(PowerPreference power) { this.power = powerValue(p: power); this.surface = null; }
-    public unsafe ctor forSurface(const ref Surface surface, PowerPreference power) {
+    public unsafe ctor withSurface(const ref Surface surface, PowerPreference power) {
         this.power = powerValue(p: power);
         this.surface = surface.raw();
         surfaceAddRef(surface: this.surface);
@@ -525,7 +525,7 @@ type resource AdapterRequest {
         }
         UnsafePtr adapter = adapterRequestTake(request: this.slot);
         if (adapter == null) { return AdapterStatus::Failed(error: GpuError::Taken); }
-        return AdapterStatus::Ready(adapter: Adapter.of(raw: adapter, instance: this.instance));
+        return AdapterStatus::Ready(adapter: Adapter.fromRequest(raw: adapter, instance: this.instance));
     }
 
     unsafe ~AdapterRequest() { adapterRequestDrop(request: this.slot); }
@@ -543,9 +543,9 @@ type resource AdapterInfo {
     uint32 vendorNumber = 0;
     uint32 deviceNumber = 0;
 
-    friend Adapter::info[of];
+    friend Adapter::info[fromAdapter];
 
-    unsafe ctor of(UnsafePtr adapter) {
+    unsafe ctor fromAdapter(UnsafePtr adapter) {
         InlineArray<uint8>#(512) buf = [0; 512];
         int32 n = adapterInfoText(adapter: adapter, which: 0, dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
         this.vendorName = textOf(buf: buf, length: n);
@@ -581,10 +581,10 @@ type resource Adapter implements Copyable<This>(bare: give) {
     UnsafePtr handle;
     UnsafePtr instance;   // the instance it came from, whose events its requests process; null when adopted
 
-    friend AdapterRequest::poll[of];
+    friend AdapterRequest::poll[fromRequest];
 
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; this.instance = null; }
-    unsafe ctor of(UnsafePtr raw, UnsafePtr instance) {
+    unsafe ctor fromRequest(UnsafePtr raw, UnsafePtr instance) {
         this.handle = raw;
         this.instance = instance;
         if (instance != null) { instanceAddRef(instance: instance); }
@@ -598,7 +598,7 @@ type resource Adapter implements Copyable<This>(bare: give) {
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
     // What it is: its names, its backend and its kind.
-    public unsafe const fn AdapterInfo info() { return AdapterInfo.of(adapter: this.handle); }
+    public unsafe const fn AdapterInfo info() { return AdapterInfo.fromAdapter(adapter: this.handle); }
 
     // The most it can give a device.
     public unsafe const fn Limits limits() {
@@ -663,7 +663,7 @@ type resource DeviceRequest {
         UnsafePtr device = deviceRequestTakeDevice(request: this.slot);
         if (device == null) { return DeviceStatus::Failed(error: GpuError::Taken); }
         UnsafePtr queue = deviceGetQueue(device: device);
-        return DeviceStatus::Ready(device: Device.of(raw: device, adapter: this.adapter), queue: Queue.adopt(raw: queue));
+        return DeviceStatus::Ready(device: Device.fromRequest(raw: device, adapter: this.adapter), queue: Queue.adopt(raw: queue));
     }
 
     unsafe ~DeviceRequest() {
@@ -678,7 +678,7 @@ type resource Device implements Copyable<This>(bare: give) {
     UnsafePtr handle;
     UnsafePtr adapter;
 
-    friend DeviceRequest::poll[of];
+    friend DeviceRequest::poll[fromRequest];
     friend Surface::configure[adapterHandle];
 
     // A device made outside this package, with the adapter it was requested of.
@@ -687,7 +687,7 @@ type resource Device implements Copyable<This>(bare: give) {
         this.adapter = adapter.raw();
         if (this.adapter != null) { adapterAddRef(adapter: this.adapter); }
     }
-    unsafe ctor of(UnsafePtr raw, UnsafePtr adapter) {
+    unsafe ctor fromRequest(UnsafePtr raw, UnsafePtr adapter) {
         this.handle = raw;
         this.adapter = adapter;
         if (adapter != null) { adapterAddRef(adapter: adapter); }
@@ -1099,7 +1099,7 @@ type resource SurfaceCapabilities {
 
     // Capabilities from lists: what `Surface.capabilities` reads, and what a test hands in for a surface it cannot open
     // (the web's, natively). Safe to hand in anything, since `configure` checks against the surface's own answer.
-    public ctor Result<SurfaceCapabilities, GpuError> of(DynamicArray<TextureFormat> formats,
+    public ctor Result<SurfaceCapabilities, GpuError> make(DynamicArray<TextureFormat> formats,
                                                         DynamicArray<PresentMode> presentModes,
                                                         DynamicArray<AlphaMode> alphaModes, uint64 usages) {
         if (formats.length() == 0) { return Result::Err(error: GpuError::Refused(words: "the surface offers no format")); }
@@ -1113,11 +1113,11 @@ type resource SurfaceCapabilities {
         if ((usages & TextureUsage::RenderAttachment) == 0) {
             return Result::Err(error: GpuError::Refused(words: "the surface does not offer RenderAttachment, which webgpu.h promises"));
         }
-        return Result::Ok(value: SurfaceCapabilities.take(formats: give formats, presentModes: give presentModes,
-                                                          alphaModes: give alphaModes, usages: usages));
+        return Result::Ok(value: SurfaceCapabilities.of(formats: give formats, presentModes: give presentModes,
+                                                        alphaModes: give alphaModes, usages: usages));
     }
-    ctor take(DynamicArray<TextureFormat> formats, DynamicArray<PresentMode> presentModes, DynamicArray<AlphaMode> alphaModes,
-              uint64 usages) {
+    ctor of(DynamicArray<TextureFormat> formats, DynamicArray<PresentMode> presentModes, DynamicArray<AlphaMode> alphaModes,
+            uint64 usages) {
         this.formatList = give formats;
         this.presentList = give presentModes;
         this.alphaList = give alphaModes;
@@ -1236,7 +1236,7 @@ unsafe fn Result<SurfaceCapabilities, GpuError> capabilitiesOf(UnsafePtr surface
     }
     uint64 usages = answeredUsages(got: raw.usages);
     surfaceCapabilitiesFreeMembers(surfaceCapabilities: raw);
-    return SurfaceCapabilities.of(formats: give formats, presentModes: give presents, alphaModes: give alphas, usages: usages);
+    return SurfaceCapabilities.make(formats: give formats, presentModes: give presents, alphaModes: give alphas, usages: usages);
 }
 
 // What every copy of a surface shares: the native surface, released with the last copy, and the view format it was last
@@ -1245,7 +1245,7 @@ type resource SurfaceState {
     UnsafePtr handle;
     int32 view = 0;   // WebGPU's number for the view format; Undefined (0) before a configure, which is the texture's own
 
-    public unsafe ctor make(UnsafePtr handle) { this.handle = handle; }
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
     public const fn int32 viewFormat() { return this.view; }
     public fn void configured(int32 view) { this.view = view; }
@@ -1258,7 +1258,7 @@ type resource SurfaceState {
 type resource Surface implements Copyable<This>(bare: give) {
     Shared<SurfaceState> state;
 
-    public unsafe ctor Result<Surface, GpuError> create(const ref Instance instance, const ref Window window) {
+    public unsafe ctor Result<Surface, GpuError> make(const ref Instance instance, const ref Window window) {
         NativeWindow n = window.nativeHandle();
         int32 kind = match (n.kind) {
             case None: 0;
@@ -1273,7 +1273,7 @@ type resource Surface implements Copyable<This>(bare: give) {
         return Result::Ok(value: Surface.adopt(raw: h));
     }
     public unsafe ctor adopt(UnsafePtr raw) {
-        Shared<SurfaceState> s = new SurfaceState.make(handle: raw);
+        Shared<SurfaceState> s = new SurfaceState.adopt(raw: raw);
         this.state = give s;
     }
     public unsafe ctor copy(ref Surface source) { this.state = copy source.state; }

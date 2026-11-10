@@ -48,7 +48,7 @@ in; *as an engine renderer* they stay out.
 - `src/gpu.kama`, the safe API: Instance, `AdapterOptions` and `AdapterRequest`, Adapter (its `AdapterInfo`, `Limits`
   and `FeatureSet`), `DeviceOptions` and `DeviceRequest`, Device (holding its adapter), Queue, Buffer with `BufferRead`,
   Texture, TextureView, CommandEncoder, RenderPass, CommandBuffer, each releasing in its destructor.
-- The surface on an `@kama/window` window: `Surface.create(instance:, window:)`; `surface.capabilities(adapter:)`, a
+- The surface on an `@kama/window` window: `Surface.make(instance:, window:)`; `surface.capabilities(adapter:)`, a
   `SurfaceCapabilities` whose `preferred()` makes a `SurfaceConfig`; `configure(device:, config:, width:, height:)`,
   which checks everything first and refuses in a `ConfigureError` what wgpu-native would abort the process on; the
   typed `acquire() -> Result<SurfaceTexture, SurfaceError>` (Occluded sleeps 32 ms natively); a frame's `view()` in the
@@ -84,7 +84,9 @@ the example each list it beside `@kama/gpu`. That ends when `@kama/window` is pu
 owner, 2026-11-08: "The bar is production grade general solutions"). kama's design is where it started. Each departure
 is recorded here with its reason, and the owner relays them to kama. **Kept** marks the production answer. A
 **stopgap** is fixed before the first publish, and says what replaces it. kama reviewed this list on 2026-11-08
-(`../kama-notes-for-kyoten.md`); its points are folded in below.
+(`../kama-notes-for-kyoten.md`); its points are folded in below. **A record keeps the names of its day:** since
+2026-11-10 the public constructors follow kama's rule (KR-367; CHANGELOG.md), so `forSurface` is `withSurface`,
+`SurfaceCapabilities.of` is `make`, `Instance.create` and `Surface.create` are `make`, and `Color.rgba` is `Color.of`.
 
 1. **Built on 2026-11-10: WebGPU's two steps** (kama 0.9.909), replacing the stopgap below. Natively, on wgpu-native
    v29.0.1.1 over Vulkan (AMD's driver), test-first. 9 of 11 mutations were caught; the other 2 are equivalent on

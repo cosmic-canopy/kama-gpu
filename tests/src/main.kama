@@ -180,7 +180,7 @@ fn string answered(const ref FeatureSet has) {
 }
 @compileFor(!ARCH_WASM32)
 fn string answered(const ref FeatureSet has) {
-    FeatureSet none = FeatureSet.none();
+    FeatureSet none = FeatureSet.empty();
     string gap = missingFrom(given: none, offered: has);
     return gap.isEmpty() ? "it lists none of webgpu.h's features" : "";
 }
@@ -364,7 +364,7 @@ fn string acquireFailures() {
 // "" when capabilities made of these lists are refused.
 unsafe fn string refused(DynamicArray<TextureFormat> formats, DynamicArray<PresentMode> presents,
                          DynamicArray<AlphaMode> alphas, uint64 usages) {
-    Result<SurfaceCapabilities, GpuError> made = SurfaceCapabilities.of(formats: give formats, presentModes: give presents,
+    Result<SurfaceCapabilities, GpuError> made = SurfaceCapabilities.make(formats: give formats, presentModes: give presents,
                                                                         alphaModes: give alphas, usages: usages);
     return match (made) {
         case Ok(value: c): "they were made";
@@ -412,7 +412,7 @@ type resource Check implements App {
     Optional<DeviceRequest> beyond = Optional::None;      // one limit past the adapter's
     Optional<DeviceRequest> lacking = Optional::None;     // a feature the adapter lacks
     Optional<DeviceRequest> every = Optional::None;       // every feature the adapter has
-    FeatureSet offered = FeatureSet.none();
+    FeatureSet offered = FeatureSet.empty();
     uint32 raisedTo = 0;
     int32 open = 0;                                       // device requests not settled yet
     Optional<Device> device = Optional::None;
@@ -428,7 +428,7 @@ type resource Check implements App {
         this.formatCases();
         this.capabilityCases();
         this.verdict(name: "an acquire fails in one of five ways, each with its words", why: acquireFailures());
-        Result<Instance, GpuError> made = Instance.create();
+        Result<Instance, GpuError> made = Instance.make();
         match (give made) {
             case Ok(value: inst): {
                 this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.make(power: PowerPreference::HighPerformance)));
@@ -659,7 +659,7 @@ type resource Check implements App {
         uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
         Buffer copy = device.createBuffer(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
         CommandEncoder encoder = device.createCommandEncoder();
-        RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.rgba(r: RED, g: GREEN, b: BLUE, a: 1.0));
+        RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: RED, g: GREEN, b: BLUE, a: 1.0));
         give pass.end();
         encoder.copyTextureToBuffer(texture: target, buffer: copy, width: SIDE, height: SIDE, bytesPerRow: ROW);
         CommandBuffer commands = give encoder.finish();
@@ -773,7 +773,7 @@ type resource Check implements App {
         wa.add(item: AlphaMode::Premultiplied);
         uint64 canvas = TextureUsage::RenderAttachment | TextureUsage::TextureBinding | TextureUsage::CopySrc
                         | TextureUsage::CopyDst;
-        Result<SurfaceCapabilities, GpuError> web = SurfaceCapabilities.of(formats: give wf,
+        Result<SurfaceCapabilities, GpuError> web = SurfaceCapabilities.make(formats: give wf,
                                                                            presentModes: presents1(a: PresentMode::Fifo),
                                                                            alphaModes: give wa, usages: canvas);
         match (give web) {
@@ -798,7 +798,7 @@ type resource Check implements App {
         DynamicArray<PresentMode> np = presents1(a: PresentMode::Immediate);
         np.add(item: PresentMode::Fifo);
         np.add(item: PresentMode::FifoRelaxed);
-        Result<SurfaceCapabilities, GpuError> native = SurfaceCapabilities.of(formats: give nf, presentModes: give np,
+        Result<SurfaceCapabilities, GpuError> native = SurfaceCapabilities.make(formats: give nf, presentModes: give np,
             alphaModes: alphas1(a: AlphaMode::Opaque),
             usages: TextureUsage::RenderAttachment | TextureUsage::TextureBinding | TextureUsage::CopySrc);
         match (give native) {
@@ -816,7 +816,7 @@ type resource Check implements App {
         hf.add(item: TextureFormat::BGRA8Unorm);
         DynamicArray<AlphaMode> ha = alphas1(a: AlphaMode::Premultiplied);
         ha.add(item: AlphaMode::Opaque);
-        Result<SurfaceCapabilities, GpuError> hdr = SurfaceCapabilities.of(formats: give hf,
+        Result<SurfaceCapabilities, GpuError> hdr = SurfaceCapabilities.make(formats: give hf,
                                                                            presentModes: presents1(a: PresentMode::Fifo),
                                                                            alphaModes: give ha,
                                                                            usages: TextureUsage::RenderAttachment);
@@ -894,12 +894,12 @@ unsafe fn void surfaceCases(ref Check t) {
         case Ok(value: opens): give opens;
         case Err(error: e): { string why = e.message(); t.verdict(name: "a window for the surface cases", why: why); return; }
     };
-    Result<Instance, GpuError> made = Instance.create();
+    Result<Instance, GpuError> made = Instance.make();
     Instance instance = match (give made) {
         case Ok(value: i): give i;
         case Err(error: e): { string why = e.message(); t.verdict(name: "an instance for the surface cases", why: why); return; }
     };
-    Result<Surface, GpuError> onWindow = Surface.create(instance: instance, window: window);
+    Result<Surface, GpuError> onWindow = Surface.make(instance: instance, window: window);
     Surface surface = match (give onWindow) {
         case Ok(value: s): give s;
         case Err(error: e): { string why = e.message(); t.verdict(name: "a surface on the window", why: why); return; }
@@ -943,7 +943,7 @@ unsafe fn void surfaceCases(ref Check t) {
 // An adapter that can present to `surface`; natively the request is answered as soon as it is polled.
 @compileFor(!ARCH_WASM32)
 unsafe fn Result<Adapter, GpuError> adapterFor(ref Instance instance, const ref Surface surface) {
-    AdapterRequest asked = instance.requestAdapter(options: AdapterOptions.forSurface(surface: surface,
+    AdapterRequest asked = instance.requestAdapter(options: AdapterOptions.withSurface(surface: surface,
                                                                                        power: PowerPreference::HighPerformance));
     int32 polls = 0;
     while (polls < 1000) {
@@ -1161,7 +1161,7 @@ unsafe fn Result<int32, GpuError> drawGrey(ref Surface surface, ref Device devic
     uint64 bytes = cast<uint64>(ROW) * cast<uint64>(PATCH);
     Buffer buffer = device.createBuffer(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
     CommandEncoder encoder = device.createCommandEncoder();
-    RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.rgba(r: 0.5, g: 0.5, b: 0.5, a: 1.0));
+    RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: 0.5, g: 0.5, b: 0.5, a: 1.0));
     give pass.end();
     encoder.copyTextureToBuffer(texture: texture, buffer: buffer, width: PATCH, height: PATCH, bytesPerRow: ROW);
     CommandBuffer commands = give encoder.finish();

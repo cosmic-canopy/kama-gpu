@@ -40,7 +40,7 @@ unsafe fn int32 frameLimit() {
 
 // An adapter that can present to `surface`; natively the request is answered as soon as it is polled.
 unsafe fn Result<Adapter, GpuError> adapterFor(ref Instance instance, const ref Surface surface) {
-    AdapterRequest asked = instance.requestAdapter(options: AdapterOptions.forSurface(surface: surface,
+    AdapterRequest asked = instance.requestAdapter(options: AdapterOptions.withSurface(surface: surface,
                                                                                        power: PowerPreference::HighPerformance));
     int32 polls = 0;
     while (polls < 1000) {
@@ -98,12 +98,12 @@ unsafe fn uint8 run() {
         case Ok(value: w): give w;
         case Err(error: e): { string why = e.message(); println(s: "clear: no window: ${why}"); return 1; }
     };
-    Result<Instance, GpuError> made = Instance.create();
+    Result<Instance, GpuError> made = Instance.make();
     Instance instance = match (give made) {
         case Ok(value: i): give i;
         case Err(error: e): { string why = e.message(); println(s: "clear: ${why}"); return 1; }
     };
-    Result<Surface, GpuError> onWindow = Surface.create(instance: instance, window: window);
+    Result<Surface, GpuError> onWindow = Surface.make(instance: instance, window: window);
     Surface surface = match (give onWindow) {
         case Ok(value: s): give s;
         case Err(error: e): { string why = e.message(); println(s: "clear: ${why}"); return 1; }
@@ -165,7 +165,7 @@ unsafe fn uint8 run() {
                         TextureView view = frame.view();
                         float64 t = cast<float64>(frames % 240) / 240.0;
                         CommandEncoder encoder = dev.createCommandEncoder();
-                        RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.rgba(r: t, g: 0.3, b: 1.0 - t, a: 1.0));
+                        RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: t, g: 0.3, b: 1.0 - t, a: 1.0));
                         give pass.end();
                         CommandBuffer commands = give encoder.finish();
                         queue.submit(commands: give commands);
