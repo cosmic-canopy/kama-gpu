@@ -145,6 +145,29 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
    5. **Kept: nothing waits through `WaitAny`,** which aborts on both legs; every request stays `AllowSpontaneous` and
       polled. An adopted device (`Device.adopt`) keeps the error callback its maker gave it, since webgpu.h sets it only
       at creation, so its errors do not reach the package's channel; `takeErrors()` on one says so.
+
+   **Proposed on 2026-11-10, within the five, and not yet answered:** the next session confirms them before GPU-1 is
+   built.
+   1. **The types.** `device.takeErrors()` returns a `DeviceErrors`:
+      - its reports, each a `GpuErrorReport` with `kind()` (`ErrorKind`: `Validation`, `OutOfMemory`, `Internal` or
+        `Unknown`) and `message()`;
+      - `dropped()`, how many did not fit;
+      - `watched()`, false for an adopted device.
+
+      `device.lost()` returns an `Optional<DeviceLoss>` with its reason and message, and a scope's filter is
+      `ErrorFilter` (`Validation`, `OutOfMemory`, `Internal`).
+   2. **A full ring keeps the oldest reports and counts the rest,** as `@kama/window`'s queue does.
+   3. **A scope keeps the first error that matches it,** as WebGPU's does; a later one in the same scope goes nowhere.
+   4. **A pop out of order is refused** in a `Result`. The scope it named is marked orphaned, and is popped once the
+      scopes above it are, so the stack never jams. Natively each scope records its thread, and an error goes to that
+      thread's innermost matching scope.
+   5. **wgpu-native's measured behaviour is pinned by a C test in the gate,** made from the probe:
+      - errors reported inside the call, on the calling thread;
+      - no loss reported on a destroy or a release;
+      - the five aborts still aborting.
+
+      A wgpu-native that changes any of these fails it loudly, rather than turning into a use-after-free or a crash in
+      the package.
 3. **Kept, and to grow: a device gets WebGPU's default limits**, not the adapter's, so a program that runs on one
    machine does not silently depend on its adapter. A program that needs more names the limits and features it
    requires in the request, which fails when the adapter lacks them, as WebGPU's `requiredLimits` does.
