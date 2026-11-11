@@ -5,6 +5,17 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **One device per adapter, on every leg** (2026-11-11, kama 0.9.911; GPU-3, AGENTS.gpu.md item 10, decision 1), as a
+  browser gives. **Breaking:** once a device request of any copy of an adapter is granted, the adapter is consumed, and
+  a later request fails with the new `GpuError::Consumed`, at once and without asking WebGPU; one that settles after
+  another consumed the adapter fails the same way. Only a granted request consumes. A program that wants two devices
+  requests two adapters. `tests/` gains 4 cases and asks each device of an adapter of its own.
+- `Limits.defaults()` gives `maxImmediateSize` WebGPU's default, 64, not 0 (the spec's limits table). wgpu-native's
+  device reports 0, since immediates are its own feature there.
+- **`tests/` runs in a browser** (GPU-3): `tools/test.sh` builds it for the web with its own page (`tests/web/shell.html`)
+  and runs it in every headless Chromium browser present (a Chrome for Testing pinned under `~/browsers`, Edge, Chrome)
+  through `tools/webtest.mjs`, a stopgap until kama runs a wasm program in a browser (kyoten's KY-50). 33 cases there.
+
 - `tests/` opens its windows through `@kama/window`'s `Window.openWith(…, options:)` with `focused: false` (its WIN-16,
   2026-11-10), in place of GLFW hints of its own, and `examples/clear --frames N` leaves the focus where it is.
 - **An acquire before a configure is refused** (2026-11-10, kama 0.9.911; GPU-13, AGENTS.gpu.md item 9), where
