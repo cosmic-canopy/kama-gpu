@@ -137,6 +137,7 @@ async function launch(browser, profile) {
             if (m) { clearTimeout(t); resolve(m[1]); }
         });
         proc.on('exit', c => { clearTimeout(t); reject(new Error(`the browser exited (${c}): ${buf}`)); });
+        proc.on('error', e => { clearTimeout(t); reject(new Error(`the browser did not start: ${e.message}`)); });
     });
     const ws = new WebSocket(url);
     await new Promise((r, j) => { ws.onopen = r; ws.onerror = j; });

@@ -90,16 +90,21 @@ if ! command -v emcc >/dev/null 2>&1; then
 elif ! "$KAMA" build tests/kama.json --target WASM -o tests/out/web/gputests.html > tests/out/build-web.log 2>&1; then
     tail -20 tests/out/build-web.log
     failed=1
+elif ! "$KAMA" build examples/clear/kama.json --target WASM -o tests/out/clear-web/clear.html > tests/out/build-clear-web.log 2>&1; then
+    tail -20 tests/out/build-clear-web.log
+    failed=1
 elif ! command -v node >/dev/null 2>&1; then
-    echo "ok   built tests/out/web/gputests.html"
+    echo "ok   built tests/out/web/gputests.html and tests/out/clear-web/clear.html"
     echo "skip no node on PATH, so no browser run"
 elif ! browsers="$(node tools/webtest.mjs --list 2>/dev/null)"; then
-    echo "ok   built tests/out/web/gputests.html"
+    echo "ok   built tests/out/web/gputests.html and tests/out/clear-web/clear.html"
     echo "skip no Chromium browser (pin Chrome for Testing under ~/browsers, or set KAMA_BROWSER)"
 else
     while IFS= read -r browser; do
         echo "-- $browser"
         node tools/webtest.mjs tests/out/web gputests.html --browser "$browser" || failed=1
+        echo "-- $browser: examples/clear on #canvas for 60 frames"
+        node tools/webtest.mjs tests/out/clear-web "clear.html?arg=--frames&arg=60" --browser "$browser" || failed=1
     done <<< "$browsers"
 fi
 

@@ -4,19 +4,27 @@
 <meta charset="utf-8">
 <title>@kama/gpu tests</title>
 <!--
-  The page the tests program runs in, in the browser leg (tools/webtest.mjs). #canvas, emscripten's own name for a
-  program's canvas, is what the surface cases open their window on; `open` gives it its CSS size. The program's output
-  goes to the console, which the driver reads, and so does its end: "webtest: exit <status>" from emscripten's
-  `onExit`, or "webtest: abort <what>" from `onAbort` (a stopgap with the driver, kyoten's KY-50). The page's query is
-  the program's arguments: `?arg=--frames&arg=60`.
+  The page the tests program runs in, in the browser leg (tools/webtest.mjs). Its canvases are the surface cases'
+  windows, each given its CSS size by `openIn` unless said:
+  - #canvas, emscripten's own name for a program's canvas, the main window;
+  - #second, for the windows that close while a surface, adapter options or a frame holds them;
+  - #wide, opened 6000 CSS pixels wide, so at a scale of 1.5 it is wider than a texture may be;
+  - #flat, which the page does not display, opened with `sizedByPage`: a window with no area.
+  The program's output goes to the console, which the driver reads, and so does its end: "webtest: exit <status>" from
+  emscripten's `onExit`, or "webtest: abort <what>" from `onAbort` (a stopgap with the driver, kyoten's KY-50). The
+  page's query is the program's arguments: `?arg=--frames&arg=60`.
 -->
 <style>
   html, body { margin: 0; padding: 0; }
   canvas { display: block; }
+  #flat { display: none; }
 </style>
 </head>
 <body>
 <canvas id="canvas"></canvas>
+<canvas id="second"></canvas>
+<canvas id="wide"></canvas>
+<canvas id="flat"></canvas>
 <script>
   var Module = {
     arguments: new URLSearchParams(location.search).getAll('arg'),

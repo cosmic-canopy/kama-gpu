@@ -7,6 +7,8 @@
   "entry": "src/main.kama",
   "webgpu": true,
   "shellFile": "web/shell.html",
+  "cincludes": ["csrc"],
+  "csources": ["csrc/gputests.c"],
   "modules": {
     ".": { "visibility": "internal" }
   },

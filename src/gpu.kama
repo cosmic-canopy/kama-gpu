@@ -74,7 +74,7 @@ import {
     gpu::native::surfaceGetCapabilities, gpu::native::surfaceCapabilitiesFreeMembers, gpu::native::textureViewIn,
     gpu::native::WGPUSurfaceConfiguration, gpu::native::WGPUSurfaceCapabilities, gpu::native::WGPUStatus,
     gpu::native::WGPUCompositeAlphaMode, gpu::native::WGPUPresentMode,
-    window::Window, window::NativeWindow, window::NativeKind,
+    window::Window, window::NativeWindow, window::NativeKind, window::Size,
 };
 
 export {
@@ -1367,7 +1367,8 @@ type enum ConfigureError implements Error {
     NoArea,                    // a width or height of 0, as a minimised window has: configure again when it has an area
     TooLarge(uint32 most),     // wider or taller than the device's maxTextureDimension2D, `most`, which DeviceOptions raise
     NotOffered(string words),  // a choice the surface does not offer, named
-    Closed;                    // the window is closed, and nothing reaches it again: drop the surface
+    Closed,                    // the window is closed, and nothing reaches it again: drop the surface
+    NoWindow;                  // an adopted surface has no window to size it: its maker configures it
 
     public const fn string message() {
         return match (this) {
@@ -1375,6 +1376,7 @@ type enum ConfigureError implements Error {
             case TooLarge(most: m): "larger than the device allows: ${m} texels on a side at most";
             case NotOffered(words: w): copy w;
             case Closed: "the window is closed: drop the surface";
+            case NoWindow: "an adopted surface has no window to take its size from: its maker configures it";
         };
     }
 }
@@ -1523,6 +1525,14 @@ type resource SurfaceCapabilities {
     }
 }
 
+// The size a configure hands WebGPU. On the web, 0: emdawnwebgpu writes a non-zero size into the canvas's pixels, which
+// are the window's to set (@kama/window's WIN-3, decision 6), and a canvas's texture is the canvas's size in any case
+// (measured 2026-11-11, AGENTS.gpu.md item 10). Natively, the window's size.
+@compileFor(ARCH_WASM32)
+fn uint32 handedOver(uint32 pixels) { return 0; }
+@compileFor(!ARCH_WASM32)
+fn uint32 handedOver(uint32 pixels) { return pixels; }
+
 // emdawnwebgpu (Dawn v20260423) never sets a surface's usages, so on the web the package answers what a WebGPU canvas
 // accepts for every format it offers. Once Dawn answers for itself, its answer stands.
 @compileFor(ARCH_WASM32)
@@ -1582,8 +1592,9 @@ type resource SurfaceState {
     StateHold hold = StateHold.empty();   // the state of the device it was last configured with, which its frames hold
     // The window, held (@kama/window's WIN-1); an adopted surface holds an adopted handle, which is always open.
     NativeWindow onWindow = NativeWindow.adopt(kind: NativeKind::None, display: null, window: null);
+    bool adopted = false;   // made elsewhere: no window here to size it
 
-    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; this.hasConfig = true; }
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; this.hasConfig = true; this.adopted = true; }
     public unsafe ctor fromWindow(UnsafePtr raw, NativeWindow window) {
         this.handle = raw;
         this.onWindow = give window;
@@ -1591,6 +1602,9 @@ type resource SurfaceState {
     public unsafe const fn UnsafePtr raw() { return this.handle; }
     // False once the window's `Window` is dropped: nothing reaches the window after that.
     public unsafe const fn bool windowOpen() { return this.onWindow.isOpen(); }
+    public const fn bool isAdopted() { return this.adopted; }
+    // The window's size in pixels, as of its last `pump()` (@kama/window's WIN-20).
+    public unsafe const fn Size windowSize() { return this.onWindow.framebufferSize(); }
     // Another hold on the window, for a frame or adapter options that hold the native surface too.
     public unsafe const fn NativeWindow heldWindow() { return copy this.onWindow; }
     public const fn bool isConfigured() { return this.hasConfig; }
@@ -1648,14 +1662,19 @@ type resource Surface implements Copyable<This>(bare: give) {
         return capabilitiesOf(surface: this.raw(), adapter: adapter.raw());
     }
 
-    // Draw into it with `device`, `width` × `height` texels (the window's framebuffer size), as `config` says.
+    // Draw into it with `device`, as `config` says, at the window's size in pixels as of its last `pump()`: the window
+    // is the one writer of its size (AGENTS.gpu.md item 10, decision 2), as a WebGPU canvas's `configure()` takes none.
     // Configure again when an acquire says Outdated or Lost, or the window is resized. Everything is checked against
-    // what the surface offers the device's adapter before WebGPU sees it, and refused in a ConfigureError: Closed once
-    // the window is closed, which the surface never reaches again.
-    public unsafe fn Result<Unit, ConfigureError> configure(const ref Device device, const ref SurfaceConfig config,
-                                                           uint32 width, uint32 height) {
+    // what the surface offers the device's adapter before WebGPU sees it, and refused in a ConfigureError: NoArea while
+    // the window has none (minimised), Closed once the window is closed, which the surface never reaches again, and
+    // NoWindow for an adopted surface, which its maker configures.
+    public unsafe fn Result<Unit, ConfigureError> configure(const ref Device device, const ref SurfaceConfig config) {
+        if (this.state.isAdopted()) { return Result::Err(error: ConfigureError::NoWindow); }
         if (!this.state.windowOpen()) { return Result::Err(error: ConfigureError::Closed); }
-        if (width == 0 || height == 0) { return Result::Err(error: ConfigureError::NoArea); }
+        Size px = this.state.windowSize();
+        if (px.width <= 0 || px.height <= 0) { return Result::Err(error: ConfigureError::NoArea); }
+        uint32 width = cast<uint32>(px.width);
+        uint32 height = cast<uint32>(px.height);
         Limits limits = device.limits();
         uint32 most = limits.maxTextureDimension2D;
         if (width > most || height > most) { return Result::Err(error: ConfigureError::TooLarge(most: most)); }
@@ -1670,8 +1689,8 @@ type resource Surface implements Copyable<This>(bare: give) {
         c.device = device.raw();
         c.format = config.format.value();
         c.usage = config.usage;
-        c.width = width;
-        c.height = height;
+        c.width = handedOver(pixels: width);
+        c.height = handedOver(pixels: height);
         InlineArray<int32>#(1) views = [0; 1];
         views[0] = config.viewFormat.value();
         if (config.viewFormat != config.format) {

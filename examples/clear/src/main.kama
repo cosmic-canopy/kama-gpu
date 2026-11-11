@@ -1,27 +1,32 @@
-// clear: a window cleared to a slowly changing colour every frame, on @kama/gpu and @kama/window. Escape or the close
-// button quits; a resize reconfigures the surface, and while the window has no area (minimised) frames are skipped.
-// `clear --frames N` presents N frames and exits, for a check that needs no hand on the keyboard, and opens without
-// taking the focus. It prints how many frames it presented and how many errors WebGPU reported to its device, and its
-// exit status is 1 when it did.
+// clear: a window cleared to a slowly changing colour every frame, on @kama/gpu and @kama/window, natively and in a
+// browser. Escape or the close button quits; a resize reconfigures the surface, and while the window has no area
+// (minimised) frames are skipped. `clear --frames N` presents N frames and exits, for a check that needs no hand on the
+// keyboard, and opens without taking the focus; on the web the page passes it (`clear.html?arg=--frames&arg=60`). It
+// prints how many frames it presented and how many errors WebGPU reported to its device, and its exit status is 1 when
+// it did.
+//
+// It is a `std::app` `App`, a step a tick, since on the web the adapter and the device are answered by the browser
+// between ticks, and the browser paces the frames. On the web the window is the page's `#canvas`.
 //
 // The surface is configured from what it offers the adapter: `caps.preferred()`, its first format drawn through its
-// sRGB form, so the colours are the same on every leg.
-//
-// Native only for now: on the web the loop must be the browser's (std::app::run) and the window a canvas, which come
-// with @kama/window's web half.
+// sRGB form, so the colours are the same on every leg, at the window's size.
 
 import {
     core::println,
     core::env::args, core::env::Args,
+    std::app::App, std::app::Lifecycle, std::app::run, std::app::quit,
     std::fmt::ParseError,
+    std::memory::Owned,
     std::time::sleep, std::time::Duration,
     gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::DeviceOptions,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::PowerPreference,
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::ConfigureError, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass, gpu::CommandBuffer, gpu::Color,
     gpu::DeviceErrors,
-    window::Window, window::WindowOptions, window::WindowError, window::Event, window::Key, window::Size,
+    window::Window, window::WindowOptions, window::WindowError, window::Event, window::Key,
 };
+
+comptime int32 SETTLE_TICKS = 3;   // after the last frame, before the device's errors are read: the web's arrive a tick later
 
 // `--frames N`, or 0 for no limit.
 unsafe fn int32 frameLimit() {
@@ -39,48 +44,12 @@ unsafe fn int32 frameLimit() {
     };
 }
 
-// An adapter that can present to `surface`; natively the request is answered as soon as it is polled.
-unsafe fn Result<Adapter, GpuError> adapterFor(ref Instance instance, const ref Surface surface) {
-    AdapterRequest asked = instance.requestAdapter(options: AdapterOptions.withSurface(surface: surface,
-                                                                                       power: PowerPreference::HighPerformance));
-    int32 polls = 0;
-    while (polls < 1000) {
-        AdapterStatus a = asked.poll();
-        match (give a) {
-            case Pending: { }
-            case Ready(adapter: adapter): { return Result::Ok(value: give adapter); }
-            case Failed(error: e): { return Result::Err(error: give e); }
-        };
-        polls = polls + 1;
-    }
-    return Result::Err(error: GpuError::Refused(words: "the adapter request never settled"));
-}
-
-// A device from `adapter` with WebGPU's defaults.
-unsafe fn Result<DeviceStatus, GpuError> deviceFrom(ref Adapter adapter) {
-    DeviceRequest request = adapter.requestDevice(options: DeviceOptions.defaults());
-    int32 polls = 0;
-    while (polls < 1000) {
-        DeviceStatus s = request.poll();
-        match (s) {
-            case Pending: { }
-            case Ready(device: d, queue: q): { return Result::Ok(value: give s); }
-            case Failed(error: e): { return Result::Ok(value: give s); }
-        };
-        polls = polls + 1;
-    }
-    return Result::Err(error: GpuError::Refused(words: "the device request never settled"));
-}
-
-// What configuring at the window's framebuffer size came to: the surface is ready, the window has no area (skip frames
-// until it has), or the surface refused, which ends the program.
+// What configuring at the window's size came to: the surface is ready, the window has no area (skip frames until it
+// has), or the surface refused, which ends the program.
 type enum Fit { Ready, NoArea, Refused }
 
-unsafe fn Fit fit(ref Surface surface, const ref Device device, const ref SurfaceConfig config, const ref Window window) {
-    Size px = window.framebufferSize();
-    if (px.width <= 0 || px.height <= 0) { return Fit::NoArea; }
-    Result<Unit, ConfigureError> done = surface.configure(device: device, config: config, width: cast<uint32>(px.width),
-                                                          height: cast<uint32>(px.height));
+unsafe fn Fit fit(ref Surface surface, const ref Device device, const ref SurfaceConfig config) {
+    Result<Unit, ConfigureError> done = surface.configure(device: device, config: config);
     return match (done) {
         case Ok(value: u): Fit::Ready;
         case Err(error: e): {
@@ -92,117 +61,237 @@ unsafe fn Fit fit(ref Surface surface, const ref Device device, const ref Surfac
     };
 }
 
-unsafe fn uint8 run() {
-    int32 limit = frameLimit();
-    // A check (`--frames N`) needs no hand on the keyboard, so it leaves the focus where it is; run by hand, the window
-    // takes it, as a program's should.
-    WindowOptions options = WindowOptions.make();
-    options.focused = limit == 0;
-    Result<Window, WindowError> opened = Window.openWith(title: "@kama/gpu clear", width: 640, height: 400,
-                                                         options: options);
-    Window window = match (give opened) {
-        case Ok(value: w): give w;
-        case Err(error: e): { string why = e.message(); println(s: "clear: no window: ${why}"); return 1; }
-    };
-    Result<Instance, GpuError> made = Instance.make();
-    Instance instance = match (give made) {
-        case Ok(value: i): give i;
-        case Err(error: e): { string why = e.message(); println(s: "clear: ${why}"); return 1; }
-    };
-    Result<Surface, GpuError> onWindow = Surface.make(instance: instance, window: window);
-    Surface surface = match (give onWindow) {
-        case Ok(value: s): give s;
-        case Err(error: e): { string why = e.message(); println(s: "clear: ${why}"); return 1; }
-    };
-    Result<Adapter, GpuError> found = adapterFor(instance: instance, surface: surface);
-    Adapter adapter = match (give found) {
-        case Ok(value: a): give a;
-        case Err(error: e): { string why = e.message(); println(s: "clear: no adapter: ${why}"); return 1; }
-    };
-    Result<SurfaceCapabilities, GpuError> asked = surface.capabilities(adapter: adapter);
-    SurfaceCapabilities caps = match (give asked) {
-        case Ok(value: c): give c;
-        case Err(error: e): { string why = e.message(); println(s: "clear: ${why}"); return 1; }
-    };
-    SurfaceConfig config = caps.preferred();
-    Result<DeviceStatus, GpuError> requested = deviceFrom(adapter: adapter);
-    DeviceStatus status = match (give requested) {
-        case Ok(value: s): give s;
-        case Err(error: e): { string why = e.message(); println(s: "clear: ${why}"); return 1; }
-    };
-    match (give status) {
-        case Pending: { println(s: "clear: no device"); return 1; }
-        case Failed(error: e): { string why = e.message(); println(s: "clear: no device: ${why}"); return 1; }
-        case Ready(device: dev, queue: queue): {
-            Fit fitted = fit(surface: surface, device: dev, config: config, window: window);
-            if (fitted == Fit::Refused) { return 1; }
-            bool ready = fitted == Fit::Ready;
-            int32 frames = 0;
-            int32 skipped = 0;
-            bool running = true;
-            while (running) {
-                window.pump();
-                bool reconfigure = !ready;
+// A window with no area: natively wait as an occluded acquire does (32 ms) rather than spin; on the web the browser
+// paces the ticks.
+@compileFor(ARCH_WASM32)
+fn void idle() { }
+@compileFor(!ARCH_WASM32)
+fn void idle() { sleep(d: Duration.fromMillis(ms: 32)); }
+
+// The status `main` returns natively; on the web `run` never returns, so the program ends with `quit`.
+static int32 exitStatus = 1;
+
+@compileFor(ARCH_WASM32)
+fn void endOnTheWeb(int32 status) { quit(code: cast<uint8>(status)); }
+@compileFor(!ARCH_WASM32)
+fn void endOnTheWeb(int32 status) { }
+
+type resource Clear implements App {
+    int32 limit = 0;
+    int32 stage = 0;   // 0 opening, 1 the adapter, 2 the device, 3 frames, 4 settling, 5 done
+    Optional<Window> window = Optional::None;
+    Optional<Instance> instance = Optional::None;
+    Optional<Surface> surface = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<SurfaceConfig> config = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+    bool ready = false;
+    int32 frames = 0;
+    int32 skipped = 0;
+    int32 settled = 0;
+
+    public unsafe ctor make() { this.limit = frameLimit(); }
+
+    public fn void lifecycle(Lifecycle event) { }
+
+    public unsafe fn bool tick() {
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.awaitAdapter(); }
+        else if (this.stage == 2) { this.awaitDevice(); }
+        else if (this.stage == 3) { this.frame(); }
+        else if (this.stage == 4) { this.settle(); }
+        if (this.stage >= 5) { endOnTheWeb(status: exitStatus); return false; }
+        return true;
+    }
+
+    unsafe fn void fail(const ref string words) { println(s: "clear: ${words}"); exitStatus = 1; this.stage = 5; }
+
+    unsafe fn void open() {
+        // A check (`--frames N`) needs no hand on the keyboard, so it leaves the focus where it is; run by hand, the
+        // window takes it, as a program's should.
+        WindowOptions options = WindowOptions.make();
+        options.focused = this.limit == 0;
+        Result<Window, WindowError> opened = Window.openIn(canvas: "#canvas", title: "@kama/gpu clear", width: 640,
+                                                           height: 400, options: options);
+        Window win = match (give opened) {
+            case Ok(value: x): give x;
+            case Err(error: e): { string why = e.message(); this.fail(words: "no window: " + why); return; }
+        };
+        Result<Instance, GpuError> made = Instance.make();
+        Instance inst = match (give made) {
+            case Ok(value: i): give i;
+            case Err(error: e): { string why = e.message(); this.fail(words: why); return; }
+        };
+        Result<Surface, GpuError> onWindow = Surface.make(instance: inst, window: win);
+        Surface s = match (give onWindow) {
+            case Ok(value: x): give x;
+            case Err(error: e): { string why = e.message(); this.fail(words: why); return; }
+        };
+        this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.withSurface(surface: s,
+                                                                                    power: PowerPreference::HighPerformance)));
+        this.surface = Optional::Some(value: give s);
+        this.instance = Optional::Some(value: give inst);
+        this.window = Optional::Some(value: give win);
+        this.stage = 1;
+    }
+
+    unsafe fn void awaitAdapter() {
+        AdapterStatus status = AdapterStatus::Failed(error: GpuError::Taken);
+        match (this.adapterRequest) { case Some(value: r): { status = r.poll(); } case None: { } };
+        bool settledNow = match (status) { case Pending: false; case _: true; };
+        if (settledNow) { this.adapterRequest = Optional::None; }
+        match (give status) {
+            case Pending: { }
+            case Failed(error: e): { string why = e.message(); this.fail(words: "no adapter: " + why); }
+            case Ready(adapter: a): {
+                Result<SurfaceCapabilities, GpuError> asked = Result::Err(error: GpuError::Taken);
+                match (this.surface) { case Some(value: s): { asked = s.capabilities(adapter: a); } case None: { } };
+                match (give asked) {
+                    case Err(error: e): { string why = e.message(); this.fail(words: why); }
+                    case Ok(value: caps): {
+                        this.config = Optional::Some(value: caps.preferred());
+                        this.deviceRequest = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                        this.stage = 2;
+                    }
+                };
+            }
+        };
+    }
+
+    unsafe fn void awaitDevice() {
+        DeviceStatus status = DeviceStatus::Failed(error: GpuError::Taken);
+        match (this.deviceRequest) { case Some(value: r): { status = r.poll(); } case None: { } };
+        bool settledNow = match (status) { case Pending: false; case _: true; };
+        if (settledNow) { this.deviceRequest = Optional::None; }
+        match (give status) {
+            case Pending: { }
+            case Failed(error: e): { string why = e.message(); this.fail(words: "no device: " + why); }
+            case Ready(device: d, queue: q): {
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+                if (!this.refit()) { return; }
+                this.stage = 3;
+            }
+        };
+    }
+
+    // Configure at the window's size: false when the surface refused, which ends the program.
+    unsafe fn bool refit() {
+        Fit f = Fit::Refused;
+        match (this.surface) {
+            case Some(value: s): {
+                match (this.device) {
+                    case Some(value: d): {
+                        match (this.config) { case Some(value: c): { f = fit(surface: s, device: d, config: c); } case None: { } };
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        if (f == Fit::Refused) { exitStatus = 1; this.stage = 5; return false; }
+        this.ready = f == Fit::Ready;
+        return true;
+    }
+
+    unsafe fn void frame() {
+        bool running = true;
+        bool reconfigure = !this.ready;
+        match (this.window) {
+            case Some(value: w): {
+                w.pump();
                 bool polling = true;
                 while (polling) {
-                    Optional<Event> next = window.pollEvent();
+                    Optional<Event> next = w.pollEvent();
                     match (next) {
                         case None: { polling = false; }
                         case Some(value: e): {
                             match (e) {
                                 case CloseRequested: { running = false; }
                                 case KeyDown(key: k, mods: m, repeat: r): { if (k == Key::Escape) { running = false; } }
-                                case Resize(width: w, height: h): { reconfigure = true; }
+                                case Resize(width: rw, height: rh): { reconfigure = true; }
                                 case _: { }
                             };
                         }
                     };
                 }
-                if (reconfigure) {
-                    Fit again = fit(surface: surface, device: dev, config: config, window: window);
-                    if (again == Fit::Refused) { return 1; }
-                    ready = again == Fit::Ready;
-                }
-                // A minimised window: wait as an occluded acquire does (32 ms natively), rather than spin.
-                if (!ready) { sleep(d: Duration.fromMillis(ms: 32)); continue; }
-                Result<SurfaceTexture, SurfaceError> acquired = surface.acquire();
-                match (give acquired) {
-                    case Ok(value: frame): {
-                        TextureView view = frame.view();
-                        float64 t = cast<float64>(frames % 240) / 240.0;
-                        CommandEncoder encoder = dev.createCommandEncoder();
-                        RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: t, g: 0.3, b: 1.0 - t, a: 1.0));
-                        give pass.end();
-                        CommandBuffer commands = give encoder.finish();
-                        queue.submit(commands: give commands);
-                        give frame.present();
-                        frames = frames + 1;
-                    }
-                    case Err(error: e): {
-                        skipped = skipped + 1;
-                        match (e) {
-                            case Outdated: { ready = false; }
-                            case Lost: { ready = false; }
-                            case Failed: { println(s: "clear: the surface failed"); running = false; }
-                            case _: { }
+            }
+            case None: { }
+        };
+        if (!running) { this.stage = 4; return; }
+        if (reconfigure) {
+            if (!this.refit()) { return; }
+        }
+        if (!this.ready) { idle(); return; }
+        Result<SurfaceTexture, SurfaceError> acquired = Result::Err(error: SurfaceError::Closed);
+        match (this.surface) { case Some(value: s): { acquired = s.acquire(); } case None: { } };
+        match (give acquired) {
+            case Ok(value: frame): {
+                TextureView view = frame.view();
+                float64 t = cast<float64>(this.frames % 240) / 240.0;
+                match (this.device) {
+                    case Some(value: d): {
+                        match (this.queue) {
+                            case Some(value: q): {
+                                CommandEncoder encoder = d.createCommandEncoder();
+                                RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: t, g: 0.3, b: 1.0 - t, a: 1.0));
+                                give pass.end();
+                                CommandBuffer commands = give encoder.finish();
+                                q.submit(commands: give commands);
+                            }
+                            case None: { }
                         };
                     }
+                    case None: { }
                 };
-                if (limit > 0 && frames >= limit) { running = false; }
+                give frame.present();
+                this.frames = this.frames + 1;
             }
-            DeviceErrors reported = dev.takeErrors();
-            isize kept = reported.reports().length();
-            int64 dropped = reported.dropped();
-            int64 errors = cast<int64>(kept) + dropped;
-            println(s: "clear: ${frames} frames presented, ${skipped} acquires skipped, ${errors} WebGPU errors");
-            if (kept > 0) {
-                string first = reported.reports()[0].message();
-                println(s: "clear: the first: ${first}");
+            case Err(error: e): {
+                this.skipped = this.skipped + 1;
+                match (e) {
+                    case Outdated: { this.ready = false; }
+                    case Lost: { this.ready = false; }
+                    case Failed: { println(s: "clear: the surface failed"); this.stage = 4; }
+                    case _: { }
+                };
             }
-            if (errors > 0) { return 1; }
-            return 0;
-        }
-    };
+        };
+        if (this.limit > 0 && this.frames >= this.limit) { this.stage = 4; }
+    }
+
+    // A few ticks after the last frame, so the web's errors have arrived, then the totals.
+    unsafe fn void settle() {
+        this.settled = this.settled + 1;
+        if (this.settled < SETTLE_TICKS) { return; }
+        int64 errors = 0;
+        string firstWords = "";
+        match (this.device) {
+            case Some(value: d): {
+                DeviceErrors reported = d.takeErrors();
+                isize kept = reported.reports().length();
+                errors = cast<int64>(kept) + reported.dropped();
+                if (kept > 0) { firstWords = reported.reports()[0].message(); }
+            }
+            case None: { }
+        };
+        int32 n = this.frames;
+        int32 k = this.skipped;
+        println(s: "clear: ${n} frames presented, ${k} acquires skipped, ${errors} WebGPU errors");
+        if (!firstWords.isEmpty()) { println(s: "clear: the first: ${firstWords}"); }
+        exitStatus = errors > 0 ? 1 : 0;
+        this.stage = 5;
+    }
 }
 
-fn uint8 main() { return run(); }
+unsafe fn void runClear() {
+    Owned<App> app = new Clear.make();
+    run(app: give app);
+}
+
+fn uint8 main() {
+    runClear();
+    return cast<uint8>(exitStatus);
+}

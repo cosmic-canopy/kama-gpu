@@ -31,8 +31,8 @@ import {
     gpu::ErrorFilter, gpu::ErrorScope, gpu::ScopePop, gpu::PopStatus,
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
-    window::Window, window::WindowError, window::Size,
-    addDeviceRef, addSurfaceRef, statesAlive, windowRecords, quietly,
+    window::Window, window::WindowError, window::WindowOptions, window::Size, window::NativeWindow,
+    addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly,
 };
 
 comptime uint32 SIDE = 64;
@@ -395,6 +395,7 @@ fn string refusal(const ref Result<Unit, ConfigureError> got) {
                 case TooLarge(most: m): { what = "TooLarge ${m}"; }
                 case NotOffered(words: said): { what = "NotOffered"; }
                 case Closed: { what = "Closed"; }
+                case NoWindow: { what = "NoWindow"; }
             };
         }
     };
@@ -477,7 +478,8 @@ type resource Check implements App {
     Optional<Queue> queue = Optional::None;
     Optional<Buffer> readback = Optional::None;
     Optional<BufferRead> read = Optional::None;
-    int32 stage = 0;     // 0 awaiting the adapter, 1 the devices, 2 the map, 3 done
+    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 done
+    Optional<SurfaceRun> surfaces = Optional::None;
     Instant began = monotonicNow();
     int32 runs = 0;
     int32 failures = 0;
@@ -531,8 +533,18 @@ type resource Check implements App {
         if (this.stage == 0) { this.awaitAdapter(); }
         if (this.stage == 1) { this.awaitDevices(); }
         if (this.stage == 2) { this.awaitRead(); }
-        if (this.stage == 3) { return this.finish(); }
+        if (this.stage == 3) { this.surfaceStep(); }
+        if (this.stage == 4) { return this.finish(); }
         return 1;
+    }
+
+    // The surface cases' step this tick, run apart from this check so they can report to it.
+    unsafe fn void surfaceStep() {
+        Optional<SurfaceRun> taken = replace(place: this.surfaces, with: Optional::None);
+        SurfaceRun pending = match (give taken) { case Some(value: r): give r; case None: SurfaceRun.make(); };
+        bool done = pending.step(t: this);
+        this.surfaces = Optional::Some(value: give pending);
+        if (done) { this.surfaces = Optional::None; this.stage = 4; }
     }
 
     unsafe fn void awaitAdapter() {
@@ -1001,7 +1013,7 @@ type resource Check implements App {
 
     // Every handle released by its destructor, then the verdict on uncaptured errors and the totals.
     unsafe fn int32 finish() {
-        surfaceCases(t: this);
+        this.surfaces = Optional::None;
         match (this.device) {
             case Some(value: d): {
                 DeviceErrors errs = d.takeErrors();
@@ -1037,85 +1049,310 @@ type resource Check implements App {
     }
 }
 
-// ---- a surface on a real window (natively: the web's canvas surface comes with @kama/window's web half) ---------------
+// ---- a surface on a window: a system window natively, the page's canvas on the web (GPU-3) ---------------------------
 
 comptime uint32 PATCH = 64;   // the corner of a frame read back, PATCH × PATCH texels
 
-@compileFor(ARCH_WASM32)
-unsafe fn void surfaceCases(ref Check t) {
-    println(s: "skip the surface cases: a canvas surface comes with @kama/window's web half");
-}
+// The surface cases, a step a tick, since on the web the adapter, the device and each readback are answered between
+// ticks; natively each is answered when it is polled. The windows open with `openIn`: natively system windows, opened
+// unfocused, the selector unused; on the web the page's canvases (tests/web/shell.html): #canvas, #second for the
+// windows that close, #wide wider than a texture may be, and #flat with no area.
+type resource SurfaceRun {
+    int32 stage = 0;
+    Instant began = monotonicNow();
+    Optional<Window> window = Optional::None;
+    Optional<Instance> instance = Optional::None;
+    Optional<Surface> surface = Optional::None;
+    Optional<Surface> early = Optional::None;   // copied before any configure: it must still draw in the configured view format
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<Adapter> adapter = Optional::None;
+    Optional<SurfaceCapabilities> caps = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+    Optional<GreyRead> grey = Optional::None;
+    Optional<SurfaceConfig> linear = Optional::None;   // the configure the second readback is drawn through
 
-@compileFor(!ARCH_WASM32)
-unsafe fn void surfaceCases(ref Check t) {
-    string off = envOr(name: "KAMA_WINDOW_NO_DISPLAY", dflt: "");
-    if (!off.isEmpty()) { println(s: "skip the surface cases: KAMA_WINDOW_NO_DISPLAY is set"); return; }
-    // Declared in the order they must outlive each other: the window, then what presents to it.
-    Result<Window, WindowError> opened = Window.openWith(title: "@kama/gpu tests", width: 320, height: 200,
-                                                         options: quietly());
-    Window window = match (give opened) {
-        case Ok(value: opens): give opens;
-        case Err(error: e): { string why = e.message(); t.verdict(name: "a window for the surface cases", why: why); return; }
-    };
-    Result<Instance, GpuError> made = Instance.make();
-    Instance instance = match (give made) {
-        case Ok(value: i): give i;
-        case Err(error: e): { string why = e.message(); t.verdict(name: "an instance for the surface cases", why: why); return; }
-    };
-    Result<Surface, GpuError> onWindow = Surface.make(instance: instance, window: window);
-    Surface surface = match (give onWindow) {
-        case Ok(value: s): give s;
-        case Err(error: e): { string why = e.message(); t.verdict(name: "a surface on the window", why: why); return; }
-    };
-    Surface early = copy surface;   // copied before any configure: it must still draw in the configured view format
-    Result<Adapter, GpuError> found = adapterFor(instance: instance, surface: surface);
-    Adapter adapter = match (give found) {
-        case Ok(value: a): give a;
-        case Err(error: e): { string why = e.message(); t.verdict(name: "an adapter for the surface", why: why); return; }
-    };
-    Result<SurfaceCapabilities, GpuError> asked = surface.capabilities(adapter: adapter);
-    SurfaceCapabilities caps = match (give asked) {
-        case Ok(value: c): give c;
-        case Err(error: e): { string why = e.message(); t.verdict(name: "a surface answers its capabilities", why: why); return; }
-    };
-    string formats = formatList(fs: caps.formats());
-    string presents = presentList(ps: caps.presentModes());
-    string alphas = alphaList(modes: caps.alphaModes());
-    uint64 usages = caps.usages();
-    println(s: "info the surface offers ${formats}; ${presents}; ${alphas}; usages ${usages}");
-    t.verdict(name: "a surface answers its capabilities", why: "");
-    // wgpu-native ends the process on this acquire (measured 3 of 3, 2026-11-10), so the surface must refuse it first.
-    t.verdict(name: "an acquire before any configure is refused as NotConfigured, not aborted",
-              why: refusedAs(surface: surface, want: "NotConfigured"));
-    DeviceRequest request = adapter.requestDevice(options: DeviceOptions.defaults());
-    int32 polls = 0;
-    while (polls < 1000) {
-        DeviceStatus s = request.poll();
-        match (give s) {
+    public ctor make() { }
+
+    // One tick's step: true once every surface case has run.
+    public unsafe fn bool step(ref Check t) {
+        if (this.stage > 0 && this.stage < 9 && this.began.elapsed().asMillis() > TIMEOUT_MS) {
+            int32 at = this.stage;
+            t.verdict(name: "the surface cases end within 10 s", why: "timed out at stage ${at}");
+            return true;
+        }
+        if (this.stage == 0) { this.open(t: t); }
+        else if (this.stage == 1) { this.awaitAdapter(t: t); }
+        else if (this.stage == 2) { this.awaitDevice(t: t); }
+        else if (this.stage == 3) { this.awaitGrey(t: t, want: 188); }
+        else if (this.stage == 4) { this.awaitGrey(t: t, want: 128); }
+        else if (this.stage == 5) { this.lastWords(t: t); }
+        return this.stage >= 9;
+    }
+
+    unsafe fn void open(ref Check t) {
+        if (noDisplay()) { println(s: "skip the surface cases: KAMA_WINDOW_NO_DISPLAY is set"); this.stage = 9; return; }
+        Result<Window, WindowError> opened = Window.openIn(canvas: "#canvas", title: "@kama/gpu tests", width: 320,
+                                                           height: 200, options: quietly());
+        Window win = match (give opened) {
+            case Ok(value: x): give x;
+            case Err(error: e): { string why = e.message(); t.verdict(name: "a window for the surface cases", why: why); this.stage = 9; return; }
+        };
+        Result<Instance, GpuError> made = Instance.make();
+        Instance inst = match (give made) {
+            case Ok(value: i): give i;
+            case Err(error: e): { string why = e.message(); t.verdict(name: "an instance for the surface cases", why: why); this.stage = 9; return; }
+        };
+        Result<Surface, GpuError> onWindow = Surface.make(instance: inst, window: win);
+        Surface s = match (give onWindow) {
+            case Ok(value: x): give x;
+            case Err(error: e): { string why = e.message(); t.verdict(name: "a surface on the window", why: why); this.stage = 9; return; }
+        };
+        this.early = Optional::Some(value: copy s);
+        this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.withSurface(surface: s,
+                                                                                    power: PowerPreference::HighPerformance)));
+        this.surface = Optional::Some(value: give s);
+        this.instance = Optional::Some(value: give inst);
+        this.window = Optional::Some(value: give win);
+        this.stage = 1;
+    }
+
+    unsafe fn void awaitAdapter(ref Check t) {
+        AdapterStatus status = AdapterStatus::Failed(error: GpuError::Taken);
+        match (this.adapterRequest) { case Some(value: r): { status = r.poll(); } case None: { } };
+        bool settled = match (status) { case Pending: false; case _: true; };
+        if (settled) { this.adapterRequest = Optional::None; }
+        match (give status) {
             case Pending: { }
+            case Failed(error: e): { string why = e.message(); t.verdict(name: "an adapter for the surface", why: why); this.stage = 9; }
+            case Ready(adapter: a): {
+                Surface s = match (this.surface) { case Some(value: x): copy x; case None: { this.stage = 9; return; } };
+                Result<SurfaceCapabilities, GpuError> asked = s.capabilities(adapter: a);
+                SurfaceCapabilities c = match (give asked) {
+                    case Ok(value: x): give x;
+                    case Err(error: e): { string why = e.message(); t.verdict(name: "a surface answers its capabilities", why: why); this.stage = 9; return; }
+                };
+                string formats = formatList(fs: c.formats());
+                string presents = presentList(ps: c.presentModes());
+                string alphas = alphaList(modes: c.alphaModes());
+                uint64 usages = c.usages();
+                println(s: "info the surface offers ${formats}; ${presents}; ${alphas}; usages ${usages}");
+                t.verdict(name: "a surface answers its capabilities", why: "");
+                // wgpu-native ends the process on this acquire (measured 3 of 3, 2026-11-10), and a browser throws.
+                t.verdict(name: "an acquire before any configure is refused as NotConfigured, not aborted",
+                          why: refusedAs(surface: s, want: "NotConfigured"));
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                this.caps = Optional::Some(value: give c);
+                this.adapter = Optional::Some(value: give a);
+                this.stage = 2;
+            }
+        };
+    }
+
+    unsafe fn void awaitDevice(ref Check t) {
+        DeviceStatus status = DeviceStatus::Failed(error: GpuError::Taken);
+        match (this.deviceRequest) { case Some(value: r): { status = r.poll(); } case None: { } };
+        bool settled = match (status) { case Pending: false; case _: true; };
+        if (settled) { this.deviceRequest = Optional::None; }
+        match (give status) {
+            case Pending: { }
+            case Failed(error: e): { string why = e.message(); t.verdict(name: "a device for the surface", why: why); this.stage = 9; }
             case Ready(device: d, queue: q): {
-                Size px = window.framebufferSize();
-                configureCases(t: t, surface: surface, early: early, caps: caps, device: d, queue: q,
-                               width: cast<uint32>(px.width), height: cast<uint32>(px.height));
-                closedCases(t: t, instance: instance, adapter: adapter, device: d, caps: caps);
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+                this.runConfigured(t: t);
+            }
+        };
+    }
+
+    // Every case that answers at once, then the first readback started.
+    unsafe fn void runConfigured(ref Check t) {
+        Optional<Window> wTaken = replace(place: this.window, with: Optional::None);
+        Window win = match (give wTaken) { case Some(value: x): give x; case None: { this.stage = 9; return; } };
+        Surface s = match (this.surface) { case Some(value: x): copy x; case None: { this.stage = 9; return; } };
+        Surface e = match (this.early) { case Some(value: x): copy x; case None: { this.stage = 9; return; } };
+        Instance inst = match (this.instance) { case Some(value: x): copy x; case None: { this.stage = 9; return; } };
+        Adapter a = match (this.adapter) { case Some(value: x): copy x; case None: { this.stage = 9; return; } };
+        Device d = match (this.device) { case Some(value: x): copy x; case None: { this.stage = 9; return; } };
+        Queue q = match (this.queue) { case Some(value: x): copy x; case None: { this.stage = 9; return; } };
+        Optional<SurfaceCapabilities> held = replace(place: this.caps, with: Optional::None);
+        SurfaceCapabilities c = match (give held) { case Some(value: x): give x; case None: { this.stage = 9; return; } };
+        configureCases(t: t, surface: s, early: e, caps: c, device: d, queue: q);
+        areaCases(t: t, window: win, surface: s, instance: inst, device: d, caps: c);
+        closedCases(t: t, instance: inst, adapter: a, device: d, caps: c);
+        this.window = Optional::Some(value: give win);
+
+        Optional<TextureFormat> lw = linearWithTwin(offered: c.formats());
+        bool copies = (c.usages() & TextureUsage::CopySrc) != 0;
+        SurfaceConfig srgb = c.preferred();
+        this.caps = Optional::Some(value: give c);
+        match (lw) {
+            case None: { println(s: "skip a frame read back: the surface offers no linear format with an sRGB form"); this.stage = 5; return; }
+            case Some(value: f): {
+                if (!copies) { println(s: "skip a frame read back: the surface does not offer CopySrc"); this.stage = 5; return; }
+                srgb.format = f;
+                srgb.viewFormat = match (f.srgb()) { case Some(value: v): v; case None: f; };
+                srgb.usage = TextureUsage::RenderAttachment | TextureUsage::CopySrc;
+                Result<Unit, ConfigureError> s1 = s.configure(device: d, config: srgb);
+                t.verdict(name: "a linear format through its sRGB view is taken", why: expectRefusal(got: s1, want: "ok"));
+                SurfaceConfig plain = srgb;
+                plain.viewFormat = f;
+                this.linear = Optional::Some(value: plain);
+                this.startGrey(t: t, through: e, name: "a frame drawn through the sRGB view, by a copy made before the configure");
+                this.stage = 3;
+            }
+        };
+    }
+
+    unsafe fn void startGrey(ref Check t, ref Surface through, const ref string name) {
+        Device d = match (this.device) { case Some(value: x): copy x; case None: { return; } };
+        Queue q = match (this.queue) { case Some(value: x): copy x; case None: { return; } };
+        Result<GreyRead, GpuError> started = startGreyRead(surface: through, device: d, queue: q);
+        match (give started) {
+            case Ok(value: g): { this.grey = Optional::Some(value: give g); }
+            case Err(error: e): { string why = e.message(); t.verdict(name: name, why: why); }
+        };
+    }
+
+    unsafe fn void awaitGrey(ref Check t, int32 want) {
+        string name = want == 188
+            ? "a frame drawn through the sRGB view, by a copy made before the configure, reads 0.5 grey as 188"
+            : "a frame drawn through the linear view reads 0.5 grey as 128";
+        if (this.grey.isNone()) { this.afterGrey(t: t, want: want); return; }
+        Device d = match (this.device) { case Some(value: x): copy x; case None: { this.stage = 9; return; } };
+        Optional<Result<int32, GpuError>> got = Optional::None;
+        match (this.grey) { case Some(value: g): { got = g.poll(device: d); } case None: { } };
+        match (got) {
+            case None: { }
+            case Some(value: r): {
+                this.grey = Optional::None;
+                t.verdict(name: name, why: greyIs(got: r, want: want));
+                this.afterGrey(t: t, want: want);
+            }
+        };
+    }
+
+    unsafe fn void afterGrey(ref Check t, int32 want) {
+        if (want != 188) { this.stage = 5; return; }
+        Surface s = match (this.surface) { case Some(value: x): copy x; case None: { this.stage = 9; return; } };
+        Device d = match (this.device) { case Some(value: x): copy x; case None: { this.stage = 9; return; } };
+        Optional<SurfaceConfig> plain = replace(place: this.linear, with: Optional::None);
+        match (plain) {
+            case None: { this.stage = 5; }
+            case Some(value: c): {
+                Result<Unit, ConfigureError> s2 = s.configure(device: d, config: c);
+                t.verdict(name: "a linear format through itself is taken", why: expectRefusal(got: s2, want: "ok"));
+                this.startGrey(t: t, through: s, name: "a frame drawn through the linear view reads 0.5 grey as 128");
+                this.stage = 4;
+            }
+        };
+    }
+
+    // On the web an error reaches the channel a tick after the queue is next used, which the readbacks did.
+    unsafe fn void lastWords(ref Check t) {
+        match (this.device) {
+            case Some(value: d): {
                 DeviceErrors errs = d.takeErrors();
                 t.verdict(name: "no uncaptured WebGPU error on the surface's device", why: errorsSaid(errs: errs));
-                return;
             }
-            case Failed(error: e): { string why = e.message(); t.verdict(name: "a device for the surface", why: why); return; }
+            case None: { }
         };
-        polls = polls + 1;
+        this.stage = 9;
     }
-    t.verdict(name: "a device for the surface", why: "the request never settled");
+}
+
+@compileFor(ARCH_WASM32)
+fn bool noDisplay() { return false; }
+@compileFor(!ARCH_WASM32)
+fn bool noDisplay() {
+    string off = envOr(name: "KAMA_WINDOW_NO_DISPLAY", dflt: "");
+    return !off.isEmpty();
+}
+
+// A frame cleared to 0.5 grey through its view, its top-left PATCH × PATCH texels on their way to the CPU.
+type resource GreyRead {
+    Optional<Buffer> buffer = Optional::None;
+    Optional<BufferRead> read = Optional::None;
+
+    public unsafe ctor make(Buffer buffer, BufferRead read) {
+        this.buffer = Optional::Some(value: give buffer);
+        this.read = Optional::Some(value: give read);
+    }
+
+    // None while the bytes are on their way; then the grey every texel reads, or why not. Natively it waits on the
+    // device; on the web the browser maps the buffer between ticks.
+    public unsafe fn Optional<Result<int32, GpuError>> poll(const ref Device device) {
+        device.poll(wait: true);
+        ReadStatus status = ReadStatus::Pending;
+        match (this.read) {
+            case Some(value: r): { status = r.poll(); }
+            case None: { return Optional::Some(value: Result::Err(error: GpuError::Taken)); }
+        };
+        match (give status) {
+            case Pending: { return Optional::None; }
+            case Failed(error: e): { return Optional::Some(value: Result::Err(error: give e)); }
+            case Ready: { }
+        };
+        DynamicArray<uint8> px = match (this.read) { case Some(value: r): r.bytes(); case None: DynamicArray.empty(); };
+        if (px.length() < 4) { return Optional::Some(value: Result::Err(error: GpuError::Refused(words: "no texels read"))); }
+        int32 grey = cast<int32>(px[0]);
+        isize i = 0;
+        while (i + 3 < px.length()) {
+            if (!near(got: px[i], want: grey) || !near(got: px[i + 1], want: grey) || !near(got: px[i + 2], want: grey)
+                || !near(got: px[i + 3], want: 255)) {
+                uint8 r = px[i];
+                uint8 g = px[i + 1];
+                uint8 b = px[i + 2];
+                uint8 a = px[i + 3];
+                return Optional::Some(value: Result::Err(error: GpuError::Refused(words: "a texel read ${r} ${g} ${b} ${a}, the first ${grey}")));
+            }
+            i = i + 4;
+        }
+        return Optional::Some(value: Result::Ok(value: grey));
+    }
+}
+
+// Acquire a frame, clear it to 0.5 grey through `frame.view()`, copy its top-left PATCH × PATCH texels out, and present
+// it, the copy's map started.
+unsafe fn Result<GreyRead, GpuError> startGreyRead(ref Surface surface, ref Device device, ref Queue queue) {
+    Result<SurfaceTexture, SurfaceError> acquired = surface.acquire();
+    SurfaceTexture frame = match (give acquired) {
+        case Ok(value: f): give f;
+        case Err(error: e): { string why = e.message(); return Result::Err(error: GpuError::Refused(words: "no frame: ${why}")); }
+    };
+    TextureView view = frame.view();
+    Texture texture = frame.texture();
+    uint64 bytes = cast<uint64>(ROW) * cast<uint64>(PATCH);
+    Buffer buffer = device.createBuffer(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
+    CommandEncoder encoder = device.createCommandEncoder();
+    RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: 0.5, g: 0.5, b: 0.5, a: 1.0));
+    give pass.end();
+    encoder.copyTextureToBuffer(texture: texture, buffer: buffer, width: PATCH, height: PATCH, bytesPerRow: ROW);
+    CommandBuffer commands = give encoder.finish();
+    queue.submit(commands: give commands);
+    BufferRead read = buffer.mapRead(offset: 0, size: bytes);
+    give frame.present();
+    return Result::Ok(value: GreyRead.make(buffer: give buffer, read: give read));
+}
+
+fn string greyIs(const ref Result<int32, GpuError> got, int32 want) {
+    string why = "";
+    match (got) {
+        case Ok(value: v): {
+            if (v < want - 1 || v > want + 1) { why = "read ${v}"; }
+        }
+        case Err(error: e): { why = e.message(); }
+    };
+    return why;
 }
 
 // ---- a surface holds its window (GPU-2) ------------------------------------------------------------------------------
 
 // A surface on a window of its own, the window dropped on the way out.
-@compileFor(!ARCH_WASM32)
 unsafe fn Result<Surface, GpuError> surfaceOutlivingWindow(const ref Instance instance) {
-    Result<Window, WindowError> opened = Window.openWith(title: "@kama/gpu closed window", width: 160, height: 100,
-                                                         options: quietly());
+    Result<Window, WindowError> opened = Window.openIn(canvas: "#second", title: "@kama/gpu closed window", width: 160,
+                                                       height: 100, options: quietly());
     Window window = match (give opened) {
         case Ok(value: opens): give opens;
         case Err(error: e): { string why = e.message(); return Result::Err(error: GpuError::Refused(words: give why)); }
@@ -1124,7 +1361,6 @@ unsafe fn Result<Surface, GpuError> surfaceOutlivingWindow(const ref Instance in
 }
 
 // Adapter options made with such a surface, the surface dropped on the way out too.
-@compileFor(!ARCH_WASM32)
 unsafe fn Optional<AdapterOptions> optionsOutlivingWindow(const ref Instance instance) {
     Result<Surface, GpuError> made = surfaceOutlivingWindow(instance: instance);
     Optional<AdapterOptions> held = Optional::None;
@@ -1136,10 +1372,9 @@ unsafe fn Optional<AdapterOptions> optionsOutlivingWindow(const ref Instance ins
 }
 
 // A frame acquired from a configured surface on a window of its own, the surface and the window dropped on the way out.
-@compileFor(!ARCH_WASM32)
 unsafe fn Optional<SurfaceTexture> frameOutlivingWindow(const ref Instance instance, ref Device device, const ref SurfaceConfig config) {
-    Result<Window, WindowError> opened = Window.openWith(title: "@kama/gpu held frame", width: 160, height: 100,
-                                                         options: quietly());
+    Result<Window, WindowError> opened = Window.openIn(canvas: "#second", title: "@kama/gpu held frame", width: 160,
+                                                       height: 100, options: quietly());
     Window window = match (give opened) {
         case Ok(value: opens): give opens;
         case Err(error: e): { string why = e.message(); println(s: "info no window for the held frame: ${why}"); return Optional::None; }
@@ -1149,9 +1384,7 @@ unsafe fn Optional<SurfaceTexture> frameOutlivingWindow(const ref Instance insta
         case Ok(value: s): give s;
         case Err(error: e): { string why = e.message(); println(s: "info no surface for the held frame: ${why}"); return Optional::None; }
     };
-    Size px = window.framebufferSize();
-    Result<Unit, ConfigureError> done = surface.configure(device: device, config: config, width: cast<uint32>(px.width),
-                                                          height: cast<uint32>(px.height));
+    Result<Unit, ConfigureError> done = surface.configure(device: device, config: config);
     match (done) {
         case Ok(value: u): { }
         case Err(error: e): { string why = e.message(); println(s: "info the held frame's surface refused: ${why}"); return Optional::None; }
@@ -1218,9 +1451,8 @@ unsafe fn string drawnOnce(ref Surface surface, ref Device device, ref Queue que
 }
 
 // A surface, adapter options made with one, and a frame each hold their window's record after the window is dropped,
-// so its HWND stays valid under them: a configure on a destroyed one aborts wgpu-native (measured 2026-11-10). Once the
-// window is closed, nothing reaches it again.
-@compileFor(!ARCH_WASM32)
+// so its system window stays valid under them: natively a configure on a destroyed one aborts wgpu-native (measured
+// 2026-11-10). Once the window is closed, nothing reaches it again.
 unsafe fn void closedCases(ref Check t, const ref Instance instance, const ref Adapter adapter, ref Device device,
                            const ref SurfaceCapabilities caps) {
     int32 before = windowRecords();
@@ -1230,7 +1462,7 @@ unsafe fn void closedCases(ref Check t, const ref Instance instance, const ref A
         case Ok(value: surface): {
             t.verdict(name: "a surface holds its window's record after the window is dropped", why: recordsAre(want: before + 1));
             SurfaceConfig config = caps.preferred();
-            Result<Unit, ConfigureError> r = surface.configure(device: device, config: config, width: 160, height: 100);
+            Result<Unit, ConfigureError> r = surface.configure(device: device, config: config);
             t.verdict(name: "a surface on a closed window refuses to configure, as Closed",
                       why: expectRefusal(got: r, want: "Closed"));
             Result<SurfaceTexture, SurfaceError> a = surface.acquire();
@@ -1268,26 +1500,72 @@ unsafe fn void closedCases(ref Check t, const ref Instance instance, const ref A
     t.verdict(name: "the frame's drop frees the record", why: recordsAre(want: before));
 }
 
-// An adapter that can present to `surface`; natively the request is answered as soon as it is polled.
+// A window with no area, refused as NoArea: natively the window minimised without taking the focus, then restored; on
+// the web a canvas the page does not display. A window past the device's maxTextureDimension2D, refused as TooLarge: on
+// the web a canvas 6000 CSS pixels wide at a scale of 1.5; natively no system window here is that wide.
 @compileFor(!ARCH_WASM32)
-unsafe fn Result<Adapter, GpuError> adapterFor(ref Instance instance, const ref Surface surface) {
-    AdapterRequest asked = instance.requestAdapter(options: AdapterOptions.withSurface(surface: surface,
-                                                                                       power: PowerPreference::HighPerformance));
-    int32 polls = 0;
-    while (polls < 1000) {
-        AdapterStatus a = asked.poll();
-        match (give a) {
-            case Pending: { }
-            case Ready(adapter: adapter): { return Result::Ok(value: give adapter); }
-            case Failed(error: e): { return Result::Err(error: give e); }
-        };
-        polls = polls + 1;
+unsafe fn void areaCases(ref Check t, ref Window window, ref Surface surface, const ref Instance instance, ref Device device,
+                         const ref SurfaceCapabilities caps) {
+    SurfaceConfig preferred = caps.preferred();
+    NativeWindow n = window.nativeHandle();
+    if (minimise(hwnd: n.window(), minimised: 1) < 0) {
+        println(s: "skip a window with no area: minimising one is asked of Win32 here");
+    } else {
+        window.pump();
+        Result<Unit, ConfigureError> r = surface.configure(device: device, config: preferred);
+        t.verdict(name: "a minimised window, with no area, is refused as NoArea, not aborted", why: expectRefusal(got: r, want: "NoArea"));
+        minimise(hwnd: n.window(), minimised: 0);
+        window.pump();
+        Result<Unit, ConfigureError> back = surface.configure(device: device, config: preferred);
+        t.verdict(name: "restored, it is configured again", why: expectRefusal(got: back, want: "ok"));
     }
-    return Result::Err(error: GpuError::Refused(words: "the adapter request never settled"));
+    println(s: "skip a window past maxTextureDimension2D: no system window here is wider than 8192 pixels");
+}
+
+@compileFor(ARCH_WASM32)
+unsafe fn void areaCases(ref Check t, ref Window window, ref Surface surface, const ref Instance instance, ref Device device,
+                         const ref SurfaceCapabilities caps) {
+    SurfaceConfig preferred = caps.preferred();
+    WindowOptions byPage = quietly();
+    byPage.sizedByPage = true;
+    Result<Window, WindowError> flat = Window.openIn(canvas: "#flat", title: "flat", width: 320, height: 200, options: byPage);
+    match (give flat) {
+        case Err(error: e): { string why = e.message(); t.verdict(name: "a canvas with no area is refused as NoArea", why: "no window: " + why); }
+        case Ok(value: flatWindow): {
+            Result<Surface, GpuError> made = Surface.make(instance: instance, window: flatWindow);
+            match (give made) {
+                case Err(error: e): { string why = e.message(); t.verdict(name: "a canvas with no area is refused as NoArea", why: "no surface: " + why); }
+                case Ok(value: s): {
+                    Result<Unit, ConfigureError> r = s.configure(device: device, config: preferred);
+                    t.verdict(name: "a canvas with no area is refused as NoArea", why: expectRefusal(got: r, want: "NoArea"));
+                }
+            };
+        }
+    };
+    Limits limits = device.limits();
+    uint32 most = limits.maxTextureDimension2D;
+    Result<Window, WindowError> wide = Window.openIn(canvas: "#wide", title: "wide", width: 6000, height: 10, options: quietly());
+    match (give wide) {
+        case Err(error: e): { string why = e.message(); t.verdict(name: "a canvas wider than maxTextureDimension2D is refused as TooLarge, naming the most", why: "no window: " + why); }
+        case Ok(value: wideWindow): {
+            Size px = wideWindow.framebufferSize();
+            int32 pw = px.width;
+            int32 ph = px.height;
+            println(s: "info the wide canvas is ${pw}×${ph} pixels");
+            Result<Surface, GpuError> made = Surface.make(instance: instance, window: wideWindow);
+            match (give made) {
+                case Err(error: e): { string why = e.message(); t.verdict(name: "a canvas wider than maxTextureDimension2D is refused as TooLarge, naming the most", why: "no surface: " + why); }
+                case Ok(value: s): {
+                    Result<Unit, ConfigureError> r = s.configure(device: device, config: preferred);
+                    t.verdict(name: "a canvas wider than maxTextureDimension2D is refused as TooLarge, naming the most",
+                              why: expectRefusal(got: r, want: "TooLarge ${most}"));
+                }
+            };
+        }
+    };
 }
 
 // A present mode, an alpha mode, and so on, the surface does not offer, or None when it offers them all.
-@compileFor(!ARCH_WASM32)
 fn Optional<PresentMode> presentNotIn(const ref DynamicArray<PresentMode> offered) {
     DynamicArray<PresentMode> all = presents1(a: PresentMode::Mailbox);
     all.add(item: PresentMode::Immediate);
@@ -1303,7 +1581,6 @@ fn Optional<PresentMode> presentNotIn(const ref DynamicArray<PresentMode> offere
     return Optional::None;
 }
 
-@compileFor(!ARCH_WASM32)
 fn Optional<AlphaMode> alphaNotIn(const ref DynamicArray<AlphaMode> offered) {
     DynamicArray<AlphaMode> all = alphas1(a: AlphaMode::Premultiplied);
     all.add(item: AlphaMode::Unpremultiplied);
@@ -1321,7 +1598,6 @@ fn Optional<AlphaMode> alphaNotIn(const ref DynamicArray<AlphaMode> offered) {
 }
 
 // The first format the surface offers that is linear and has an sRGB form, or None.
-@compileFor(!ARCH_WASM32)
 fn Optional<TextureFormat> linearWithTwin(const ref DynamicArray<TextureFormat> offered) {
     isize i = 0;
     while (i < offered.length()) {
@@ -1334,30 +1610,16 @@ fn Optional<TextureFormat> linearWithTwin(const ref DynamicArray<TextureFormat> 
 }
 
 // Each configure the package must refuse rather than let wgpu-native abort the process (each one measured aborting it,
-// 2026-11-10), then the preferred config, then a grey frame read back through an sRGB view and through a linear one.
-@compileFor(!ARCH_WASM32)
+// 2026-11-10) or a browser throw, then every choice the surface offers, the preferred config, and frames from it.
 unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface early, const ref SurfaceCapabilities caps,
-                              ref Device device, ref Queue queue, uint32 width, uint32 height) {
+                              ref Device device, ref Queue queue) {
     SurfaceConfig preferred = caps.preferred();
-    Result<Unit, ConfigureError> noWidth = surface.configure(device: device, config: preferred, width: 0, height: height);
-    t.verdict(name: "a configure with no width is refused as NoArea, not aborted", why: expectRefusal(got: noWidth, want: "NoArea"));
-    Result<Unit, ConfigureError> noHeight = surface.configure(device: device, config: preferred, width: width, height: 0);
-    t.verdict(name: "a configure with no height is refused as NoArea", why: expectRefusal(got: noHeight, want: "NoArea"));
-
-    Limits limits = device.limits();
-    uint32 most = limits.maxTextureDimension2D;
-    Result<Unit, ConfigureError> wide = surface.configure(device: device, config: preferred, width: most + 1, height: height);
-    t.verdict(name: "a configure past the device's maxTextureDimension2D is refused as TooLarge, naming the most",
-              why: expectRefusal(got: wide, want: "TooLarge ${most}"));
-    Result<Unit, ConfigureError> tall = surface.configure(device: device, config: preferred, width: width, height: most + 1);
-    t.verdict(name: "a configure past it in height is refused as TooLarge", why: expectRefusal(got: tall, want: "TooLarge ${most}"));
-
     Optional<PresentMode> pm = presentNotIn(offered: caps.presentModes());
     match (pm) {
         case Some(value: m): {
             SurfaceConfig c = caps.preferred();
             c.present = m;
-            Result<Unit, ConfigureError> r = surface.configure(device: device, config: c, width: width, height: height);
+            Result<Unit, ConfigureError> r = surface.configure(device: device, config: c);
             t.verdict(name: "a present mode the surface does not offer is refused as NotOffered", why: expectRefusal(got: r, want: "NotOffered"));
         }
         case None: { println(s: "skip a present mode not offered: the surface offers every one"); }
@@ -1367,7 +1629,7 @@ unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface earl
         case Some(value: m): {
             SurfaceConfig c = caps.preferred();
             c.alpha = m;
-            Result<Unit, ConfigureError> r = surface.configure(device: device, config: c, width: width, height: height);
+            Result<Unit, ConfigureError> r = surface.configure(device: device, config: c);
             t.verdict(name: "an alpha mode the surface does not offer is refused as NotOffered", why: expectRefusal(got: r, want: "NotOffered"));
         }
         case None: { println(s: "skip an alpha mode not offered: the surface offers every one"); }
@@ -1375,21 +1637,21 @@ unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface earl
     SurfaceConfig depth = caps.preferred();
     depth.format = TextureFormat::Depth32Float;
     depth.viewFormat = TextureFormat::Depth32Float;
-    Result<Unit, ConfigureError> df = surface.configure(device: device, config: depth, width: width, height: height);
+    Result<Unit, ConfigureError> df = surface.configure(device: device, config: depth);
     t.verdict(name: "a format the surface does not offer is refused as NotOffered", why: expectRefusal(got: df, want: "NotOffered"));
     SurfaceConfig other = caps.preferred();
     other.viewFormat = TextureFormat::RGBA16Float;
-    Result<Unit, ConfigureError> vf = surface.configure(device: device, config: other, width: width, height: height);
+    Result<Unit, ConfigureError> vf = surface.configure(device: device, config: other);
     t.verdict(name: "a view format that changes more than sRGB-ness is refused as NotOffered",
               why: expectRefusal(got: vf, want: "NotOffered"));
     SurfaceConfig unused = caps.preferred();
     unused.usage = 0;
-    Result<Unit, ConfigureError> nu = surface.configure(device: device, config: unused, width: width, height: height);
+    Result<Unit, ConfigureError> nu = surface.configure(device: device, config: unused);
     t.verdict(name: "a configure with no usage is refused as NotOffered", why: expectRefusal(got: nu, want: "NotOffered"));
     if ((caps.usages() & TextureUsage::StorageBinding) == 0) {
         SurfaceConfig storage = caps.preferred();
         storage.usage = TextureUsage::RenderAttachment | TextureUsage::StorageBinding;
-        Result<Unit, ConfigureError> su = surface.configure(device: device, config: storage, width: width, height: height);
+        Result<Unit, ConfigureError> su = surface.configure(device: device, config: storage);
         t.verdict(name: "a usage the surface does not offer is refused as NotOffered", why: expectRefusal(got: su, want: "NotOffered"));
     } else {
         println(s: "skip a usage not offered: the surface offers StorageBinding");
@@ -1398,15 +1660,15 @@ unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface earl
     t.verdict(name: "a surface whose every configure was refused is still refused as NotConfigured",
               why: refusedAs(surface: surface, want: "NotConfigured"));
 
-    // Each choice the surface offers is taken: what the package read agrees with what wgpu-native checks, which would
-    // abort the process on a choice the surface does not offer.
+    // Each choice the surface offers is taken: what the package read agrees with what WebGPU checks, which natively
+    // would abort the process on a choice the surface does not offer.
     string bad = "";
     isize i = 0;
     while (i < caps.formats().length() && bad.isEmpty()) {
         SurfaceConfig c = caps.preferred();
         c.format = caps.formats()[i];
         c.viewFormat = c.format;
-        Result<Unit, ConfigureError> r = surface.configure(device: device, config: c, width: width, height: height);
+        Result<Unit, ConfigureError> r = surface.configure(device: device, config: c);
         string got = refusal(got: r);
         if (got != "ok") { string n = c.format.name(); bad = "format ${n}: ${got}"; }
         i = i + 1;
@@ -1415,7 +1677,7 @@ unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface earl
     while (i < caps.presentModes().length() && bad.isEmpty()) {
         SurfaceConfig c = caps.preferred();
         c.present = caps.presentModes()[i];
-        Result<Unit, ConfigureError> r = surface.configure(device: device, config: c, width: width, height: height);
+        Result<Unit, ConfigureError> r = surface.configure(device: device, config: c);
         string got = refusal(got: r);
         if (got != "ok") { string n = c.present.name(); bad = "present mode ${n}: ${got}"; }
         i = i + 1;
@@ -1424,7 +1686,7 @@ unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface earl
     while (i < caps.alphaModes().length() && bad.isEmpty()) {
         SurfaceConfig c = caps.preferred();
         c.alpha = caps.alphaModes()[i];
-        Result<Unit, ConfigureError> r = surface.configure(device: device, config: c, width: width, height: height);
+        Result<Unit, ConfigureError> r = surface.configure(device: device, config: c);
         string got = refusal(got: r);
         if (got != "ok") { string n = c.alpha.name(); bad = "alpha mode ${n}: ${got}"; }
         i = i + 1;
@@ -1432,14 +1694,14 @@ unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface earl
     if (bad.isEmpty()) {
         SurfaceConfig c = caps.preferred();
         c.usage = caps.usages();
-        Result<Unit, ConfigureError> r = surface.configure(device: device, config: c, width: width, height: height);
+        Result<Unit, ConfigureError> r = surface.configure(device: device, config: c);
         string got = refusal(got: r);
         if (got != "ok") { bad = "every usage it offers at once: ${got}"; }
     }
     t.verdict(name: "every format, present mode, alpha mode and usage the surface offers is taken", why: bad);
 
-    Result<Unit, ConfigureError> taken = surface.configure(device: device, config: preferred, width: width, height: height);
-    t.verdict(name: "the preferred config is taken", why: expectRefusal(got: taken, want: "ok"));
+    Result<Unit, ConfigureError> taken = surface.configure(device: device, config: preferred);
+    t.verdict(name: "the preferred config is taken, at the window's size", why: expectRefusal(got: taken, want: "ok"));
     t.verdict(name: "a configured surface gives a frame", why: drawnOnce(surface: surface, device: device, queue: queue));
     t.verdict(name: "a copy made before the configure gives a frame after it",
               why: drawnOnce(surface: early, device: device, queue: queue));
@@ -1447,93 +1709,9 @@ unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface earl
     Surface adopted = Surface.adopt(raw: surface.raw());
     t.verdict(name: "an adopted surface is taken as configured by its maker",
               why: drawnOnce(surface: adopted, device: device, queue: queue));
-
-    Optional<TextureFormat> lw = linearWithTwin(offered: caps.formats());
-    bool copies = (caps.usages() & TextureUsage::CopySrc) != 0;
-    match (lw) {
-        case Some(value: f): {
-            if (!copies) { println(s: "skip a frame read back: the surface does not offer CopySrc"); return; }
-            SurfaceConfig srgb = caps.preferred();
-            srgb.format = f;
-            srgb.viewFormat = match (f.srgb()) { case Some(value: v): v; case None: f; };
-            srgb.usage = TextureUsage::RenderAttachment | TextureUsage::CopySrc;
-            Result<Unit, ConfigureError> s1 = surface.configure(device: device, config: srgb, width: width, height: height);
-            t.verdict(name: "a linear format through its sRGB view is taken", why: expectRefusal(got: s1, want: "ok"));
-            Result<int32, GpuError> encoded = drawGrey(surface: early, device: device, queue: queue);
-            t.verdict(name: "a frame drawn through the sRGB view, by a copy made before the configure, reads 0.5 grey as 188",
-                      why: greyIs(got: encoded, want: 188));
-            SurfaceConfig linear = srgb;
-            linear.viewFormat = f;
-            Result<Unit, ConfigureError> s2 = surface.configure(device: device, config: linear, width: width, height: height);
-            t.verdict(name: "a linear format through itself is taken", why: expectRefusal(got: s2, want: "ok"));
-            Result<int32, GpuError> plain = drawGrey(surface: surface, device: device, queue: queue);
-            t.verdict(name: "a frame drawn through the linear view reads 0.5 grey as 128", why: greyIs(got: plain, want: 128));
-        }
-        case None: { println(s: "skip a frame read back: the surface offers no linear format with an sRGB form"); }
-    };
-}
-
-@compileFor(!ARCH_WASM32)
-fn string greyIs(const ref Result<int32, GpuError> got, int32 want) {
-    string why = "";
-    match (got) {
-        case Ok(value: v): {
-            if (v < want - 1 || v > want + 1) { why = "read ${v}"; }
-        }
-        case Err(error: e): { why = e.message(); }
-    };
-    return why;
-}
-
-// Acquire a frame, clear it to 0.5 grey through `frame.view()`, copy its top-left PATCH × PATCH texels out, present it,
-// and answer the grey they read: every texel the same grey, and opaque.
-@compileFor(!ARCH_WASM32)
-unsafe fn Result<int32, GpuError> drawGrey(ref Surface surface, ref Device device, ref Queue queue) {
-    Result<SurfaceTexture, SurfaceError> acquired = surface.acquire();
-    SurfaceTexture frame = match (give acquired) {
-        case Ok(value: f): give f;
-        case Err(error: e): { string why = e.message(); return Result::Err(error: GpuError::Refused(words: "no frame: ${why}")); }
-    };
-    TextureView view = frame.view();
-    Texture texture = frame.texture();
-    uint64 bytes = cast<uint64>(ROW) * cast<uint64>(PATCH);
-    Buffer buffer = device.createBuffer(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
-    CommandEncoder encoder = device.createCommandEncoder();
-    RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: 0.5, g: 0.5, b: 0.5, a: 1.0));
-    give pass.end();
-    encoder.copyTextureToBuffer(texture: texture, buffer: buffer, width: PATCH, height: PATCH, bytesPerRow: ROW);
-    CommandBuffer commands = give encoder.finish();
-    queue.submit(commands: give commands);
-    BufferRead read = buffer.mapRead(offset: 0, size: bytes);
-    int32 polls = 0;
-    bool ready = false;
-    while (polls < 100 && !ready) {
-        device.poll(wait: true);
-        ReadStatus status = read.poll();
-        match (give status) {
-            case Pending: { }
-            case Ready: { ready = true; }
-            case Failed(error: e): { give frame.present(); return Result::Err(error: give e); }
-        };
-        polls = polls + 1;
-    }
-    give frame.present();
-    if (!ready) { return Result::Err(error: GpuError::Refused(words: "the readback never mapped")); }
-    DynamicArray<uint8> px = read.bytes();
-    int32 grey = cast<int32>(px[0]);
-    isize i = 0;
-    while (i < px.length()) {
-        if (!near(got: px[i], want: grey) || !near(got: px[i + 1], want: grey) || !near(got: px[i + 2], want: grey)
-            || !near(got: px[i + 3], want: 255)) {
-            uint8 r = px[i];
-            uint8 g = px[i + 1];
-            uint8 b = px[i + 2];
-            uint8 a = px[i + 3];
-            return Result::Err(error: GpuError::Refused(words: "a texel read ${r} ${g} ${b} ${a}, the first ${grey}"));
-        }
-        i = i + 4;
-    }
-    return Result::Ok(value: grey);
+    Result<Unit, ConfigureError> unsized = adopted.configure(device: device, config: preferred);
+    t.verdict(name: "an adopted surface, with no window to size it, is refused as NoWindow: its maker configures it",
+              why: expectRefusal(got: unsized, want: "NoWindow"));
 }
 
 // ---- a device's errors (GPU-1): natively, where an error is in the channel when the call that caused it returns --------

@@ -5,6 +5,18 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **A surface is configured at its window's size** (2026-11-11, kama 0.9.911; GPU-3, AGENTS.gpu.md item 10, decision 2),
+  as a WebGPU canvas's `configure()` takes none. **Breaking:** `surface.configure(device:, config:)` loses `width:` and
+  `height:`; the size is the window's, as `@kama/window`'s `NativeWindow.framebufferSize()` gives it (its WIN-20), so
+  the window stays the one writer of a canvas's pixels. On the web the seam hands emdawnwebgpu a size of 0, which leaves
+  the canvas alone. `NoArea` is a window with no area (minimised) and `TooLarge` one past `maxTextureDimension2D`. New:
+  `ConfigureError::NoWindow`, for an adopted surface, which its maker configures.
+- **The surface cases run in a browser** on the page's canvases, a step a tick, as natively: the refusals, `NoArea` on a
+  canvas the page does not display and `TooLarge` on one 9000 pixels wide, the closed-window cases, and a 0.5 grey frame
+  read back through the sRGB view (188) and a linear one (128). `tests/` is 86 cases natively, 64 in each browser.
+- **`examples/clear` runs in a browser:** a `std::app` `App`, a step a tick, on the page's `#canvas`; the page's query
+  is its arguments (`clear.html?arg=--frames&arg=60`). The gate runs it for 60 frames in each browser.
+
 - **One device per adapter, on every leg** (2026-11-11, kama 0.9.911; GPU-3, AGENTS.gpu.md item 10, decision 1), as a
   browser gives. **Breaking:** once a device request of any copy of an adapter is granted, the adapter is consumed, and
   a later request fails with the new `GpuError::Consumed`, at once and without asking WebGPU; one that settles after

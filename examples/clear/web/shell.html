@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>@kama/gpu clear</title>
+<!--
+  The clear example's page: #canvas, emscripten's own name for a program's canvas, is its window, which `openIn` gives
+  its CSS size. The page's query is the program's arguments (`clear.html?arg=--frames&arg=60`); with none it clears
+  until the page closes. Its output goes to the console, and so does its end, "webtest: exit <status>" from
+  emscripten's `onExit`, which @kama/gpu's browser leg reads (tools/webtest.mjs, a stopgap until kyoten's KY-50).
+-->
+<style>
+  html, body { margin: 0; padding: 0; background: #111; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+  var Module = {
+    arguments: new URLSearchParams(location.search).getAll('arg'),
+    print: function (text) { console.log(text); },
+    printErr: function (text) { console.error(text); },
+    onExit: function (status) { console.log('webtest: exit ' + status); },
+    onAbort: function (what) { console.log('webtest: abort ' + what); },
+  };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
