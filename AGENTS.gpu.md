@@ -409,7 +409,9 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
        screen's resolution is a render to texture scaled into the frame, as dynamic resolution does. An adopted surface
        has no window, so it is configured by its maker, as it is taken to be (GPU-13), and `configure` refuses it.
     3. **`sizedByPage`'s runaway is an investigation of `@kama/window`'s** (its WIN-21), run beside GPU-3. GPU-3's canvas
-       cases open `#canvas` sized by `open`, so they do not wait on it.
+       cases open `#canvas` sized by `open`, so they do not wait on it. **Built on 2026-11-11** (kama-window `caba1f2`):
+       under `sizedByPage`, `open` refuses a canvas the page sizes on neither axis. This suite's `#flat`, which the
+       page does not display, follows neither axis and still opens, so its NoArea case is unchanged (green on it).
     4. **Running a wasm program in a browser is kama's** (kyoten's KY-50: `kama run --target WASM` in a browser, with a
        choice of browser and a hook for trusted input). It is a development need, the same job `kama run` does for
        Android over adb, and kama knows what only the build knows (the shell page, whether a threaded build needs
