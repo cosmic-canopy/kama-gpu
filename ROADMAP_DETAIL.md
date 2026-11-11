@@ -17,7 +17,11 @@ that pass, so the binding serves the library's design rather than the other way 
   exactly what the triangle uses") and from cosmic-forge's `render/src/gpu`.
 - **Questions for when it comes up:**
   - how a descriptor reads in kama, given WebGPU's dictionaries with defaults and kama's lack of optional parameters;
-  - whether pipelines are made asynchronously (`createRenderPipelineAsync`, polled like the requests) or both ways;
+  - whether pipelines are made asynchronously (`createRenderPipelineAsync`, polled like the requests) or both ways.
+    Measured for `@kama/graphics` on 2026-11-11 (kyoten's `docs/research/graphics.md` § 5): wgpu-native's
+    `CreateRenderPipelineAsync` is `unimplemented!()` at v29.0.1.1 and trunk, and its ordinary call compiles in
+    parallel from many threads on one device (48 pipelines 4.7× faster on 8 threads, no errors). So the library needs
+    both: the asynchronous call on the web, and the ordinary one from a worker natively;
   - how a shader's compilation errors reach a program, through a device's channel and its scopes, and `getCompilationInfo`.
 - **Done:** a triangle drawn into a window and into a texture read back, on both legs, with zero hand-written
   releases, and COVERAGE.md's pipeline, binding, sampler and shader rows called.
