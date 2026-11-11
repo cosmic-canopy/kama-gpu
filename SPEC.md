@@ -234,8 +234,8 @@ What each leg's surface answers, measured natively and read for the web (2026-11
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 22 facts, natively;
 - `kama check` on the package and its tests;
 - `tests/`, one program run as a `std::app` `App`: 83 cases natively with a display (51 without), debug and release.
-  Its windows open unfocused, through GLFW's hints, so a run never takes the keyboard (`tests/src/quiet.kama`);
+  Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`);
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
-  `KAMA_WINDOW_NO_DISPLAY` is set;
+  `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
 - the xfail, an encoder used after `finish()`, which must be refused for the move;
 - the wasm build.

@@ -32,7 +32,7 @@ import {
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::Size,
-    addDeviceRef, addSurfaceRef, statesAlive, windowRecords, unfocusedNext,
+    addDeviceRef, addSurfaceRef, statesAlive, windowRecords, quietly,
 };
 
 comptime uint32 SIDE = 64;
@@ -903,8 +903,8 @@ unsafe fn void surfaceCases(ref Check t) {
     string off = envOr(name: "KAMA_WINDOW_NO_DISPLAY", dflt: "");
     if (!off.isEmpty()) { println(s: "skip the surface cases: KAMA_WINDOW_NO_DISPLAY is set"); return; }
     // Declared in the order they must outlive each other: the window, then what presents to it.
-    unfocusedNext();
-    Result<Window, WindowError> opened = Window.open(title: "@kama/gpu tests", width: 320, height: 200);
+    Result<Window, WindowError> opened = Window.openWith(title: "@kama/gpu tests", width: 320, height: 200,
+                                                         options: quietly());
     Window window = match (give opened) {
         case Ok(value: opens): give opens;
         case Err(error: e): { string why = e.message(); t.verdict(name: "a window for the surface cases", why: why); return; }
@@ -966,8 +966,8 @@ unsafe fn void surfaceCases(ref Check t) {
 // A surface on a window of its own, the window dropped on the way out.
 @compileFor(!ARCH_WASM32)
 unsafe fn Result<Surface, GpuError> surfaceOutlivingWindow(const ref Instance instance) {
-    unfocusedNext();
-    Result<Window, WindowError> opened = Window.open(title: "@kama/gpu closed window", width: 160, height: 100);
+    Result<Window, WindowError> opened = Window.openWith(title: "@kama/gpu closed window", width: 160, height: 100,
+                                                         options: quietly());
     Window window = match (give opened) {
         case Ok(value: opens): give opens;
         case Err(error: e): { string why = e.message(); return Result::Err(error: GpuError::Refused(words: give why)); }
@@ -990,8 +990,8 @@ unsafe fn Optional<AdapterOptions> optionsOutlivingWindow(const ref Instance ins
 // A frame acquired from a configured surface on a window of its own, the surface and the window dropped on the way out.
 @compileFor(!ARCH_WASM32)
 unsafe fn Optional<SurfaceTexture> frameOutlivingWindow(const ref Instance instance, ref Device device, const ref SurfaceConfig config) {
-    unfocusedNext();
-    Result<Window, WindowError> opened = Window.open(title: "@kama/gpu held frame", width: 160, height: 100);
+    Result<Window, WindowError> opened = Window.openWith(title: "@kama/gpu held frame", width: 160, height: 100,
+                                                         options: quietly());
     Window window = match (give opened) {
         case Ok(value: opens): give opens;
         case Err(error: e): { string why = e.message(); println(s: "info no window for the held frame: ${why}"); return Optional::None; }

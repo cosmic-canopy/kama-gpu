@@ -1,7 +1,8 @@
 // clear: a window cleared to a slowly changing colour every frame, on @kama/gpu and @kama/window. Escape or the close
 // button quits; a resize reconfigures the surface, and while the window has no area (minimised) frames are skipped.
-// `clear --frames N` presents N frames and exits, for a check that needs no hand on the keyboard. It prints how many
-// frames it presented and how many errors WebGPU reported to its device, and its exit status is 1 when it did.
+// `clear --frames N` presents N frames and exits, for a check that needs no hand on the keyboard, and opens without
+// taking the focus. It prints how many frames it presented and how many errors WebGPU reported to its device, and its
+// exit status is 1 when it did.
 //
 // The surface is configured from what it offers the adapter: `caps.preferred()`, its first format drawn through its
 // sRGB form, so the colours are the same on every leg.
@@ -19,7 +20,7 @@ import {
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::ConfigureError, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass, gpu::CommandBuffer, gpu::Color,
     gpu::DeviceErrors,
-    window::Window, window::WindowError, window::Event, window::Key, window::Size,
+    window::Window, window::WindowOptions, window::WindowError, window::Event, window::Key, window::Size,
 };
 
 // `--frames N`, or 0 for no limit.
@@ -93,7 +94,12 @@ unsafe fn Fit fit(ref Surface surface, const ref Device device, const ref Surfac
 
 unsafe fn uint8 run() {
     int32 limit = frameLimit();
-    Result<Window, WindowError> opened = Window.open(title: "@kama/gpu clear", width: 640, height: 400);
+    // A check (`--frames N`) needs no hand on the keyboard, so it leaves the focus where it is; run by hand, the window
+    // takes it, as a program's should.
+    WindowOptions options = WindowOptions.make();
+    options.focused = limit == 0;
+    Result<Window, WindowError> opened = Window.openWith(title: "@kama/gpu clear", width: 640, height: 400,
+                                                         options: options);
     Window window = match (give opened) {
         case Ok(value: w): give w;
         case Err(error: e): { string why = e.message(); println(s: "clear: no window: ${why}"); return 1; }
