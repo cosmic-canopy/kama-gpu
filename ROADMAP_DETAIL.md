@@ -14,8 +14,11 @@ before anything is built on what it was assumed to do.
 
 - **It starts once `@kama/window` has its web half** (its WIN-3), a window on a canvas whose `nativeHandle()` names the
   canvas, which `Surface.make` already takes as `NativeKind::Canvas`.
-- **The tests run in a browser with WebGPU**, as a leg of `tools/test.sh`. A page served from localhost to headless
-  Edge prints its console to stderr (`msedge --headless=new --enable-logging=stderr --dump-dom <url>`).
+- **The tests run in a browser with WebGPU**, as a leg of `tools/test.sh`. `--dump-dom` cannot run them: measured on
+  2026-11-11 (kyoten's `.scratch/win3-web/`), it returns at the page's load, before emscripten's `main` has run, with
+  no console line. `@kama/window`'s browser leg is the shape to take: `tools/webtest.mjs` (node, no npm packages)
+  serves the tests' own page and drives headless Edge over the DevTools protocol, reading the console to the summary
+  line, an abort or a time limit (its AGENTS.window.md item 8, decision 10).
 - **What it measures, for the first time:**
   - a canvas surface's capabilities, so the SPEC's web column is measured, not read;
   - the limits and features (the tests hold `maxBindGroupsPlusVertexBuffers` to 24 and expect `CoreFeaturesAndLimits`
