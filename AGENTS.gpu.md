@@ -40,8 +40,8 @@ in; *as an engine renderer* they stay out.
 **[SPEC.md](SPEC.md) is what the package is, [ROADMAP.md](ROADMAP.md) what comes next, and [COVERAGE.md](COVERAGE.md)
 which of webgpu.h it calls.** In short (2026-11-10, kama 0.9.911): offscreen work and a surface on a window run natively
 on Windows, the web leg builds and has not run, the safe API calls 55 of webgpu.h's 206 functions, and a device's
-errors reach its own holders (GPU-1, built), and a surface holds its window (GPU-2, built). GPU-3, the web leg, is
-next, after `@kama/window`'s web half (WIN-3).
+errors reach its own holders (GPU-1, built), and a surface holds its window (GPU-2, built). GPU-13, an acquire
+before a configure refused, is next, then GPU-3, the web leg, after `@kama/window`'s web half (WIN-3).
 `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
@@ -346,7 +346,8 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
    **Found on the way, measured 3 of 3 (the probe's `unconfigured` case):** an acquire on a surface never configured
    aborts the process. wgpu-native panics with "Error in wgpuSurfaceGetCurrentTexture: Validation Error. Surface is not
    configured for presentation". `surface.acquire()` before a successful `configure` reaches it today. It is not
-   GPU-2's, and is put to the owner.
+   GPU-2's. **Decided** (the owner, 2026-11-10, as recommended): a new `SurfaceError::NotConfigured`, over reusing
+   `Outdated`, which a program treats as a routine resize; GPU-13 builds it.
 
    **Stopgap, replaced: the surface had to be dropped before its window,** documented on `Surface`, because a `Window`
    was not counted, so a lifetime rule lived only in documentation in a safe API.
