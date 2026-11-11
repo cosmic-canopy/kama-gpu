@@ -86,6 +86,28 @@ None is on the web. Which belong in the safe API, and how a feature beyond the w
 first, native at parity", is `@kama/graphics`' design pass's question of what goes beyond WebGPU (ray queries, mesh
 shaders), and this row follows its answer.
 
+**The answer** (kyoten's `docs/design/rendering.md` § Decided, area 4, the owner, 2026-11-11):
+- **A native feature is offered as a device feature,** which the library's techniques read to pick a method, so a
+  missing one never stops a program. Among them, all reachable in v29:
+  - binding arrays;
+  - multi-draw indirect with a count;
+  - 64-bit atomics;
+  - multiview;
+  - subgroups.
+- **Ray tracing and mesh shaders come through wgpu-native's PR #630,** which declares them in C, and which kyoten helps
+  land. Until it merges, a build of its branch is pinned for the native ray-tracing leg only. That pin is a stopgap,
+  replaced by wgpu-native's release.
+- **Probed on 2026-11-11** (kyoten's `docs/research/graphics.md` § 6; PR head `8322fe1` over Vulkan on the AMD Radeon
+  880M):
+  - ray queries matched the CPU on every ray of a 64 × 32 grid, against two instances of one BLAS;
+  - a task stage launching four mesh workgroups drew a 64 × 64 target pixel for pixel;
+  - there were no validation errors.
+
+  **A device must ask for the acceleration-structure and mesh limits,** which default to 0 as in Rust's wgpu. The probe
+  asked for the adapter's.
+- **The native handles a vendor upscaler needs** (the raw Vulkan or D3D12 device) are not in v29 or in #630, which adds
+  Metal's only. They are one more C API addition, by the same path.
+
 <a id="platforms"></a>
 ## GPU-11: a surface on every platform
 

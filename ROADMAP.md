@@ -31,6 +31,6 @@ sections in the order `@kama/graphics` pulls them.
 | GPU-7 | **Indirect draws and dispatches, and render bundles** | [detail](ROADMAP_DETAIL.md#indirect) |
 | GPU-8 | **The rest of webgpu.h**, from COVERAGE.md's uncalled rows: uploads and copies, mapped writes, labels and debug groups, external textures, WGSL language features, asynchronous pipelines, compilation info | [detail](ROADMAP_DETAIL.md#the-rest) |
 | GPU-9 | **A safe destroy** for buffers, textures, query sets and devices, its form decided when the row comes up | [detail](ROADMAP_DETAIL.md#destroy) |
-| GPU-10 | **wgpu-native's own extensions** (`wgpu.h`): which belong, decided with `@kama/graphics`' question of what goes beyond WebGPU | [detail](ROADMAP_DETAIL.md#extensions) |
+| GPU-10 | **wgpu-native's own extensions** (`wgpu.h`), as `@kama/graphics`' design pass decided: native features offered as device features, and ray tracing and mesh shaders through wgpu-native PR #630, pinned until it merges | [detail](ROADMAP_DETAIL.md#extensions) |
 | GPU-11 | **A surface on every platform**: X11, Wayland and Cocoa through `@kama/window`'s native handles, and Android's window | [detail](ROADMAP_DETAIL.md#platforms) |
 | GPU-12 | **The first publish**: `tests/` green on every target the package claims, the web included, the stopgaps gone, and `@kama/window` published first | [detail](ROADMAP_DETAIL.md#publish) |
