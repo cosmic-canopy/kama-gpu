@@ -38,6 +38,8 @@ import {
 comptime uint32 SIDE = 64;
 comptime uint32 ROW = 256;      // 64 texels × 4 bytes: already the 256 a copy's rows are aligned to
 comptime int64 TIMEOUT_MS = 10000;
+comptime int32 ADAPTERS = 6;    // the clear's device, a raised limit, one past the adapter's, every feature, one it lacks,
+                                // and two requests at once
 
 // The clear colour, and the bytes an RGBA8Unorm texel holds for it (0.25, 0.5, 0.75 of 255, rounded either way).
 comptime float64 RED = 0.25;
@@ -76,8 +78,10 @@ fn string first(const ref DynamicArray<string> faults) {
 fn uint64 w(uint32 v) { return cast<uint64>(v); }
 
 // wgpu-native (v29.0.1.1) does not report `maxBindGroupsPlusVertexBuffers`: an adapter and a device both answer 0 for
-// it (measured 2026-11-10). The package answers what the implementation says, so natively that one 0 is accepted, and
-// on the web, where the browser reports it, it is held like the rest.
+// it (measured 2026-11-10). Nor does a device it makes answer WebGPU's `maxImmediateSize` of 64: immediates are a feature
+// of its own there, off unless asked, so the device answers 0 while the adapter answers 256 (measured 2026-11-11). The
+// package answers what the implementation says, so natively those 0s are accepted, and on the web, where the browser
+// reports both (24 and 64), they are held like the rest.
 @compileFor(ARCH_WASM32)
 fn bool unreported(uint32 v) { return false; }
 @compileFor(!ARCH_WASM32)
@@ -157,7 +161,8 @@ fn string equal(const ref Limits have, const ref Limits want) {
     f.add(item: same(name: "maxComputeWorkgroupSizeY", have: w(v: have.maxComputeWorkgroupSizeY), want: w(v: want.maxComputeWorkgroupSizeY)));
     f.add(item: same(name: "maxComputeWorkgroupSizeZ", have: w(v: have.maxComputeWorkgroupSizeZ), want: w(v: want.maxComputeWorkgroupSizeZ)));
     f.add(item: same(name: "maxComputeWorkgroupsPerDimension", have: w(v: have.maxComputeWorkgroupsPerDimension), want: w(v: want.maxComputeWorkgroupsPerDimension)));
-    f.add(item: same(name: "maxImmediateSize", have: w(v: have.maxImmediateSize), want: w(v: want.maxImmediateSize)));
+    f.add(item: unreported(v: have.maxImmediateSize) ? ""
+                : same(name: "maxImmediateSize", have: w(v: have.maxImmediateSize), want: w(v: want.maxImmediateSize)));
     return first(faults: f);
 }
 
@@ -411,15 +416,60 @@ fn string expectRefusal(const ref Result<Unit, ConfigureError> got, const ref st
     return "got ${have}, not ${want}";
 }
 
+// Adapters asked of the instance together and handed out one at a time. WebGPU gives an adapter one device (AGENTS.gpu.md
+// item 10, decision 1), so each device a case asks for comes from an adapter of its own.
+type resource AdapterPool {
+    DynamicArray<AdapterRequest> asked = DynamicArray.empty();
+    DynamicArray<Adapter> ready = DynamicArray.empty();
+    string failure = "";
+
+    public unsafe ctor make(ref Instance instance, int32 count) {
+        int32 i = 0;
+        while (i < count) {
+            this.asked.add(item: instance.requestAdapter(options: AdapterOptions.make(power: PowerPreference::HighPerformance)));
+            i = i + 1;
+        }
+    }
+
+    // Polls each request still pending: true once none is.
+    public unsafe fn bool settled() {
+        isize i = 0;
+        while (i < this.asked.length()) {
+            AdapterStatus s = this.asked[i].poll();
+            match (give s) {
+                case Pending: { i = i + 1; }
+                case Ready(adapter: a): { AdapterRequest settledOne = this.asked.remove(index: i); this.ready.add(item: give a); }
+                case Failed(error: e): { AdapterRequest settledOne = this.asked.remove(index: i); this.failure = e.message(); }
+            };
+        }
+        return this.asked.length() == 0;
+    }
+
+    public const fn isize count() { return this.ready.length(); }
+    public const fn string failedWith() { return copy this.failure; }
+    public unsafe fn Optional<Adapter> take() { return this.ready.pop(); }
+}
+
+fn bool isConsumed(const ref GpuError e) { return match (e) { case Consumed: true; case _: false; }; }
+
 type resource Check implements App {
     Optional<Instance> instance = Optional::None;
-    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<AdapterPool> pool = Optional::None;      // the adapters, one for each device below
     Optional<Adapter> adapter = Optional::None;
+    Optional<Adapter> refusedAdapter = Optional::None;  // the adapter `beyond` was asked of, asked again once refused
     Optional<DeviceRequest> request = Optional::None;     // WebGPU's defaults: the device the clear runs on
     Optional<DeviceRequest> raised = Optional::None;      // one limit raised to the adapter's
     Optional<DeviceRequest> beyond = Optional::None;      // one limit past the adapter's
     Optional<DeviceRequest> lacking = Optional::None;     // a feature the adapter lacks
     Optional<DeviceRequest> every = Optional::None;       // every feature the adapter has
+    Optional<DeviceRequest> again = Optional::None;       // a second device from the adapter that gave `request`'s
+    Optional<DeviceRequest> viaCopy = Optional::None;     // the same, through a copy of that adapter
+    Optional<DeviceRequest> afterRefusal = Optional::None; // a good request of the adapter that refused `beyond`
+    Optional<DeviceRequest> pairFirst = Optional::None;   // two requests made at once of one adapter
+    Optional<DeviceRequest> pairSecond = Optional::None;
+    int32 pairGranted = 0;
+    int32 pairConsumed = 0;
+    int32 pairOther = 0;
     FeatureSet offered = FeatureSet.empty();
     uint32 raisedTo = 0;
     int32 open = 0;                                       // device requests not settled yet
@@ -439,7 +489,7 @@ type resource Check implements App {
         Result<Instance, GpuError> made = Instance.make();
         match (give made) {
             case Ok(value: inst): {
-                this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.make(power: PowerPreference::HighPerformance)));
+                this.pool = Optional::Some(value: AdapterPool.make(instance: inst, count: ADAPTERS));
                 this.instance = Optional::Some(value: give inst);
             }
             case Err(error: e): {
@@ -486,82 +536,91 @@ type resource Check implements App {
     }
 
     unsafe fn void awaitAdapter() {
-        Optional<AdapterRequest> taken = replace(place: this.adapterRequest, with: Optional::None);
+        Optional<AdapterPool> taken = replace(place: this.pool, with: Optional::None);
         match (give taken) {
-            case None: { this.verdict(name: "an adapter request", why: "there was none"); this.stage = 3; }
-            case Some(value: r): {
-                AdapterStatus status = r.poll();
-                this.adapterRequest = Optional::Some(value: give r);
-                match (give status) {
-                    case Pending: { }
-                    case Ready(adapter: a): {
-                        this.adapterRequest = Optional::None;
-                        this.verdict(name: "an adapter, asked of the instance", why: "");
-                        this.askAdapter(adapter: a);
-                        this.adapter = Optional::Some(value: give a);
-                        this.stage = 1;
-                    }
-                    case Failed(error: e): {
-                        this.adapterRequest = Optional::None;
-                        string why = e.message();
-                        this.verdict(name: "an adapter, asked of the instance", why: why);
-                        this.stage = 3;
-                    }
-                };
+            case None: { this.verdict(name: "adapters, asked of the instance", why: "there was no request"); this.stage = 3; }
+            case Some(value: p): {
+                bool done = p.settled();
+                if (!done) { this.pool = Optional::Some(value: give p); return; }
+                isize n = p.count();
+                if (n < cast<isize>(ADAPTERS)) {
+                    string words = p.failedWith();
+                    this.verdict(name: "adapters, asked of the instance", why: "${n} of ${ADAPTERS} given: ${words}");
+                    this.stage = 3;
+                    return;
+                }
+                this.verdict(name: "adapters, asked of the instance", why: "");
+                this.askAdapters(pool: p);
+                this.stage = 1;
             }
         };
     }
 
-    // What the adapter answers, then four devices asked of it at once.
-    unsafe fn void askAdapter(ref Adapter adapter) {
-        AdapterInfo info = adapter.info();
+    // What an adapter answers, then a device asked of each adapter, at once.
+    unsafe fn void askAdapters(ref AdapterPool pool) {
+        Adapter primary = match (pool.take()) { case Some(value: a): give a; case None: { return; } };
+        Adapter raising = match (pool.take()) { case Some(value: a): give a; case None: { return; } };
+        Adapter past = match (pool.take()) { case Some(value: a): give a; case None: { return; } };
+        Adapter whole = match (pool.take()) { case Some(value: a): give a; case None: { return; } };
+        Adapter lacks = match (pool.take()) { case Some(value: a): give a; case None: { return; } };
+        Adapter both = match (pool.take()) { case Some(value: a): give a; case None: { return; } };
+        this.pairFirst = Optional::Some(value: both.requestDevice(options: DeviceOptions.defaults()));
+        this.pairSecond = Optional::Some(value: both.requestDevice(options: DeviceOptions.defaults()));
+        this.open = this.open + 2;
+        AdapterInfo info = primary.info();
         Backend backend = info.backend();
         bool named = match (backend) { case Undefined: false; case Null: false; case _: true; };
         string description = info.description();
         println(s: "info the adapter: ${description}");
         this.verdict(name: "the adapter names its backend", why: named ? "" : "its backend is Undefined or Null");
-        Limits limits = adapter.limits();
+        Limits limits = primary.limits();
         Limits defaults = Limits.defaults();
         string below = meets(have: limits, want: defaults);
         this.verdict(name: "the adapter's limits meet WebGPU's defaults", why: below);
 
-        this.request = Optional::Some(value: adapter.requestDevice(options: DeviceOptions.defaults()));
-        this.open = 1;
+        this.request = Optional::Some(value: primary.requestDevice(options: DeviceOptions.defaults()));
+        this.open = this.open + 1;
 
         uint32 top = limits.maxTextureDimension2D;
         if (top > defaults.maxTextureDimension2D) {
             DeviceOptions up = DeviceOptions.defaults();
             up.limits.maxTextureDimension2D = top;
             this.raisedTo = top;
-            this.raised = Optional::Some(value: adapter.requestDevice(options: up));
+            this.raised = Optional::Some(value: raising.requestDevice(options: up));
             this.open = this.open + 1;
         } else {
             println(s: "skip a raised limit: the adapter's maxTextureDimension2D is WebGPU's default, ${top}");
         }
 
-        DeviceOptions past = DeviceOptions.defaults();
-        past.limits.maxTextureDimension2D = top + 1;
-        this.beyond = Optional::Some(value: adapter.requestDevice(options: past));
+        DeviceOptions pastLimit = DeviceOptions.defaults();
+        pastLimit.limits.maxTextureDimension2D = top + 1;
+        this.beyond = Optional::Some(value: past.requestDevice(options: pastLimit));
         this.open = this.open + 1;
+        this.refusedAdapter = Optional::Some(value: give past);
 
-        FeatureSet has = adapter.features();
+        FeatureSet has = primary.features();
         this.verdict(name: "the adapter answers its features", why: answered(has: has));
         DeviceOptions all = DeviceOptions.defaults();
         all.features = has;
         this.offered = has;
-        this.every = Optional::Some(value: adapter.requestDevice(options: all));
+        this.every = Optional::Some(value: whole.requestDevice(options: all));
         this.open = this.open + 1;
         Optional<Feature> missing = lackedBy(has: has);
         match (missing) {
             case Some(value: f): {
                 DeviceOptions wants = DeviceOptions.defaults();
                 wants.features = wants.features.with(feature: f);
-                this.lacking = Optional::Some(value: adapter.requestDevice(options: wants));
+                this.lacking = Optional::Some(value: lacks.requestDevice(options: wants));
                 this.open = this.open + 1;
             }
             case None: { println(s: "skip a feature the adapter lacks: it has every candidate"); }
         };
-        errorCases(t: this, adapter: adapter);
+        Optional<Instance> held = match (this.instance) { case Some(value: i): Optional::Some(value: copy i); case None: Optional::None; };
+        match (give held) {
+            case Some(value: inst): { errorCases(t: this, instance: inst); }
+            case None: { }
+        };
+        this.adapter = Optional::Some(value: give primary);
     }
 
     unsafe fn void awaitDevices() {
@@ -572,6 +631,15 @@ type resource Check implements App {
                 case Ready(device: d, queue: q): {
                     this.open = this.open - 1;
                     this.verdict(name: "a device and its queue, from the adapter", why: "");
+                    match (this.adapter) {
+                        case Some(value: a): {
+                            this.again = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                            Adapter twin = copy a;
+                            this.viaCopy = Optional::Some(value: twin.requestDevice(options: DeviceOptions.defaults()));
+                            this.open = this.open + 2;
+                        }
+                        case None: { }
+                    };
                     Limits got = d.limits();
                     Limits defaults = Limits.defaults();
                     string off = equal(have: got, want: defaults);
@@ -622,6 +690,13 @@ type resource Check implements App {
                     println(s: "info refused: ${why}");
                     this.verdict(name: "a limit past the adapter's is refused, in the implementation's words",
                                  why: why.isEmpty() ? "refused with no words" : "");
+                    match (this.refusedAdapter) {
+                        case Some(value: a): {
+                            this.afterRefusal = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                            this.open = this.open + 1;
+                        }
+                        case None: { }
+                    };
                 }
             };
         }
@@ -659,7 +734,74 @@ type resource Check implements App {
                 }
             };
         }
+        if (this.again.isSome()) {
+            DeviceStatus s = pollOne(slot: this.again);
+            this.consumedCase(s: give s, name: "a second device from an adapter that gave one is refused as Consumed");
+        }
+        if (this.viaCopy.isSome()) {
+            DeviceStatus s = pollOne(slot: this.viaCopy);
+            this.consumedCase(s: give s, name: "a copy of an adapter that gave a device is consumed too");
+        }
+        if (this.afterRefusal.isSome()) {
+            DeviceStatus s = pollOne(slot: this.afterRefusal);
+            match (give s) {
+                case Pending: { }
+                case Ready(device: d, queue: q): {
+                    this.open = this.open - 1;
+                    this.verdict(name: "a request refused for a limit leaves its adapter unconsumed: a good one is granted", why: "");
+                }
+                case Failed(error: e): {
+                    this.open = this.open - 1;
+                    string why = e.message();
+                    this.verdict(name: "a request refused for a limit leaves its adapter unconsumed: a good one is granted",
+                                 why: "refused: " + why);
+                }
+            };
+        }
+        if (this.pairFirst.isSome()) {
+            DeviceStatus s = pollOne(slot: this.pairFirst);
+            this.pairSettles(s: give s);
+        }
+        if (this.pairSecond.isSome()) {
+            DeviceStatus s = pollOne(slot: this.pairSecond);
+            this.pairSettles(s: give s);
+        }
         if (this.open == 0 && this.stage == 1) { this.stage = 2; }
+    }
+
+    // One of two requests made at once of one adapter: the first answered gets the device, and the other is refused as
+    // Consumed, whether the package refuses it (natively, where the first is granted inside its call) or the browser does.
+    unsafe fn void pairSettles(DeviceStatus s) {
+        bool settled = true;
+        match (give s) {
+            case Pending: { settled = false; }
+            case Ready(device: d, queue: q): { this.pairGranted = this.pairGranted + 1; }
+            case Failed(error: e): {
+                if (isConsumed(e: e)) { this.pairConsumed = this.pairConsumed + 1; }
+                else { this.pairOther = this.pairOther + 1; string why = e.message(); println(s: "info the pair: ${why}"); }
+            }
+        };
+        if (!settled) { return; }
+        this.open = this.open - 1;
+        if (this.pairGranted + this.pairConsumed + this.pairOther < 2) { return; }
+        int32 g = this.pairGranted;
+        int32 c = this.pairConsumed;
+        int32 o = this.pairOther;
+        this.verdict(name: "two requests made at once of one adapter: one device, and the other refused as Consumed",
+                     why: g == 1 && c == 1 ? "" : "${g} granted, ${c} refused as Consumed, ${o} refused otherwise");
+    }
+
+    // A request of a consumed adapter: refused as Consumed, at once and without asking WebGPU, on every leg.
+    unsafe fn void consumedCase(DeviceStatus s, const ref string name) {
+        match (give s) {
+            case Pending: { this.open = this.open - 1; this.verdict(name: name, why: "still pending, where it is refused at once"); }
+            case Ready(device: d, queue: q): { this.open = this.open - 1; this.verdict(name: name, why: "a device was given"); }
+            case Failed(error: e): {
+                this.open = this.open - 1;
+                string why = e.message();
+                this.verdict(name: name, why: isConsumed(e: e) ? "" : "refused otherwise: " + why);
+            }
+        };
     }
 
     // Clear a texture, copy it to a buffer, and ask for the buffer's bytes.
@@ -877,7 +1019,13 @@ type resource Check implements App {
         this.lacking = Optional::None;
         this.every = Optional::None;
         this.adapter = Optional::None;
-        this.adapterRequest = Optional::None;
+        this.again = Optional::None;
+        this.viaCopy = Optional::None;
+        this.afterRefusal = Optional::None;
+        this.pairFirst = Optional::None;
+        this.pairSecond = Optional::None;
+        this.refusedAdapter = Optional::None;
+        this.pool = Optional::None;
         this.instance = Optional::None;
         int64 alive = statesAlive();
         this.verdict(name: "every device's state is freed with its last handle",
@@ -1457,13 +1605,15 @@ unsafe fn CommandEncoder badCopy(ref Device device) {
 }
 
 @compileFor(ARCH_WASM32)
-unsafe fn void errorCases(ref Check t, ref Adapter adapter) {
+unsafe fn void errorCases(ref Check t, ref Instance instance) {
     println(s: "skip the error cases: the web reports an error a task later, and its leg runs in a browser with GPU-3");
 }
 
-// A device asked of `adapter`; natively it is answered as soon as it is polled.
+// A device asked of an adapter of its own; natively both are answered as soon as they are polled.
 @compileFor(!ARCH_WASM32)
-unsafe fn Optional<Device> deviceNow(ref Check t, ref Adapter adapter, const ref string purpose) {
+unsafe fn Optional<Device> deviceNow(ref Check t, ref Instance instance, const ref string purpose) {
+    Optional<Adapter> fresh = adapterNow(t: t, instance: instance, purpose: purpose);
+    Adapter adapter = match (give fresh) { case Some(value: a): give a; case None: { return Optional::None; } };
     DeviceRequest request = adapter.requestDevice(options: DeviceOptions.defaults());
     int32 polls = 0;
     while (polls < 1000) {
@@ -1479,14 +1629,32 @@ unsafe fn Optional<Device> deviceNow(ref Check t, ref Adapter adapter, const ref
     return Optional::None;
 }
 
+// An adapter of the instance; natively it is answered as soon as it is polled.
 @compileFor(!ARCH_WASM32)
-unsafe fn void errorCases(ref Check t, ref Adapter adapter) {
-    Optional<Device> asked = deviceNow(t: t, adapter: adapter, purpose: "a device for the error cases");
+unsafe fn Optional<Adapter> adapterNow(ref Check t, ref Instance instance, const ref string purpose) {
+    AdapterRequest asked = instance.requestAdapter(options: AdapterOptions.make(power: PowerPreference::HighPerformance));
+    int32 polls = 0;
+    while (polls < 1000) {
+        AdapterStatus s = asked.poll();
+        match (give s) {
+            case Pending: { }
+            case Ready(adapter: a): { return Optional::Some(value: give a); }
+            case Failed(error: e): { string why = e.message(); t.verdict(name: purpose, why: "no adapter: " + why); return Optional::None; }
+        };
+        polls = polls + 1;
+    }
+    t.verdict(name: purpose, why: "the adapter request never settled");
+    return Optional::None;
+}
+
+@compileFor(!ARCH_WASM32)
+unsafe fn void errorCases(ref Check t, ref Instance instance) {
+    Optional<Device> asked = deviceNow(t: t, instance: instance, purpose: "a device for the error cases");
     Device a = match (give asked) {
         case Some(value: d): give d;
         case None: { return; }
     };
-    Optional<Device> askedAgain = deviceNow(t: t, adapter: adapter, purpose: "a second device for the error cases");
+    Optional<Device> askedAgain = deviceNow(t: t, instance: instance, purpose: "a second device for the error cases");
     Device b = match (give askedAgain) {
         case Some(value: d): give d;
         case None: { return; }
@@ -1552,6 +1720,8 @@ unsafe fn void errorCases(ref Check t, ref Adapter adapter) {
     t.verdict(name: "a drain starts the count of what was dropped again", why: errorsSaid(errs: emptied));
 
     // An adopted device keeps its maker's callback: its errors reach the package's channel of the device it came from.
+    Optional<Adapter> another = adapterNow(t: t, instance: instance, purpose: "an adapter for the adopted device");
+    Adapter adapter = match (give another) { case Some(value: x): give x; case None: { return; } };
     addDeviceRef(device: a.raw());
     Device adopted = Device.adopt(raw: a.raw(), adapter: adapter);
     Buffer viaAdopted = badBuffer(device: adopted);
@@ -1563,15 +1733,17 @@ unsafe fn void errorCases(ref Check t, ref Adapter adapter) {
     else { adopt = holds(errs: maker, want: 1, kind: GpuErrorKind::Validation); }
     t.verdict(name: "an adopted device says its errors are not watched, and they reach its maker", why: adopt);
 
-    scopeCases(t: t, adapter: adapter);
-    spoiledCases(t: t, adapter: adapter);
-    outlivesCase(t: t, adapter: adapter);
+    scopeCases(t: t, instance: instance);
+    spoiledCases(t: t, instance: instance);
+    outlivesCase(t: t, instance: instance);
 }
 
 // A command buffer whose finish reported an error is never submitted natively, where wgpu-native would end the process
 // (tests/facts, `abort-submit`); a browser refuses the same submit after reporting it.
 @compileFor(!ARCH_WASM32)
-unsafe fn void spoiledCases(ref Check t, ref Adapter adapter) {
+unsafe fn void spoiledCases(ref Check t, ref Instance instance) {
+    Optional<Adapter> fresh = adapterNow(t: t, instance: instance, purpose: "a device for the finish cases");
+    Adapter adapter = match (give fresh) { case Some(value: a): give a; case None: { return; } };
     DeviceRequest request = adapter.requestDevice(options: DeviceOptions.defaults());
     int32 polls = 0;
     while (polls < 1000) {
@@ -1649,8 +1821,8 @@ unsafe fn void dropScope(ref Device device) {
 
 // Error scopes, which the seam keeps natively: WebGPU's rules, and none of wgpu-native's aborting paths reachable.
 @compileFor(!ARCH_WASM32)
-unsafe fn void scopeCases(ref Check t, ref Adapter adapter) {
-    Optional<Device> asked = deviceNow(t: t, adapter: adapter, purpose: "a device for the scope cases");
+unsafe fn void scopeCases(ref Check t, ref Instance instance) {
+    Optional<Device> asked = deviceNow(t: t, instance: instance, purpose: "a device for the scope cases");
     Device d = match (give asked) {
         case Some(value: x): give x;
         case None: { return; }
@@ -1753,8 +1925,8 @@ unsafe fn void scopeCases(ref Check t, ref Adapter adapter) {
 // A device's state outlives the device while a handle made from it lives: wgpu-native reports the handle's errors to the
 // device's callback after the device's last release (tests/facts, `afterrelease`).
 @compileFor(!ARCH_WASM32)
-unsafe fn void outlivesCase(ref Check t, ref Adapter adapter) {
-    Optional<Device> made = deviceNow(t: t, adapter: adapter, purpose: "a device to drop before its encoder");
+unsafe fn void outlivesCase(ref Check t, ref Instance instance) {
+    Optional<Device> made = deviceNow(t: t, instance: instance, purpose: "a device to drop before its encoder");
     int64 before = statesAlive();
     Optional<CommandEncoder> kept = Optional::None;
     match (give made) {

@@ -6,6 +6,7 @@
   "description": "@kama/gpu's tests: an offscreen clear read back, every handle released by its destructor",
   "entry": "src/main.kama",
   "webgpu": true,
+  "shellFile": "web/shell.html",
   "modules": {
     ".": { "visibility": "internal" }
   },

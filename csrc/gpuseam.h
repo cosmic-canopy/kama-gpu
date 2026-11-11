@@ -63,17 +63,33 @@ void gpuseam_adapter_info_numbers(WGPUAdapter adapter, int32_t *backend, int32_t
 int32_t gpuseam_adapter_features(WGPUAdapter adapter, int32_t *dst, int32_t capacity);
 int32_t gpuseam_device_features(WGPUDevice device, int32_t *dst, int32_t capacity);
 
+// ---- whether an adapter has given a device ----
+
+// WebGPU gives an adapter one device: once a request is granted the adapter is consumed, and a browser refuses a later
+// one. wgpu-native grants it, so the package keeps the rule on every leg (AGENTS.gpu.md item 10, decision 1). A mark is
+// shared by an adapter's copies and the requests made of them, counted, and freed with its last holder.
+typedef struct gpuseam_adapter_mark gpuseam_adapter_mark;
+
+// A mark not consumed, with one holder. NULL only when it cannot be allocated.
+gpuseam_adapter_mark *gpuseam_adapter_mark_new(void);
+void gpuseam_adapter_mark_hold(gpuseam_adapter_mark *mark);
+void gpuseam_adapter_mark_release(gpuseam_adapter_mark *mark);
+// 1 once a device request of the adapter has been granted.
+int32_t gpuseam_adapter_mark_consumed(gpuseam_adapter_mark *mark);
+
 // ---- a device on its way: WebGPU's second step ----
 
 typedef struct gpuseam_device_request gpuseam_device_request;
 
 // Ask `adapter` for a device with `limits` (NULL, or a WGPULimits whose undefined fields take WebGPU's defaults) and
 // `feature_count` WGPUFeatureNames, its uncaptured errors and its loss kept in a state block of its own. `instance` is the
-// one the adapter came from, whose events a poll processes, or NULL for an adapter adopted from elsewhere. The slot holds
-// a reference on each while it lives. NULL only when the slot cannot be allocated.
+// one the adapter came from, whose events a poll processes, or NULL for an adapter adopted from elsewhere. `mark` is the
+// adapter's: a request of a consumed adapter fails at once without asking WebGPU, a granted one consumes it, and one that
+// settles after another consumed it fails, its device released, so every leg keeps WebGPU's rule. The slot holds a
+// reference on each while it lives. NULL only when the slot cannot be allocated.
 gpuseam_device_request *gpuseam_adapter_request_device(WGPUInstance instance, WGPUAdapter adapter,
-                                                       const WGPULimits *limits, const int32_t *features,
-                                                       int32_t feature_count);
+                                                       gpuseam_adapter_mark *mark, const WGPULimits *limits,
+                                                       const int32_t *features, int32_t feature_count);
 // GPUSEAM_PENDING, _READY or _FAILED, after processing the instance's events when it has one.
 int32_t gpuseam_device_request_poll(gpuseam_device_request *request);
 // A READY request's device, handed over once (NULL after).
@@ -82,6 +98,8 @@ WGPUDevice gpuseam_device_request_take_device(gpuseam_device_request *request);
 gpuseam_state *gpuseam_device_request_take_state(gpuseam_device_request *request);
 // A FAILED request's words, copied into `dst` (at most `capacity` bytes, UTF-8, not terminated): their length.
 int32_t gpuseam_device_request_message(gpuseam_device_request *request, uint8_t *dst, int32_t capacity);
+// 1 when a FAILED request failed because its adapter had given a device.
+int32_t gpuseam_device_request_consumed(gpuseam_device_request *request);
 // Done with the slot: freed now, or abandoned to its callback if one is still owed. A device not taken is released.
 void gpuseam_device_request_drop(gpuseam_device_request *request);
 

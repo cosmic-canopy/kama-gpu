@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>@kama/gpu tests</title>
+<!--
+  The page the tests program runs in, in the browser leg (tools/webtest.mjs). #canvas, emscripten's own name for a
+  program's canvas, is what the surface cases open their window on; `open` gives it its CSS size. The program's output
+  goes to the console, which the driver reads, and so does its end: "webtest: exit <status>" from emscripten's
+  `onExit`, or "webtest: abort <what>" from `onAbort` (a stopgap with the driver, kyoten's KY-50). The page's query is
+  the program's arguments: `?arg=--frames&arg=60`.
+-->
+<style>
+  html, body { margin: 0; padding: 0; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+  var Module = {
+    arguments: new URLSearchParams(location.search).getAll('arg'),
+    print: function (text) { console.log(text); },
+    printErr: function (text) { console.error(text); },
+    onExit: function (status) { console.log('webtest: exit ' + status); },
+    onAbort: function (what) { console.log('webtest: abort ' + what); },
+  };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>

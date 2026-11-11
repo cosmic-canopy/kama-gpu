@@ -56,7 +56,8 @@ import {
     gpu::native::adapterRequestMessage, gpu::native::adapterRequestDrop,
     gpu::native::adapterInfoText, gpu::native::adapterInfoNumbers, gpu::native::adapterFeatureNames,
     gpu::native::deviceFeatureNames,
-    gpu::native::requestDeviceOf, gpu::native::deviceRequestPoll,
+    gpu::native::adapterMarkNew, gpu::native::adapterMarkHold, gpu::native::adapterMarkRelease,
+    gpu::native::requestDeviceOf, gpu::native::deviceRequestPoll, gpu::native::deviceRequestConsumed,
     gpu::native::deviceRequestTakeDevice, gpu::native::deviceRequestMessage, gpu::native::deviceRequestDrop,
     gpu::native::mapAsync, gpu::native::mapPoll, gpu::native::mapMessage, gpu::native::mapDrop, gpu::native::mapBytes,
     gpu::native::pollDevice, gpu::native::deviceRequestTakeState, gpu::native::LOSS_DESTROYED,
@@ -102,7 +103,8 @@ type enum GpuError implements Error {
     NoInstance,             // WebGPU gave no instance
     Refused(string words),  // the adapter, the device or a map was refused, in the implementation's words
     Taken,                  // what a request gave was handed over already
-    OutOfOrder;             // an error scope was popped while one pushed after it on its thread was still open
+    OutOfOrder,             // an error scope was popped while one pushed after it on its thread was still open
+    Consumed;               // the adapter had given a device already: WebGPU gives an adapter one, so request another
 
     public const fn string message() {
         return match (this) {
@@ -110,6 +112,7 @@ type enum GpuError implements Error {
             case Refused(words: w): copy w;
             case Taken: "what this request gave was already taken";
             case OutOfOrder: "an error scope was popped while one pushed after it on the same thread was still open";
+            case Consumed: "the adapter has already given a device: WebGPU gives an adapter one, so request another adapter";
         };
     }
 }
@@ -500,7 +503,7 @@ type value Limits {
         this.maxComputeWorkgroupSizeY = 256;
         this.maxComputeWorkgroupSizeZ = 64;
         this.maxComputeWorkgroupsPerDimension = 65535;
-        this.maxImmediateSize = 0;
+        this.maxImmediateSize = 64;   // "the size of a 4×4 matrix of f32 values"
     }
 }
 
@@ -747,23 +750,31 @@ type resource AdapterInfo {
     public const fn uint32 deviceId() { return this.deviceNumber; }
 }
 
+// WebGPU gives an adapter one device (AGENTS.gpu.md item 10, decision 1): once a request of any of its copies is granted,
+// the adapter is consumed, and a later request fails with `GpuError::Consumed`, on every leg. A program that wants two
+// devices requests two adapters.
 type resource Adapter implements Copyable<This>(bare: give) {
     UnsafePtr handle;
     UnsafePtr instance;   // the instance it came from, whose events its requests process; null when adopted
+    UnsafePtr mark;       // whether it has given a device, shared by its copies and the requests made of them
 
     friend AdapterRequest::poll[fromRequest];
 
-    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; this.instance = null; }
+    // An adapter made outside this package; it takes over one reference. Its maker vouches that it has given no device.
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; this.instance = null; this.mark = adapterMarkNew(); }
     unsafe ctor fromRequest(UnsafePtr raw, UnsafePtr instance) {
         this.handle = raw;
         this.instance = instance;
         if (instance != null) { instanceAddRef(instance: instance); }
+        this.mark = adapterMarkNew();
     }
     public unsafe ctor copy(ref Adapter source) {
         this.handle = source.handle;
         this.instance = source.instance;
+        this.mark = source.mark;
         adapterAddRef(adapter: this.handle);
         if (this.instance != null) { instanceAddRef(instance: this.instance); }
+        adapterMarkHold(mark: this.mark);
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
@@ -784,14 +795,16 @@ type resource Adapter implements Copyable<This>(bare: give) {
         return featuresFrom(names: names, count: n);
     }
 
-    // Ask for a device with `options` (WebGPU's second step); `poll()` the request until it settles.
+    // Ask for a device with `options` (WebGPU's second step); `poll()` the request until it settles. Once the adapter
+    // has given a device, the request fails with `Consumed` at once.
     public unsafe fn DeviceRequest requestDevice(const ref DeviceOptions options) {
-        return DeviceRequest.start(instance: this.instance, adapter: this.handle, options: options);
+        return DeviceRequest.start(instance: this.instance, adapter: this.handle, mark: this.mark, options: options);
     }
 
     unsafe ~Adapter() {
         if (this.handle != null) { adapterRelease(adapter: this.handle); }
         if (this.instance != null) { instanceRelease(instance: this.instance); }
+        adapterMarkRelease(mark: this.mark);
     }
 }
 
@@ -804,7 +817,7 @@ type resource DeviceRequest {
 
     friend Adapter::requestDevice[start];
 
-    unsafe ctor start(UnsafePtr instance, UnsafePtr adapter, const ref DeviceOptions options) {
+    unsafe ctor start(UnsafePtr instance, UnsafePtr adapter, UnsafePtr mark, const ref DeviceOptions options) {
         this.adapter = adapter;
         if (adapter != null) { adapterAddRef(adapter: adapter); }
         WGPULimits limits = required(want: options.limits);
@@ -814,8 +827,8 @@ type resource DeviceRequest {
         foreach (Feature f in all.iterator()) {
             if (options.features.has(feature: f)) { names[cast<isize>(count)] = featureValue(f: f); count = count + 1; }
         }
-        this.slot = requestDeviceOf(instance: instance, adapter: adapter, limits: cast<UnsafePtr>(addr(of: limits)),
-                                         features: addr(of: names[0]), featureCount: count);
+        this.slot = requestDeviceOf(instance: instance, adapter: adapter, mark: mark, limits: cast<UnsafePtr>(addr(of: limits)),
+                                    features: addr(of: names[0]), featureCount: count);
     }
 
     // Pending until the device has answered; then Ready once, handing the device and its queue over, or Failed with
@@ -825,6 +838,7 @@ type resource DeviceRequest {
         int32 s = deviceRequestPoll(request: this.slot);
         if (s == SEAM_PENDING) { return DeviceStatus::Pending; }
         if (s == SEAM_FAILED) {
+            if (deviceRequestConsumed(request: this.slot) != 0) { return DeviceStatus::Failed(error: GpuError::Consumed); }
             InlineArray<uint8>#(512) buf = [0; 512];
             int32 n = deviceRequestMessage(request: this.slot, dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
             string words = textOf(buf: buf, length: n);

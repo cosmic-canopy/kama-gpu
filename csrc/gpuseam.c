@@ -563,14 +563,44 @@ int32_t gpuseam_device_features(WGPUDevice device, int32_t *dst, int32_t capacit
     return copy_features(&f, dst, capacity);
 }
 
+// ---- whether an adapter has given a device ---------------------------------------------------------------------------
+
+struct gpuseam_adapter_mark {
+    atomic_int holders;
+    atomic_int consumed;
+};
+
+gpuseam_adapter_mark *gpuseam_adapter_mark_new(void) {
+    gpuseam_adapter_mark *m = (gpuseam_adapter_mark *)calloc(1, sizeof *m);
+    if (m == NULL) return NULL;
+    atomic_init(&m->holders, 1);
+    atomic_init(&m->consumed, 0);
+    return m;
+}
+
+void gpuseam_adapter_mark_hold(gpuseam_adapter_mark *m) {
+    if (m != NULL) atomic_fetch_add_explicit(&m->holders, 1, memory_order_relaxed);
+}
+
+void gpuseam_adapter_mark_release(gpuseam_adapter_mark *m) {
+    if (m == NULL) return;
+    if (atomic_fetch_sub_explicit(&m->holders, 1, memory_order_acq_rel) == 1) free(m);
+}
+
+int32_t gpuseam_adapter_mark_consumed(gpuseam_adapter_mark *m) {
+    return m != NULL && atomic_load_explicit(&m->consumed, memory_order_acquire) != 0;
+}
+
 // ---- a device on its way ---------------------------------------------------------------------------------------------
 
 struct gpuseam_device_request {
     atomic_int state;
-    WGPUInstance instance;   // the adapter's instance, for its events, or NULL; a reference held while the slot lives
-    WGPUAdapter adapter;     // a reference held while the slot lives
+    WGPUInstance instance;          // the adapter's instance, for its events, or NULL; a reference held while the slot lives
+    WGPUAdapter adapter;            // a reference held while the slot lives
+    gpuseam_adapter_mark *mark;     // the adapter's, held while the slot lives
     WGPUDevice device;
-    gpuseam_state *errors;   // the device's state, held until the device is taken
+    gpuseam_state *errors;          // the device's state, held until the device is taken
+    int32_t consumed;               // failed because the adapter had given a device
     char message[GPUSEAM_MESSAGE_BYTES];
     int32_t message_length;
 };
@@ -579,17 +609,33 @@ static void request_free(gpuseam_device_request *r) {
     if (r->device != NULL) wgpuDeviceRelease(r->device);
     if (r->adapter != NULL) wgpuAdapterRelease(r->adapter);
     if (r->instance != NULL) wgpuInstanceRelease(r->instance);
+    gpuseam_adapter_mark_release(r->mark);
     gpuseam_state_release(r->errors);
     free(r);
 }
+
+static const char CONSUMED_WORDS[] = "the adapter has already given a device: WebGPU gives an adapter one, so request another adapter";
 
 static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView message, void *u1, void *u2) {
     (void)u2;
     gpuseam_device_request *r = (gpuseam_device_request *)u1;
     int outcome = GPUSEAM_READY;
     if (status != WGPURequestDeviceStatus_Success || device == NULL) {
-        r->message_length = keep_message(message, r->message);
-        if (r->message_length == 0) r->message_length = keep_text("the adapter gave no device", r->message);
+        // A request that settles after another of the same adapter was granted fails as consumed, whatever the
+        // implementation's words: a browser refuses it as such.
+        if (gpuseam_adapter_mark_consumed(r->mark)) {
+            r->consumed = 1;
+            r->message_length = keep_text(CONSUMED_WORDS, r->message);
+        } else {
+            r->message_length = keep_message(message, r->message);
+            if (r->message_length == 0) r->message_length = keep_text("the adapter gave no device", r->message);
+        }
+        outcome = GPUSEAM_FAILED;
+    } else if (r->mark != NULL && atomic_exchange_explicit(&r->mark->consumed, 1, memory_order_acq_rel) != 0) {
+        // Granted where another request of the adapter was granted first: WebGPU would have refused it.
+        wgpuDeviceRelease(device);
+        r->consumed = 1;
+        r->message_length = keep_text(CONSUMED_WORDS, r->message);
         outcome = GPUSEAM_FAILED;
     } else {
         r->device = device;
@@ -601,12 +647,20 @@ static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStr
 }
 
 gpuseam_device_request *gpuseam_adapter_request_device(WGPUInstance instance, WGPUAdapter adapter,
-                                                       const WGPULimits *limits, const int32_t *features,
-                                                       int32_t feature_count) {
+                                                       gpuseam_adapter_mark *mark, const WGPULimits *limits,
+                                                       const int32_t *features, int32_t feature_count) {
     gpuseam_device_request *r = (gpuseam_device_request *)calloc(1, sizeof *r);
     if (r == NULL) return NULL;
+    gpuseam_adapter_mark_hold(mark);
+    r->mark = mark;
+    if (gpuseam_adapter_mark_consumed(mark)) {   // refused without asking WebGPU, as a browser refuses it
+        r->consumed = 1;
+        r->message_length = keep_text(CONSUMED_WORDS, r->message);
+        atomic_init(&r->state, GPUSEAM_FAILED);
+        return r;
+    }
     r->errors = state_new(1);
-    if (r->errors == NULL) { free(r); return NULL; }
+    if (r->errors == NULL) { gpuseam_adapter_mark_release(mark); free(r); return NULL; }
 #ifdef __EMSCRIPTEN__
     gpuseam_state_hold(r->errors);   // the lost callback's, released when it fires
 #endif
@@ -660,6 +714,11 @@ gpuseam_state *gpuseam_device_request_take_state(gpuseam_device_request *r) {
 int32_t gpuseam_device_request_message(gpuseam_device_request *r, uint8_t *dst, int32_t capacity) {
     if (atomic_load_explicit(&r->state, memory_order_acquire) != GPUSEAM_FAILED) return 0;
     return copy_out(r->message, r->message_length, dst, capacity);
+}
+
+int32_t gpuseam_device_request_consumed(gpuseam_device_request *r) {
+    if (atomic_load_explicit(&r->state, memory_order_acquire) != GPUSEAM_FAILED) return 0;
+    return r->consumed;
 }
 
 void gpuseam_device_request_drop(gpuseam_device_request *r) {

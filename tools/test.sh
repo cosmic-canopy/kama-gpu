@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # tools/test.sh — @kama/gpu's gate: the tests program built debug and release and run natively, a window cleared for
-# 60 frames (skipped when KAMA_WINDOW_NO_DISPLAY is set), the xfail refused, the
-# wasm leg built, the bindings checked against the headers, and what wgpu-native does that the seam is built on
-# (tools/check-facts.sh).
+# 60 frames (skipped when KAMA_WINDOW_NO_DISPLAY is set), the xfail refused, the tests built for the web and run in every
+# headless browser present, the bindings checked against the headers, and what wgpu-native does that the seam is built
+# on (tools/check-facts.sh).
 #
 #   tools/test.sh
 #
-# Run it from msys2 UCRT64 on Windows (bash -lic, so emcc is on PATH for the wasm leg), or any shell elsewhere. It
-# needs what tools/check-bindings.sh needs: kama, and wgpu-native's SDK at $KAMA_WGPU_DIR (default
-# third_party/wgpu/<platform>). The wasm leg is built when `emcc` is on PATH and skipped, said so, without; running it
-# needs a browser with WebGPU, which is not wired here yet.
+# Run it from msys2 UCRT64 on Windows (bash -lic, so emcc and node are on PATH for the web leg), or any shell elsewhere.
+# It needs what tools/check-bindings.sh needs: kama, and wgpu-native's SDK at $KAMA_WGPU_DIR (default
+# third_party/wgpu/<platform>). The web leg is built when `emcc` is on PATH and run by tools/webtest.mjs in every
+# headless Chromium browser it finds: a Chrome for Testing pinned under ~/browsers, Edge, Chrome (KAMA_BROWSER names
+# one). Each part is skipped, and says so, without what it needs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -83,13 +84,23 @@ else
     cat tests/out/xfail.log; echo "FAIL refused, but not as a use after move"; failed=1
 fi
 
-step "wasm leg (build)"
-if command -v emcc >/dev/null 2>&1; then
-    "$KAMA" build tests/kama.json --target WASM -o tests/out/wasm/gputests.html > tests/out/build-wasm.log 2>&1 \
-        && echo "ok   built tests/out/wasm/gputests.html" \
-        || { tail -20 tests/out/build-wasm.log; failed=1; }
-else
+step "the web leg: built, and run in every headless browser present"
+if ! command -v emcc >/dev/null 2>&1; then
     echo "skip no emcc on PATH (run from an interactive UCRT64 shell, bash -lic)"
+elif ! "$KAMA" build tests/kama.json --target WASM -o tests/out/web/gputests.html > tests/out/build-web.log 2>&1; then
+    tail -20 tests/out/build-web.log
+    failed=1
+elif ! command -v node >/dev/null 2>&1; then
+    echo "ok   built tests/out/web/gputests.html"
+    echo "skip no node on PATH, so no browser run"
+elif ! browsers="$(node tools/webtest.mjs --list 2>/dev/null)"; then
+    echo "ok   built tests/out/web/gputests.html"
+    echo "skip no Chromium browser (pin Chrome for Testing under ~/browsers, or set KAMA_BROWSER)"
+else
+    while IFS= read -r browser; do
+        echo "-- $browser"
+        node tools/webtest.mjs tests/out/web gputests.html --browser "$browser" || failed=1
+    done <<< "$browsers"
 fi
 
 echo
