@@ -5,35 +5,6 @@ when it comes up, and their answers are recorded here or, for a departure from k
 [AGENTS.gpu.md](AGENTS.gpu.md). When a row ships, its section goes: what was built is the [SPEC](SPEC.md), and how it
 was decided is the git log. `tools/check-roadmap.sh` holds every section to a row.
 
-<a id="web-leg"></a>
-## GPU-3: a canvas surface, and the tests run in a browser
-
-Nothing has run in a browser yet, and the native leg was found unlike wgpu-native's own docs more than once (a surface
-configure aborts rather than reporting, a destroyed device never reports its loss), so the web's surprises are found
-before anything is built on what it was assumed to do.
-
-- **It starts once `@kama/window` has its web half** (its WIN-3), a window on a canvas whose `nativeHandle()` names the
-  canvas, which `Surface.make` already takes as `NativeKind::Canvas`.
-- **The tests run in a browser with WebGPU**, as a leg of `tools/test.sh`. `--dump-dom` cannot run them: measured on
-  2026-11-11 (kyoten's `.scratch/win3-web/`), it returns at the page's load, before emscripten's `main` has run, with
-  no console line. `@kama/window`'s browser leg is the shape to take: `tools/webtest.mjs` (node, no npm packages)
-  serves the tests' own page and drives headless Edge over the DevTools protocol, reading the console to the summary
-  line, an abort or a time limit (its AGENTS.window.md item 8, decision 10).
-- **What it measures, for the first time:**
-  - a canvas surface's capabilities, so the SPEC's web column is measured, not read;
-  - the limits and features (the tests hold `maxBindGroupsPlusVertexBuffers` to 24 and expect `CoreFeaturesAndLimits`
-    there);
-  - when a device's errors, scopes and loss arrive, which the web delivers a task later ([SPEC](SPEC.md), a device's
-    errors and its loss): the error cases `tests/` runs natively only so far, whether emdawnwebgpu fires the lost
-    callback for a failed device request (the web's extra hold on the device's state is released only there), and
-    that no uncaptured error arrives after a device's loss;
-  - the clear example on a canvas.
-- **Measured and decided on 2026-11-11** ([AGENTS.gpu.md](AGENTS.gpu.md) item 10): one device per adapter on every
-  leg (`GpuError::Consumed`); `surface.configure(device:, config:)` sized by its window (after `@kama/window`'s
-  WIN-20); the browser legs on pinned browsers; `tools/webtest.mjs` a stopgap until kama runs a wasm program in a
-  browser (kyoten's KY-50).
-- **Done:** `tests/` and `examples/clear` green in headless Chrome for Testing and Edge, every measurement in the SPEC.
-
 <a id="render-pipelines"></a>
 ## GPU-4: the render pipeline set
 
@@ -128,7 +99,8 @@ Done: `tests/` and the clear example green on each.
 
 kama's floor for a first publish is `tests/` green on every target the package claims, and `AGENTS.package.md` has
 the rest. Before it:
-- GPU-3, so the web is a claimed target that passes;
+- the web a claimed target that passes: built on 2026-11-11 ([AGENTS.gpu.md](AGENTS.gpu.md) item 10), in Chrome and
+  Edge, and in Firefox once `@kama/window`'s WIN-18 gives the legs a WebDriver BiDi client;
 - `@kama/window` published first, so this depends on its version and a consumer stops naming it beside `@kama/gpu`.
 
 The README's status and the manifest's description are rewritten for the registry, which cannot be changed after.

@@ -478,8 +478,9 @@ type resource Check implements App {
     Optional<Queue> queue = Optional::None;
     Optional<Buffer> readback = Optional::None;
     Optional<BufferRead> read = Optional::None;
-    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 done
+    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 the error cases, 5 done
     Optional<SurfaceRun> surfaces = Optional::None;
+    Optional<ErrorRun> errorRun = Optional::None;
     Instant began = monotonicNow();
     int32 runs = 0;
     int32 failures = 0;
@@ -534,7 +535,8 @@ type resource Check implements App {
         if (this.stage == 1) { this.awaitDevices(); }
         if (this.stage == 2) { this.awaitRead(); }
         if (this.stage == 3) { this.surfaceStep(); }
-        if (this.stage == 4) { return this.finish(); }
+        if (this.stage == 4) { this.errorStep(); }
+        if (this.stage == 5) { return this.finish(); }
         return 1;
     }
 
@@ -545,6 +547,15 @@ type resource Check implements App {
         bool done = pending.step(t: this);
         this.surfaces = Optional::Some(value: give pending);
         if (done) { this.surfaces = Optional::None; this.stage = 4; }
+    }
+
+    // The error cases on the web's timing, a step this tick.
+    unsafe fn void errorStep() {
+        Optional<ErrorRun> taken = replace(place: this.errorRun, with: Optional::None);
+        ErrorRun pending = match (give taken) { case Some(value: r): give r; case None: ErrorRun.make(); };
+        bool done = pending.step(t: this);
+        this.errorRun = Optional::Some(value: give pending);
+        if (done) { this.errorRun = Optional::None; this.stage = 5; }
     }
 
     unsafe fn void awaitAdapter() {
@@ -1014,6 +1025,7 @@ type resource Check implements App {
     // Every handle released by its destructor, then the verdict on uncaptured errors and the totals.
     unsafe fn int32 finish() {
         this.surfaces = Optional::None;
+        this.errorRun = Optional::None;
         match (this.device) {
             case Some(value: d): {
                 DeviceErrors errs = d.takeErrors();
@@ -1714,6 +1726,422 @@ unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface earl
               why: expectRefusal(got: unsized, want: "NoWindow"));
 }
 
+// ---- a device's errors on the web's timing, on both legs (GPU-3) -----------------------------------------------------
+
+comptime int32 SETTLE_TICKS = 30;   // the most a case waits for what it expects; on the web it arrives a tick after a flush
+comptime int32 QUIET_TICKS = 5;     // how long a case waits before it says nothing more arrived
+
+// Whether a drain found anything.
+fn bool arrived(const ref Optional<DeviceErrors> got) {
+    return match (got) { case Some(value: errs): !errs.isEmpty(); case None: false; };
+}
+
+// What a command buffer whose finish failed leaves in the channel once submitted: natively the finish's error alone,
+// since the package never submits it (AGENTS.gpu.md item 2, decision 3); on the web the browser's refusal of the submit
+// as well ("[Invalid CommandBuffer] is invalid due to a previous error", measured 2026-11-11).
+@compileFor(ARCH_WASM32)
+fn isize spoiledReports() { return 2; }
+@compileFor(!ARCH_WASM32)
+fn isize spoiledReports() { return 1; }
+
+// A device's errors, its scopes and its state, each case written for the web's timing and run on both legs. On the web an
+// error reaches the device's channel only once its queue is next used, by the next tick (measured 2026-11-11: never while
+// nothing is queued), and a pop is answered a tick later; natively each is in by the time it is polled. So a case acts,
+// uses the queues (`flush`), and checks a tick or more later. The native cases above hold wgpu-native's own timing: in
+// the channel when the call returns.
+type resource ErrorRun {
+    int32 stage = 0;
+    int32 waited = 0;
+    Instant began = monotonicNow();
+    Optional<Instance> instance = Optional::None;
+    Optional<AdapterPool> pool = Optional::None;
+    Optional<DeviceRequest> requestA = Optional::None;
+    Optional<DeviceRequest> requestB = Optional::None;
+    Optional<Device> deviceA = Optional::None;
+    Optional<Device> deviceB = Optional::None;
+    Optional<Queue> queueA = Optional::None;
+    Optional<Queue> queueB = Optional::None;
+    Optional<ScopePop> popping = Optional::None;
+
+    public ctor make() { }
+
+    // One tick's step: true once every case has run.
+    public unsafe fn bool step(ref Check t) {
+        if (this.stage < 99 && this.began.elapsed().asMillis() > TIMEOUT_MS) {
+            int32 at = this.stage;
+            t.verdict(name: "the error cases on the web's timing end within 10 s", why: "timed out at stage ${at}");
+            return true;
+        }
+        this.waited = this.waited + 1;
+        if (this.stage == 0) { this.open(t: t); }
+        else if (this.stage == 1) { this.awaitAdapters(t: t); }
+        else if (this.stage == 2) { this.awaitDevices(t: t); }
+        else if (this.stage == 10) { this.provokeOne(); }
+        else if (this.stage == 11) { this.checkOne(t: t); }
+        else if (this.stage == 20) { this.scopeCatches(t: t); }
+        else if (this.stage == 21) { this.awaitCaught(t: t); }
+        else if (this.stage == 22) { this.caughtStaysOut(t: t); }
+        else if (this.stage == 30) { this.scopePasses(t: t); }
+        else if (this.stage == 31) { this.awaitPassed(t: t); }
+        else if (this.stage == 32) { this.passedReaches(t: t); }
+        else if (this.stage == 40) { this.scopeDropped(); }
+        else if (this.stage == 41) { this.droppedReaches(t: t); }
+        else if (this.stage == 50) { this.flood(); }
+        else if (this.stage == 51) { this.fullRing(t: t); }
+        else if (this.stage == 60) { this.spoil(); }
+        else if (this.stage == 61) { this.spoiled(t: t); }
+        return this.stage >= 99;
+    }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
+
+    unsafe fn void open(ref Check t) {
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                this.pool = Optional::Some(value: AdapterPool.make(instance: inst, count: 2));
+                this.instance = Optional::Some(value: give inst);
+                this.next(to: 1);
+            }
+            case Err(error: e): { string why = e.message(); t.verdict(name: "an instance for the error cases", why: why); this.next(to: 99); }
+        };
+    }
+
+    unsafe fn void awaitAdapters(ref Check t) {
+        Optional<AdapterPool> taken = replace(place: this.pool, with: Optional::None);
+        AdapterPool p = match (give taken) { case Some(value: x): give x; case None: { this.next(to: 99); return; } };
+        bool done = p.settled();
+        if (!done) { this.pool = Optional::Some(value: give p); return; }
+        string failure = p.failedWith();
+        Optional<Adapter> one = p.take();
+        Optional<Adapter> two = p.take();
+        match (give one) {
+            case None: {
+                Optional<Adapter> unused = give two;
+                t.verdict(name: "two adapters for the error cases", why: "none: " + failure);
+                this.next(to: 99);
+            }
+            case Some(value: a): {
+                match (give two) {
+                    case None: { t.verdict(name: "two adapters for the error cases", why: "one: " + failure); this.next(to: 99); }
+                    case Some(value: b): {
+                        this.requestA = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                        this.requestB = Optional::Some(value: b.requestDevice(options: DeviceOptions.defaults()));
+                        this.next(to: 2);
+                    }
+                };
+            }
+        };
+    }
+
+    unsafe fn void awaitDevices(ref Check t) {
+        if (this.requestA.isSome()) {
+            DeviceStatus s = pollOne(slot: this.requestA);
+            match (give s) {
+                case Pending: { }
+                case Ready(device: d, queue: q): { this.deviceA = Optional::Some(value: give d); this.queueA = Optional::Some(value: give q); }
+                case Failed(error: e): { string why = e.message(); t.verdict(name: "a device for the error cases", why: why); this.next(to: 99); return; }
+            };
+        }
+        if (this.requestB.isSome()) {
+            DeviceStatus s = pollOne(slot: this.requestB);
+            match (give s) {
+                case Pending: { }
+                case Ready(device: d, queue: q): { this.deviceB = Optional::Some(value: give d); this.queueB = Optional::Some(value: give q); }
+                case Failed(error: e): { string why = e.message(); t.verdict(name: "a second device for the error cases", why: why); this.next(to: 99); return; }
+            };
+        }
+        if (this.deviceA.isSome() && this.deviceB.isSome()) { this.next(to: 10); }
+    }
+
+    // An empty command buffer submitted on each device's queue: on the web, what lets a pending error through.
+    unsafe fn void flush() {
+        match (this.deviceA) {
+            case Some(value: d): {
+                match (this.queueA) {
+                    case Some(value: q): { CommandEncoder enc = d.createCommandEncoder(); CommandBuffer cb = give enc.finish(); q.submit(commands: give cb); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        match (this.deviceB) {
+            case Some(value: d): {
+                match (this.queueB) {
+                    case Some(value: q): { CommandEncoder enc = d.createCommandEncoder(); CommandBuffer cb = give enc.finish(); q.submit(commands: give cb); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+    }
+
+    // What device A's channel holds now, drained; None when there is no device.
+    unsafe fn Optional<DeviceErrors> drainA() {
+        Optional<DeviceErrors> got = Optional::None;
+        match (this.deviceA) {
+            case Some(value: d): { DeviceErrors errs = d.takeErrors(); got = Optional::Some(value: give errs); }
+            case None: { }
+        };
+        return give got;
+    }
+
+    // An error on one device: its channel, once its queue is used, and not the other's.
+    unsafe fn void provokeOne() {
+        match (this.deviceA) { case Some(value: d): { Buffer bad = badBuffer(device: d); } case None: { } };
+        this.flush();
+        this.next(to: 11);
+    }
+
+    unsafe fn void checkOne(ref Check t) {
+        Optional<DeviceErrors> got = this.drainA();
+        int32 ticks = this.waited;
+        if (!arrived(got: got)) {
+            if (ticks < SETTLE_TICKS) { return; }
+            t.verdict(name: "an error reaches its own device's channel once the device's queue is used",
+                      why: "nothing within ${ticks} ticks");
+            this.next(to: 20);
+            return;
+        }
+        match (got) {
+            case None: { }
+            case Some(value: errs): {
+                string one = holds(errs: errs, want: 1, kind: GpuErrorKind::Validation);
+                if (one.isEmpty()) {
+                    string words = errs.reports()[0].message();
+                    println(s: "info the error, ${ticks} tick(s) after the flush: ${words}");
+                }
+                t.verdict(name: "an error reaches its own device's channel once the device's queue is used", why: one);
+                match (this.deviceB) {
+                    case Some(value: b): {
+                        DeviceErrors other = b.takeErrors();
+                        t.verdict(name: "and not another device's", why: other.isEmpty() ? "" : "the other's holds " + errorsSaid(errs: other));
+                    }
+                    case None: { }
+                };
+            }
+        };
+        this.next(to: 20);
+    }
+
+    // A scope catches the error made in it, its pop answered a tick later on the web; a pop out of order is refused.
+    unsafe fn void scopeCatches(ref Check t) {
+        match (this.deviceA) {
+            case Some(value: d): {
+                ErrorScope outer = d.pushErrorScope(filter: ErrorFilter::Validation);
+                ErrorScope inner = d.pushErrorScope(filter: ErrorFilter::Validation);
+                Result<ScopePop, GpuError> early = give outer.pop();
+                bool outOfOrder = match (early) { case Err(error: e): match (e) { case OutOfOrder: true; case _: false; }; case Ok(value: p): false; };
+                t.verdict(name: "a pop out of order is refused as OutOfOrder, on every leg", why: outOfOrder ? "" : "it was not refused as OutOfOrder");
+                Result<ScopePop, GpuError> late = give inner.pop();
+                ErrorScope s = d.pushErrorScope(filter: ErrorFilter::Validation);
+                Buffer bad = badBuffer(device: d);
+                Result<ScopePop, GpuError> popped = give s.pop();
+                match (give popped) {
+                    case Ok(value: p): { this.popping = Optional::Some(value: give p); }
+                    case Err(error: e): { string why = e.message(); t.verdict(name: "a scope catches the error made in it", why: "its pop was refused: " + why); }
+                };
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 21);
+    }
+
+    unsafe fn void awaitCaught(ref Check t) {
+        if (this.popping.isNone()) { this.next(to: 30); return; }
+        PopStatus s = PopStatus::Pending;
+        match (this.popping) { case Some(value: p): { s = p.poll(); } case None: { } };
+        int32 ticks = this.waited;
+        match (give s) {
+            case Pending: {
+                if (ticks < SETTLE_TICKS) { return; }
+                t.verdict(name: "a scope catches the error made in it", why: "its pop was not answered within ${ticks} ticks");
+            }
+            case Ready(caught: c): {
+                string why = match (c) {
+                    case Some(value: r): r.kind() == GpuErrorKind::Validation ? "" : "it caught another kind";
+                    case None: "it caught nothing";
+                };
+                println(s: "info the pop answered ${ticks} tick(s) after it was made");
+                t.verdict(name: "a scope catches the error made in it", why: why);
+            }
+            case Failed(error: e): { string why = e.message(); t.verdict(name: "a scope catches the error made in it", why: "its pop failed: " + why); }
+        };
+        this.popping = Optional::None;
+        this.flush();
+        this.next(to: 22);
+    }
+
+    unsafe fn void caughtStaysOut(ref Check t) {
+        if (this.waited < QUIET_TICKS) { return; }
+        Optional<DeviceErrors> got = this.drainA();
+        string why = "";
+        match (got) {
+            case Some(value: errs): { if (!errs.isEmpty()) { why = "the channel holds " + errorsSaid(errs: errs); } }
+            case None: { }
+        };
+        t.verdict(name: "what a scope caught does not reach the channel", why: why);
+        this.next(to: 30);
+    }
+
+    // A scope with another filter catches nothing, and the error goes on to the channel.
+    unsafe fn void scopePasses(ref Check t) {
+        match (this.deviceA) {
+            case Some(value: d): {
+                ErrorScope s = d.pushErrorScope(filter: ErrorFilter::OutOfMemory);
+                Buffer bad = badBuffer(device: d);
+                Result<ScopePop, GpuError> popped = give s.pop();
+                match (give popped) {
+                    case Ok(value: p): { this.popping = Optional::Some(value: give p); }
+                    case Err(error: e): { string why = e.message(); t.verdict(name: "a scope with another filter catches nothing", why: "its pop was refused: " + why); }
+                };
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 31);
+    }
+
+    unsafe fn void awaitPassed(ref Check t) {
+        if (this.popping.isNone()) { this.next(to: 32); return; }
+        PopStatus s = PopStatus::Pending;
+        match (this.popping) { case Some(value: p): { s = p.poll(); } case None: { } };
+        int32 ticks = this.waited;
+        match (give s) {
+            case Pending: {
+                if (ticks < SETTLE_TICKS) { return; }
+                t.verdict(name: "a scope with another filter catches nothing", why: "its pop was not answered within ${ticks} ticks");
+            }
+            case Ready(caught: c): {
+                string why = match (c) { case Some(value: r): "it caught: " + r.message(); case None: ""; };
+                t.verdict(name: "a scope with another filter catches nothing", why: why);
+            }
+            case Failed(error: e): { string why = e.message(); t.verdict(name: "a scope with another filter catches nothing", why: "its pop failed: " + why); }
+        };
+        this.popping = Optional::None;
+        this.flush();
+        this.next(to: 32);
+    }
+
+    unsafe fn void passedReaches(ref Check t) {
+        Optional<DeviceErrors> got = this.drainA();
+        int32 ticks = this.waited;
+        if (!arrived(got: got)) {
+            if (ticks < SETTLE_TICKS) { return; }
+            t.verdict(name: "and the error goes on to the channel", why: "nothing within ${ticks} ticks");
+            this.next(to: 40);
+            return;
+        }
+        match (got) {
+            case None: { }
+            case Some(value: errs): {
+                t.verdict(name: "and the error goes on to the channel", why: holds(errs: errs, want: 1, kind: GpuErrorKind::Validation));
+            }
+        };
+        this.next(to: 40);
+    }
+
+    // A scope dropped unpopped pops itself, and what it caught reaches the channel.
+    unsafe fn void scopeDropped() {
+        match (this.deviceA) {
+            case Some(value: d): { dropScope(device: d); }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 41);
+    }
+
+    unsafe fn void droppedReaches(ref Check t) {
+        Optional<DeviceErrors> got = this.drainA();
+        int32 ticks = this.waited;
+        if (!arrived(got: got)) {
+            if (ticks < SETTLE_TICKS) { if (ticks % 2 == 0) { this.flush(); } return; }
+            t.verdict(name: "a scope dropped unpopped pops itself, and what it caught reaches the channel", why: "nothing within ${ticks} ticks");
+            this.next(to: 50);
+            return;
+        }
+        match (got) {
+            case None: { }
+            case Some(value: errs): {
+                t.verdict(name: "a scope dropped unpopped pops itself, and what it caught reaches the channel",
+                          why: holds(errs: errs, want: 1, kind: GpuErrorKind::Validation));
+            }
+        };
+        this.next(to: 50);
+    }
+
+    // A full channel keeps the oldest 64 and counts the rest.
+    unsafe fn void flood() {
+        match (this.deviceA) {
+            case Some(value: d): {
+                int32 k = 0;
+                while (k < 70) { Buffer bad = badBuffer(device: d); k = k + 1; }
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 51);
+    }
+
+    unsafe fn void fullRing(ref Check t) {
+        if (this.waited < QUIET_TICKS) { return; }
+        Optional<DeviceErrors> got = this.drainA();
+        string why = "nothing reached the channel";
+        match (got) {
+            case None: { }
+            case Some(value: errs): {
+                if (errs.isEmpty()) { return; }
+                isize kept = errs.reports().length();
+                int64 lost = errs.dropped();
+                why = kept == 64 && lost == 6 ? "" : "${kept} kept and ${lost} dropped, not 64 and 6";
+            }
+        };
+        t.verdict(name: "70 errors at once: the channel keeps the oldest 64 and counts the other 6", why: why);
+        this.next(to: 60);
+    }
+
+    // A command buffer whose finish failed runs nothing: natively it is never submitted, and a browser refuses its submit.
+    unsafe fn void spoil() {
+        match (this.deviceB) {
+            case Some(value: d): {
+                match (this.queueB) {
+                    case Some(value: q): {
+                        CommandEncoder enc = badCopy(device: d);
+                        CommandBuffer cb = give enc.finish();
+                        q.submit(commands: give cb);
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 61);
+    }
+
+    unsafe fn void spoiled(ref Check t) {
+        if (this.waited < QUIET_TICKS) { return; }
+        string why = "no second device";
+        match (this.deviceB) {
+            case Some(value: d): {
+                DeviceErrors errs = d.takeErrors();
+                isize n = errs.reports().length();
+                isize want = spoiledReports();
+                why = n == want ? "" : "${n} reports, not ${want}: " + errorsSaid(errs: errs);
+                if (why.isEmpty() && n > 0) {
+                    string words = errs.reports()[n - 1].message();
+                    println(s: "info the last of them: ${words}");
+                }
+            }
+            case None: { }
+        };
+        t.verdict(name: "a command buffer whose finish failed runs nothing: its error is in the channel, and on the web the browser's refusal of its submit",
+                  why: why);
+        this.next(to: 99);
+    }
+}
+
 // ---- a device's errors (GPU-1): natively, where an error is in the channel when the call that caused it returns --------
 
 fn string kindName(GpuErrorKind k) {
@@ -1784,7 +2212,7 @@ unsafe fn CommandEncoder badCopy(ref Device device) {
 
 @compileFor(ARCH_WASM32)
 unsafe fn void errorCases(ref Check t, ref Instance instance) {
-    println(s: "skip the error cases: the web reports an error a task later, and its leg runs in a browser with GPU-3");
+    println(s: "skip the native error cases: they hold wgpu-native's timing, in the channel when the call returns; the web's run on its own timing (ErrorRun)");
 }
 
 // A device asked of an adapter of its own; natively both are answered as soon as they are polled.
@@ -1991,7 +2419,6 @@ unsafe fn string caughtBy(Result<ScopePop, GpuError> popped, Optional<GpuErrorKi
 }
 
 // A scope pushed, an error made in it, and the scope dropped unpopped.
-@compileFor(!ARCH_WASM32)
 unsafe fn void dropScope(ref Device device) {
     ErrorScope open = device.pushErrorScope(filter: ErrorFilter::Validation);
     Buffer bad = badBuffer(device: device);

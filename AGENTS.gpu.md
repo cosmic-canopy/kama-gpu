@@ -38,11 +38,11 @@ in; *as an engine renderer* they stay out.
 ## Where things stand
 
 **[SPEC.md](SPEC.md) is what the package is, [ROADMAP.md](ROADMAP.md) what comes next, and [COVERAGE.md](COVERAGE.md)
-which of webgpu.h it calls.** In short (2026-11-10, kama 0.9.911): offscreen work and a surface on a window run natively
-on Windows, the web leg builds and has not run, the safe API calls 55 of webgpu.h's 206 functions, and a device's
-errors reach its own holders (GPU-1, built), a surface holds its window (GPU-2, built), and an acquire before a
-configure is refused (GPU-13, built). GPU-3, the web leg, is next, after `@kama/window`'s web half (WIN-3).
-`tools/test.sh` passes before every commit.
+which of webgpu.h it calls.** In short (2026-11-11, kama 0.9.911): offscreen work and a surface on a window run natively
+on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 55 of webgpu.h's 206 functions, a device's
+errors reach its own holders (GPU-1), a surface holds its window (GPU-2), an acquire before a configure is refused
+(GPU-13), an adapter gives one device and a surface is configured at its window's size (GPU-3). GPU-4, the render
+pipeline set, is next, shaped by `@kama/graphics`' design pass. `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
 
@@ -420,6 +420,34 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
        says what each is and how it was verified), and Edge, which Windows has. Firefox joins with `@kama/window`'s
        WIN-18, its WebDriver BiDi client. Chrome for Testing's headless shell gets no WebGPU adapter (measured), so the
        legs run `chrome.exe --headless=new`.
+
+    **Built on 2026-11-11 (kyoten's thirteenth session), test-first, every leg green and the mutations caught or
+    explained before each commit:**
+    1. **The browser leg** (`4176e9a`): `tools/webtest.mjs` and `tests/web/shell.html`; the program's end read from
+       emscripten's `onExit`, each of the driver's end paths shown on a page of its own (an exit 0 and 3, an abort, an
+       exception, silence), and a browser that does not start one line and status 1 (`fc7b789`).
+    2. **One device per adapter** (`4176e9a`): a mark in the seam shared by an adapter's copies and its requests, set
+       by a granted request; 4 cases, among them two requests made at once of one adapter, where natively the package
+       refuses the second and on the web the browser does. 7 of 8 mutations caught; the eighth, a late grant kept, is
+       unreachable on both legs today. `maxImmediateSize`'s default became the spec's 64 the same commit.
+    3. **A configure sized by its window, and the surface cases in a browser** (`56fc5a6`, on `@kama/window`'s WIN-20):
+       the surface cases a step a tick on both legs, on the page's `#canvas`, `#second`, `#wide` and `#flat`; `NoArea`
+       on a minimised window natively (a Win32 hook, no activation) and an undisplayed canvas on the web; `TooLarge` on
+       a 9000-pixel canvas on the web; `NoWindow` for an adopted surface. 4 of 5 mutations caught; the fifth, the web
+       handing WebGPU the window's own size, writes the numbers the canvas holds. **Decided in the building, within
+       decision 2:** an adopted surface's `configure` is refused with `ConfigureError::NoWindow`, its maker configuring
+       it, rather than reading its adopted handle's 0 × 0 as `NoArea`.
+    4. **`examples/clear` as a `std::app` `App`** (`56fc5a6`), its arguments on the web from the page's query, 60
+       frames in each browser with no WebGPU error.
+    5. **A device's errors on the web's timing** (ErrorRun, on both legs): an error in its own device's channel a tick
+       after the queue is used and not another's, a scope's catch kept out of the channel, another filter passing it
+       on, a dropped scope's catch reaching the channel, a pop out of order refused, 64 of 70 kept, and a failed
+       `finish`'s submit running nothing (the browser reports its refusal). The native cases keep wgpu-native's own
+       timing. 6 of 6 mutations of the seam's web half were caught in a browser: the lost callback's hold kept (11 state
+       blocks left alive), a browser scope's catch dropped, an orphan's catch dropped, every filter Validation, no scope
+       pushed, and the web's usages not filled in.
+
+    `tests/` is 96 cases natively and 74 in Chrome for Testing 157 and Edge 157, on the pin, 0.9.911+g238198b3.
 
 ## Where the truth is
 

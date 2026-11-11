@@ -16,11 +16,10 @@ in the git log.
 **The goal before 1.0 is every call in webgpu.h** ([AGENTS.gpu.md](AGENTS.gpu.md#what-this-is)), grown by the spec's
 sections in the order `@kama/graphics` pulls them.
 
-## NOW: the web leg, then the render pipeline set
+## NOW: the render pipeline set
 
 | id | item | why |
 |---|---|---|
-| GPU-3 | **A canvas surface, and the tests run in a browser**, after `@kama/window`'s web half (its WIN-3): the web's surface, limits and features measured for the first time, and a device's errors and scopes run there | [detail](ROADMAP_DETAIL.md#web-leg) |
 | GPU-4 | **The render pipeline set**, shaped by `@kama/graphics`' design pass: shader modules, layouts and bind groups, samplers, render pipelines, vertex and index buffers, depth and multisampled targets | [detail](ROADMAP_DETAIL.md#render-pipelines) |
 
 ## LATER: the rest of webgpu.h before 1.0
