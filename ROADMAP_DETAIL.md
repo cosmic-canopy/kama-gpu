@@ -28,7 +28,11 @@ before anything is built on what it was assumed to do.
     callback for a failed device request (the web's extra hold on the device's state is released only there), and
     that no uncaptured error arrives after a device's loss;
   - the clear example on a canvas.
-- **Done:** `tests/` and `examples/clear` green in a browser, every measurement in the SPEC.
+- **Measured and decided on 2026-11-11** ([AGENTS.gpu.md](AGENTS.gpu.md) item 10): one device per adapter on every
+  leg (`GpuError::Consumed`); `surface.configure(device:, config:)` sized by its window (after `@kama/window`'s
+  WIN-20); the browser legs on pinned browsers; `tools/webtest.mjs` a stopgap until kama runs a wasm program in a
+  browser (kyoten's KY-50).
+- **Done:** `tests/` and `examples/clear` green in headless Chrome for Testing and Edge, every measurement in the SPEC.
 
 <a id="render-pipelines"></a>
 ## GPU-4: the render pipeline set

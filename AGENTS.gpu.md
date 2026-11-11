@@ -357,6 +357,69 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
 
    **Stopgap, replaced: the surface had to be dropped before its window,** documented on `Surface`, because a `Window`
    was not counted, so a lifetime rule lived only in documentation in a safe API.
+10. **Decided on 2026-11-11, before it was built: the web leg (GPU-3).** WebGPU ran here in a browser for the first
+    time, so the browser's surprises were measured before anything was built on them.
+
+    **Measured first, on 2026-11-11** (kama 0.9.911; kyoten's `.scratch/gpu3-web/`, its `FINDINGS.md`): headless Edge
+    157, Chrome for Testing 157.0.8103.50 and Brave 157 (`--headless=new --enable-unsafe-webgpu`) driven over the
+    DevTools protocol, on the AMD Radeon 880M (vendor `amd`, architecture `rdna-3`, not a fallback adapter), with plain
+    WebGPU pages and a kama program on this package and `@kama/window`, run on the web and natively (wgpu-native
+    v29.0.1.1). `tests/`, built for the web as it was, gave 29 cases with 3 failed.
+
+    | | web, measured | native, measured |
+    |---|---|---|
+    | a second device from an adapter that gave one | **refused**: "adapter is "consumed": it has already been used to create a device", also after that device is destroyed | granted |
+    | a device after a failed request (a limit past the adapter's, a lacked feature, an unknown limit) | granted: only a granted request consumes | granted |
+    | two adapters from one instance | two objects, a device from each | two adapters for the same GPU, a device from each |
+    | `maxImmediateSize` of a device asked for WebGPU's defaults | 64, the spec's default (gpuweb § 3.6.2) | 0 (immediates are a wgpu-native feature; the adapter says 256) |
+    | an uncaptured error | **never while nothing is queued** (120 frames, 2,000 tasks, 60 ticks); by the next frame after any queue use (a submit, a `writeBuffer`, a map, a frame drawn); in the ring 1 tick after a submit | in the ring when the call returns |
+    | a pop | 1 tick | at once |
+    | a destroyed device's loss, and calls after it | `lost` 1 frame later ("Device was destroyed."), and no error reported after it | (no loss, item 2) |
+    | the state blocks | a failed request's hold released at once; 0 alive once everything is dropped | 0 |
+    | a canvas surface offers | BGRA8Unorm, RGBA8Unorm, RGBA16Float; Fifo; Opaque, Premultiplied; usages 0 (the package's fill-in stands) | |
+    | 0.5 grey through the sRGB view | 188 (3 ticks to map) | 188 |
+    | a configure at 240 × 150 on a window whose framebuffer is 480 × 300 | emdawnwebgpu writes 240 × 150 into the canvas's pixels; the window still says 480 × 300 and posts no `Resize`; frames draw with no error | presents with no error, scaled |
+
+    Dawn's words differ from wgpu-native's ("Buffer usages (BufferUsage::(MapRead|Storage)) is invalid. …" against
+    "Validation Error\n\nCaused by:\n  In wgpuDeviceCreateBuffer …"), and the submit of a buffer whose `finish` failed is
+    a validation error ("[Invalid CommandBuffer] is invalid due to a previous error."), with nothing run.
+    `examples/clear` waits for its adapter in a loop of polls inside `main`, which the browser never answers. Also
+    found, and `@kama/window`'s: `sizedByPage` on a canvas the page does not size runs away, ×1.5 a tick at a pixel
+    ratio of 1.5 (its WIN-21).
+
+    **Fixed in the build without a question, by rules already decided:** `Limits.defaults()` says `maxImmediateSize` is
+    64, WebGPU's default, and the native tests accept wgpu-native's 0 as they accept its `maxBindGroupsPlusVertexBuffers`
+    (item 1); the error cases submit, then wait a tick on the web; `examples/clear` becomes a `std::app` `App`.
+
+    **Decided by the owner on 2026-11-11 (kyoten's thirteenth session), each as recommended,** asked in the chat after
+    the probe ("Sounds good" to each; the owner asked first whether 1 nerfs native, and whether 2 touches offscreen
+    rendering):
+    1. **One device per adapter, on every leg.** Once any copy of an adapter has been granted a device, the adapter is
+       consumed, and a later request fails with a new `GpuError::Consumed` ("request a new adapter"), answered by the
+       package from the state the adapter's copies share, as GPU-13's `NotConfigured` is. Only a granted request
+       consumes. Native loses no capability: a program that wants two devices requests two adapters, one more request,
+       answered at once natively (measured). WebGPU's reason is the right path natively too: an adapter is a snapshot
+       of the GPU, and after a device is lost the program asks for a fresh one.
+    2. **`surface.configure(device:, config:)` takes no size: the surface's window gives it.** WebGPU's own canvas
+       `configure()` takes none, since the canvas's pixel size is the texture's. The window is the one writer of the
+       canvas's pixels (`@kama/window`'s WIN-3, decision 6), so on the web the seam hands emdawnwebgpu a size of 0,
+       which leaves the canvas alone, and natively the seam configures at the window's framebuffer size. `NoArea` and
+       `TooLarge` are checked against that size. `NativeWindow` answers it (`@kama/window`'s WIN-20). It concerns the
+       surface alone: offscreen textures keep their sizes, render to texture is untouched, and drawing below the
+       screen's resolution is a render to texture scaled into the frame, as dynamic resolution does. An adopted surface
+       has no window, so it is configured by its maker, as it is taken to be (GPU-13), and `configure` refuses it.
+    3. **`sizedByPage`'s runaway is an investigation of `@kama/window`'s** (its WIN-21), run beside GPU-3. GPU-3's canvas
+       cases open `#canvas` sized by `open`, so they do not wait on it.
+    4. **Running a wasm program in a browser is kama's** (kyoten's KY-50: `kama run --target WASM` in a browser, with a
+       choice of browser and a hook for trusted input). It is a development need, the same job `kama run` does for
+       Android over adb, and kama knows what only the build knows (the shell page, whether a threaded build needs
+       cross-origin isolation). **Stopgap until then:** `tools/webtest.mjs` here, `@kama/window`'s driver generalised and
+       without its input requests, its header naming KY-50.
+    5. **The browser legs run on pinned browsers, every one present** (the owner: "I agree with your browser
+       recommendation"): Chrome for Testing and Firefox, version-pinned, beside emsdk (`~/browsers`, its `README.md`
+       says what each is and how it was verified), and Edge, which Windows has. Firefox joins with `@kama/window`'s
+       WIN-18, its WebDriver BiDi client. Chrome for Testing's headless shell gets no WebGPU adapter (measured), so the
+       legs run `chrome.exe --headless=new`.
 
 ## Where the truth is
 
