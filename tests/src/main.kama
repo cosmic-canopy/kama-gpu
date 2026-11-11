@@ -32,7 +32,7 @@ import {
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::Size,
-    addDeviceRef, statesAlive, windowRecords, unfocusedNext,
+    addDeviceRef, addSurfaceRef, statesAlive, windowRecords, unfocusedNext,
 };
 
 comptime uint32 SIDE = 64;
@@ -349,6 +349,7 @@ fn string acquireFailures() {
     all.add(item: SurfaceError::Timeout);
     all.add(item: SurfaceError::Failed);
     all.add(item: SurfaceError::Closed);
+    all.add(item: SurfaceError::NotConfigured);
     isize i = 0;
     while (i < all.length()) {
         string kind = match (all[i]) {
@@ -358,6 +359,7 @@ fn string acquireFailures() {
             case Timeout: "Timeout";
             case Failed: "Failed";
             case Closed: "Closed";
+            case NotConfigured: "NotConfigured";
         };
         string words = all[i].message();
         if (words.isEmpty()) { return "${kind} has no words"; }
@@ -433,7 +435,7 @@ type resource Check implements App {
     public unsafe ctor make() {
         this.formatCases();
         this.capabilityCases();
-        this.verdict(name: "an acquire fails in one of six ways, each with its words", why: acquireFailures());
+        this.verdict(name: "an acquire fails in one of seven ways, each with its words", why: acquireFailures());
         Result<Instance, GpuError> made = Instance.make();
         match (give made) {
             case Ok(value: inst): {
@@ -934,6 +936,9 @@ unsafe fn void surfaceCases(ref Check t) {
     uint64 usages = caps.usages();
     println(s: "info the surface offers ${formats}; ${presents}; ${alphas}; usages ${usages}");
     t.verdict(name: "a surface answers its capabilities", why: "");
+    // wgpu-native ends the process on this acquire (measured 3 of 3, 2026-11-10), so the surface must refuse it first.
+    t.verdict(name: "an acquire before any configure is refused as NotConfigured, not aborted",
+              why: refusedAs(surface: surface, want: "NotConfigured"));
     DeviceRequest request = adapter.requestDevice(options: DeviceOptions.defaults());
     int32 polls = 0;
     while (polls < 1000) {
@@ -1032,10 +1037,36 @@ fn string acquireName(const ref Result<SurfaceTexture, SurfaceError> got) {
                 case Timeout: { what = "Timeout"; }
                 case Failed: { what = "Failed"; }
                 case Closed: { what = "Closed"; }
+                case NotConfigured: { what = "NotConfigured"; }
             };
         }
     };
     return what;
+}
+
+// "" when an acquire on `surface` is refused as `want`, without a frame.
+unsafe fn string refusedAs(ref Surface surface, string want) {
+    Result<SurfaceTexture, SurfaceError> got = surface.acquire();
+    string name = acquireName(got: got);
+    if (name == want) { return ""; }
+    return "got ${name}";
+}
+
+// "" when `surface` gives a frame, cleared and presented; otherwise why not.
+unsafe fn string drawnOnce(ref Surface surface, ref Device device, ref Queue queue) {
+    Result<SurfaceTexture, SurfaceError> acquired = surface.acquire();
+    SurfaceTexture frame = match (give acquired) {
+        case Ok(value: f): give f;
+        case Err(error: e): { string why = e.message(); return "no frame: ${why}"; }
+    };
+    TextureView view = frame.view();
+    CommandEncoder encoder = device.createCommandEncoder();
+    RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: 0.0, g: 0.0, b: 0.0, a: 1.0));
+    give pass.end();
+    CommandBuffer commands = give encoder.finish();
+    queue.submit(commands: give commands);
+    give frame.present();
+    return "";
 }
 
 // A surface, adapter options made with one, and a frame each hold their window's record after the window is dropped,
@@ -1215,6 +1246,9 @@ unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface earl
     } else {
         println(s: "skip a usage not offered: the surface offers StorageBinding");
     }
+    // Every configure so far was refused before WebGPU saw it, so the surface has never been configured.
+    t.verdict(name: "a surface whose every configure was refused is still refused as NotConfigured",
+              why: refusedAs(surface: surface, want: "NotConfigured"));
 
     // Each choice the surface offers is taken: what the package read agrees with what wgpu-native checks, which would
     // abort the process on a choice the surface does not offer.
@@ -1258,6 +1292,13 @@ unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface earl
 
     Result<Unit, ConfigureError> taken = surface.configure(device: device, config: preferred, width: width, height: height);
     t.verdict(name: "the preferred config is taken", why: expectRefusal(got: taken, want: "ok"));
+    t.verdict(name: "a configured surface gives a frame", why: drawnOnce(surface: surface, device: device, queue: queue));
+    t.verdict(name: "a copy made before the configure gives a frame after it",
+              why: drawnOnce(surface: early, device: device, queue: queue));
+    addSurfaceRef(surface: surface.raw());
+    Surface adopted = Surface.adopt(raw: surface.raw());
+    t.verdict(name: "an adopted surface is taken as configured by its maker",
+              why: drawnOnce(surface: adopted, device: device, queue: queue));
 
     Optional<TextureFormat> lw = linearWithTwin(offered: caps.formats());
     bool copies = (caps.usages() & TextureUsage::CopySrc) != 0;

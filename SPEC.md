@@ -205,7 +205,11 @@ A surface is what WebGPU presents into, made on an `@kama/window` window.
   - `Outdated` and `Lost`: configure again;
   - `Timeout`: try the next frame;
   - `Failed`: anything else;
-  - `Closed`: the window is closed, so drop the surface. It is the package's own; webgpu.h has no such status.
+  - `Closed`: the window is closed, so drop the surface;
+  - `NotConfigured`: no configure has succeeded on the surface, a programming error, so configure it first. wgpu-native
+    ends the process on that acquire, and a browser throws. An adopted surface is taken as configured, by its maker.
+
+  `Closed` and `NotConfigured` are the package's own, answered without asking WebGPU; webgpu.h has no such status.
 - **A frame (`SurfaceTexture`):**
   - `view()` is in the configured view format;
   - `texture()` can be copied from;
@@ -229,7 +233,7 @@ What each leg's surface answers, measured natively and read for the web (2026-11
   make, the coverage rules on their fixture, and the constants;
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 22 facts, natively;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`: 78 cases natively with a display (51 without), debug and release.
+- `tests/`, one program run as a `std::app` `App`: 83 cases natively with a display (51 without), debug and release.
   Its windows open unfocused, through GLFW's hints, so a run never takes the keyboard (`tests/src/quiet.kama`);
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
   `KAMA_WINDOW_NO_DISPLAY` is set;

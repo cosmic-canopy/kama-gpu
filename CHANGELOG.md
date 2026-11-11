@@ -5,6 +5,10 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **An acquire before a configure is refused** (2026-11-10, kama 0.9.911; GPU-13, AGENTS.gpu.md item 9), where
+  wgpu-native ended the process. **Breaking:** `SurfaceError::NotConfigured`, which `acquire()` answers until a
+  configure has succeeded on the surface or any copy of it; an adopted surface is taken as configured. `tests/` gains 5
+  cases.
 - **A surface holds its window** (2026-11-10, kama 0.9.911; GPU-2, AGENTS.gpu.md item 9), on `@kama/window`'s counted
   `NativeWindow`, so a surface, adapter options made with it and a frame each drop safely in either order with the
   window. **Breaking:** `SurfaceError::Closed` and `ConfigureError::Closed`, which a surface answers once its window's

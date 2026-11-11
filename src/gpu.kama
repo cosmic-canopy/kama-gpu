@@ -1262,10 +1262,11 @@ type resource CommandBuffer implements Copyable<This>(bare: give) {
 // Why an acquire gave no texture. Occluded: the window is hidden or minimised; natively the acquire slept 32 ms first,
 // so a loop that skips the frame does not spin. Outdated or Lost: configure again (at the window's new size). Timeout:
 // try the next frame. Failed: anything else webgpu.h reports. Closed: the window's `Window` was dropped, so the surface
-// never reaches it again: drop the surface (the package's own; webgpu.h has no such status). (The design's OutOfMemory
-// is not here: neither leg's webgpu.h reports it any more.)
+// never reaches it again: drop the surface. NotConfigured: no configure has succeeded on the surface, a programming
+// error: configure it first. Closed and NotConfigured are the package's own; webgpu.h has no such status. (The design's
+// OutOfMemory is not here: neither leg's webgpu.h reports it any more.)
 type enum SurfaceError implements Error {
-    Occluded, Outdated, Lost, Timeout, Failed, Closed;
+    Occluded, Outdated, Lost, Timeout, Failed, Closed, NotConfigured;
 
     public const fn string message() {
         return match (this) {
@@ -1275,6 +1276,7 @@ type enum SurfaceError implements Error {
             case Timeout: "no texture came in time";
             case Failed: "the surface failed";
             case Closed: "the window is closed: drop the surface";
+            case NotConfigured: "the surface is not configured: configure it first";
         };
     }
 }
@@ -1555,16 +1557,19 @@ unsafe fn Result<SurfaceCapabilities, GpuError> capabilitiesOf(UnsafePtr surface
 }
 
 // What every copy of a surface shares: the native surface, released with the last copy, the window it presents to, held
-// so its system window outlives the surface, and the view format it was last configured to be drawn through, so a copy
-// made before a configure draws as the configure asked.
+// so its system window outlives the surface, whether a configure has reached it, and the view format it was last
+// configured to be drawn through, so a copy made before a configure draws as the configure asked.
 type resource SurfaceState {
     UnsafePtr handle;
+    // A configure has reached WebGPU. An adopted surface is taken as configured: its maker vouches for it, as for its
+    // window, since webgpu.h cannot be asked.
+    bool hasConfig = false;
     int32 view = 0;   // WebGPU's number for the view format; Undefined (0) before a configure, which is the texture's own
     StateHold hold = StateHold.empty();   // the state of the device it was last configured with, which its frames hold
     // The window, held (@kama/window's WIN-1); an adopted surface holds an adopted handle, which is always open.
     NativeWindow onWindow = NativeWindow.adopt(kind: NativeKind::None, display: null, window: null);
 
-    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; this.hasConfig = true; }
     public unsafe ctor fromWindow(UnsafePtr raw, NativeWindow window) {
         this.handle = raw;
         this.onWindow = give window;
@@ -1574,9 +1579,11 @@ type resource SurfaceState {
     public unsafe const fn bool windowOpen() { return this.onWindow.isOpen(); }
     // Another hold on the window, for a frame or adapter options that hold the native surface too.
     public unsafe const fn NativeWindow heldWindow() { return copy this.onWindow; }
+    public const fn bool isConfigured() { return this.hasConfig; }
     public const fn int32 viewFormat() { return this.view; }
     public unsafe const fn UnsafePtr deviceState() { return this.hold.raw(); }
     public unsafe fn void configured(int32 view, UnsafePtr block) {
+        this.hasConfig = true;
         this.view = view;
         this.hold = StateHold.make(block: block);
     }
@@ -1610,7 +1617,8 @@ type resource Surface implements Copyable<This>(bare: give) {
         Shared<SurfaceState> s = new SurfaceState.fromWindow(raw: raw, window: give window);
         this.state = give s;
     }
-    // A surface made elsewhere: its maker keeps the window alive while this lives.
+    // A surface made elsewhere: its maker keeps the window alive while this lives, and it is taken as configured, by its
+    // maker or by a `configure` here.
     public unsafe ctor adopt(UnsafePtr raw) {
         Shared<SurfaceState> s = new SurfaceState.adopt(raw: raw);
         this.state = give s;
@@ -1663,10 +1671,12 @@ type resource Surface implements Copyable<This>(bare: give) {
         return Result::Ok(value: Unit::Unit);
     }
 
-    // The next texture to draw into, or why there is none: Closed once the window is closed, without asking WebGPU,
-    // which would hand out frames for the hidden window that go nowhere.
+    // The next texture to draw into, or why there is none. Two are answered without asking WebGPU: Closed once the
+    // window is closed, since WebGPU would hand out frames for the hidden window that go nowhere, and NotConfigured
+    // before a configure has succeeded, since wgpu-native ends the process on that acquire.
     public unsafe fn Result<SurfaceTexture, SurfaceError> acquire() {
         if (!this.state.windowOpen()) { return Result::Err(error: SurfaceError::Closed); }
+        if (!this.state.isConfigured()) { return Result::Err(error: SurfaceError::NotConfigured); }
         UnsafePtr texture = null;
         int32 suboptimal = 0;
         UnsafePtr h = this.raw();

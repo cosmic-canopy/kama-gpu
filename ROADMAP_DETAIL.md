@@ -5,25 +5,6 @@ when it comes up, and their answers are recorded here or, for a departure from k
 [AGENTS.gpu.md](AGENTS.gpu.md). When a row ships, its section goes: what was built is the [SPEC](SPEC.md), and how it
 was decided is the git log. `tools/check-roadmap.sh` holds every section to a row.
 
-<a id="unconfigured-acquire"></a>
-## GPU-13: an acquire before a configure refused
-
-Found by the probe for a surface holding its window (AGENTS.gpu.md item 9), measured 3 of 3: `surface.acquire()` on
-a surface no configure has reached calls `wgpuSurfaceGetCurrentTexture`, and wgpu-native ends the process ("Surface is
-not configured for presentation"). A browser's `getCurrentTexture()` on an unconfigured context throws: a programming
-error, not a state to wait out.
-
-**Decided** (the owner, 2026-11-10, as recommended): a new `SurfaceError::NotConfigured`, over reusing `Outdated`.
-`Outdated` says to configure again, and a program answers it as a routine resize, so a configure that never happened
-would hide as one. The surface refuses it without asking WebGPU, as it refuses `Closed`, on both legs, from the state
-every copy shares, so a copy made before the configure acquires after it.
-
-An adopted surface is taken as configured: the package never saw its configure, and `Surface.adopt`'s caller already
-vouches for what it was handed, as for its window.
-
-Done: a test acquires before a configure and is refused, and a copy made before the configure acquires after it; a
-mutation that drops the check ends the tests' process, as the probe measured.
-
 <a id="web-leg"></a>
 ## GPU-3: a canvas surface, and the tests run in a browser
 

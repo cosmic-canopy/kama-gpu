@@ -40,8 +40,8 @@ in; *as an engine renderer* they stay out.
 **[SPEC.md](SPEC.md) is what the package is, [ROADMAP.md](ROADMAP.md) what comes next, and [COVERAGE.md](COVERAGE.md)
 which of webgpu.h it calls.** In short (2026-11-10, kama 0.9.911): offscreen work and a surface on a window run natively
 on Windows, the web leg builds and has not run, the safe API calls 55 of webgpu.h's 206 functions, and a device's
-errors reach its own holders (GPU-1, built), and a surface holds its window (GPU-2, built). GPU-13, an acquire
-before a configure refused, is next, then GPU-3, the web leg, after `@kama/window`'s web half (WIN-3).
+errors reach its own holders (GPU-1, built), a surface holds its window (GPU-2, built), and an acquire before a
+configure is refused (GPU-13, built). GPU-3, the web leg, is next, after `@kama/window`'s web half (WIN-3).
 `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
@@ -343,11 +343,17 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
    is therefore the package's rule, not a guard against an abort: Android forbids touching the window (WIN-13), and a
    program learns to drop the surface rather than spin on a configure that succeeds into a hidden window.
 
-   **Found on the way, measured 3 of 3 (the probe's `unconfigured` case):** an acquire on a surface never configured
-   aborts the process. wgpu-native panics with "Error in wgpuSurfaceGetCurrentTexture: Validation Error. Surface is not
+   **Found on the way, measured 3 of 3 (the probe's `unconfigured` case), and built on 2026-11-10 (GPU-13):** an
+   acquire on a surface never configured aborts the process. wgpu-native panics with "Error in wgpuSurfaceGetCurrentTexture: Validation Error. Surface is not
    configured for presentation". `surface.acquire()` before a successful `configure` reaches it today. It is not
    GPU-2's. **Decided** (the owner, 2026-11-10, as recommended): a new `SurfaceError::NotConfigured`, over reusing
-   `Outdated`, which a program treats as a routine resize; GPU-13 builds it.
+   `Outdated`, which a program treats as a routine resize, so a configure that never happened would hide as one.
+   - The surface answers it without asking WebGPU, from the state every copy shares, so a copy made before the
+     configure acquires after it. A refused `ConfigureError` leaves the surface as it was, since WebGPU never saw it.
+   - An adopted surface is taken as configured: webgpu.h cannot be asked, and `Surface.adopt`'s caller already vouches
+     for what it hands over, as for its window.
+   - `tests/` reproduced the abort first (exit 127, "Surface is not configured for presentation"), and gains 5 cases
+     (83). 5 of 5 mutations were caught, two of them by the process ending as the probe measured.
 
    **Stopgap, replaced: the surface had to be dropped before its window,** documented on `Surface`, because a `Window`
    was not counted, so a lifetime rule lived only in documentation in a safe API.
