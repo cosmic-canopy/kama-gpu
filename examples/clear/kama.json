@@ -2,7 +2,7 @@
   "name": "clear",
   "version": "0.1.0",
   "kind": "executable",
-  "kama": ">=0.9.874",
+  "kama": ">=0.9.915",
   "description": "A window cleared to a slowly changing colour each frame, on @kama/gpu and @kama/window, natively and in a browser: Escape quits, a resize reconfigures",
   "entry": "src/main.kama",
   "webgpu": true,
