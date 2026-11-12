@@ -16,7 +16,7 @@
 
 import {
     core::println,
-    core::env::envOr,
+    core::env::envOr, core::env::args, core::env::Args,
     std::app::App, std::app::Lifecycle, std::app::run, std::app::quit,
     std::collections::DynamicArray,
     std::memory::Owned, std::memory::replace,
@@ -423,6 +423,7 @@ type resource AdapterPool {
     DynamicArray<AdapterRequest> asked = DynamicArray.empty();
     DynamicArray<Adapter> ready = DynamicArray.empty();
     string failure = "";
+    int32 unavailable = 0;   // requests answered NoAdapter
 
     public unsafe ctor make(ref Instance instance, int32 count) {
         int32 i = 0;
@@ -440,18 +441,40 @@ type resource AdapterPool {
             match (give s) {
                 case Pending: { i = i + 1; }
                 case Ready(adapter: a): { AdapterRequest settledOne = this.asked.remove(index: i); this.ready.add(item: give a); }
-                case Failed(error: e): { AdapterRequest settledOne = this.asked.remove(index: i); this.failure = e.message(); }
+                case Failed(error: e): {
+                    AdapterRequest settledOne = this.asked.remove(index: i);
+                    this.failure = e.message();
+                    if (isNoAdapter(e: e)) { this.unavailable = this.unavailable + 1; }
+                }
             };
         }
         return this.asked.length() == 0;
     }
 
     public const fn isize count() { return this.ready.length(); }
+    // Every request answered that there is no adapter here.
+    public const fn bool noneHere() { return this.ready.length() == 0 && this.unavailable > 0; }
     public const fn string failedWith() { return copy this.failure; }
     public unsafe fn Optional<Adapter> take() { return this.ready.pop(); }
 }
 
 fn bool isConsumed(const ref GpuError e) { return match (e) { case Consumed: true; case _: false; }; }
+fn bool isNoAdapter(const ref GpuError e) { return match (e) { case NoAdapter(words: said): true; case _: false; }; }
+
+// `--adapter-optional`: a browser or system that gives WebGPU no adapter skips the cases that need one, saying so,
+// rather than failing them. Only a leg known to have none passes it (headless Firefox 160 here, AGENTS.gpu.md item 11),
+// so a missing adapter anywhere else still fails.
+unsafe fn bool adapterOptional() {
+    Args a = args();
+    int32 i = 0;
+    while (i < a.count()) {
+        Optional<string> one = a.get(at: i);
+        bool found = match (one) { case Some(value: s): s == "--adapter-optional"; case None: false; };
+        if (found) { return true; }
+        i = i + 1;
+    }
+    return false;
+}
 
 type resource Check implements App {
     Optional<Instance> instance = Optional::None;
@@ -568,6 +591,14 @@ type resource Check implements App {
                 isize n = p.count();
                 if (n < cast<isize>(ADAPTERS)) {
                     string words = p.failedWith();
+                    if (p.noneHere() && adapterOptional()) {
+                        // Every case after this one needs an adapter: the surface cases and the error cases too.
+                        this.verdict(name: "with no adapter here, WebGPU says why (NoAdapter's words)",
+                                     why: words.isEmpty() ? "no words" : "");
+                        println(s: "skip every case that needs a WebGPU adapter: there is none here (--adapter-optional): ${words}");
+                        this.stage = 5;
+                        return;
+                    }
                     this.verdict(name: "adapters, asked of the instance", why: "${n} of ${ADAPTERS} given: ${words}");
                     this.stage = 3;
                     return;
@@ -1556,7 +1587,9 @@ unsafe fn void areaCases(ref Check t, ref Window window, ref Surface surface, co
     };
     Limits limits = device.limits();
     uint32 most = limits.maxTextureDimension2D;
-    Result<Window, WindowError> wide = Window.openIn(canvas: "#wide", title: "wide", width: 6000, height: 10, options: quietly());
+    // One CSS pixel past the most, so past it in pixels at any device scale of 1 or more.
+    int32 past = cast<int32>(most) + 1;
+    Result<Window, WindowError> wide = Window.openIn(canvas: "#wide", title: "wide", width: past, height: 10, options: quietly());
     match (give wide) {
         case Err(error: e): { string why = e.message(); t.verdict(name: "a canvas wider than maxTextureDimension2D is refused as TooLarge, naming the most", why: "no window: " + why); }
         case Ok(value: wideWindow): {
@@ -1573,6 +1606,22 @@ unsafe fn void areaCases(ref Check t, ref Window window, ref Surface surface, co
                               why: expectRefusal(got: r, want: "TooLarge ${most}"));
                 }
             };
+        }
+    };
+    // #twod holds the page's 2D context, so the browser gives it no WebGPU context, as a browser without WebGPU gives
+    // none to any canvas: the surface is refused, saying so, where emdawnwebgpu's own check would end the program.
+    Result<Window, WindowError> twod = Window.openIn(canvas: "#twod", title: "twod", width: 64, height: 64, options: quietly());
+    match (give twod) {
+        case Err(error: e): { string why = e.message(); t.verdict(name: "a canvas the browser gives no WebGPU context is refused, not aborted", why: "no window: " + why); }
+        case Ok(value: twodWindow): {
+            Result<Surface, GpuError> made = Surface.make(instance: instance, window: twodWindow);
+            string got = match (give made) {
+                case Ok(value: s): "a surface";
+                case Err(error: e): e.message();
+            };
+            string want = "the browser gives this canvas no WebGPU context";
+            t.verdict(name: "a canvas the browser gives no WebGPU context is refused, not aborted",
+                      why: got == want ? "" : "got `" + got + "`, not `" + want + "`");
         }
     };
 }

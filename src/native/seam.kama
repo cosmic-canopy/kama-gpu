@@ -2,7 +2,7 @@
 // its file, so each is published through a wrapper, as the generated bindings are.
 
 export {
-    SEAM_PENDING, SEAM_READY, SEAM_FAILED,
+    SEAM_PENDING, SEAM_READY, SEAM_FAILED, SEAM_UNAVAILABLE,
     requestAdapter, adapterRequestPoll, adapterRequestTake, adapterRequestMessage, adapterRequestDrop,
     adapterInfoText, adapterInfoNumbers, adapterFeatureNames, deviceFeatureNames,
     adapterMarkNew, adapterMarkHold, adapterMarkRelease,
@@ -22,6 +22,7 @@ extern "gpuseam.h";
 comptime int32 SEAM_PENDING = 0;
 comptime int32 SEAM_READY = 1;
 comptime int32 SEAM_FAILED = 2;
+comptime int32 SEAM_UNAVAILABLE = 4;   // GPUSEAM_UNAVAILABLE, an adapter request webgpu.h answered Unavailable
 
 comptime int32 LOSS_DESTROYED = 2;   // GPUSEAM_LOSS_DESTROYED; GPUSEAM_LOSS_UNKNOWN is 1, and 0 not lost
 

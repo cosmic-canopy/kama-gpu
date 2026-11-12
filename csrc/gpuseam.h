@@ -30,6 +30,9 @@
 #define GPUSEAM_PENDING 0
 #define GPUSEAM_READY 1
 #define GPUSEAM_FAILED 2
+// An adapter request webgpu.h answered `WGPURequestAdapterStatus_Unavailable`: no adapter here for it (a browser or
+// system without WebGPU, or none matching its options). 3 is the seam's own ABANDONED.
+#define GPUSEAM_UNAVAILABLE 4
 
 // A device's state block, and an error scope (below).
 typedef struct gpuseam_state gpuseam_state;
@@ -42,11 +45,12 @@ typedef struct gpuseam_adapter_request gpuseam_adapter_request;
 // Ask `instance` for an adapter (`compatible` may be NULL: an offscreen one). `power` is a WGPUPowerPreference. The
 // slot holds a reference on the instance while it lives. NULL only when the slot cannot be allocated.
 gpuseam_adapter_request *gpuseam_request_adapter(WGPUInstance instance, WGPUSurface compatible, int32_t power);
-// GPUSEAM_PENDING, _READY or _FAILED, after processing the instance's events.
+// GPUSEAM_PENDING, _READY, _FAILED or _UNAVAILABLE, after processing the instance's events.
 int32_t gpuseam_adapter_request_poll(gpuseam_adapter_request *request);
 // A READY request's adapter, handed over once (NULL after).
 WGPUAdapter gpuseam_adapter_request_take(gpuseam_adapter_request *request);
-// A FAILED request's words, copied into `dst` (at most `capacity` bytes, UTF-8, not terminated): their length.
+// A FAILED or UNAVAILABLE request's words, copied into `dst` (at most `capacity` bytes, UTF-8, not terminated): their
+// length.
 int32_t gpuseam_adapter_request_message(gpuseam_adapter_request *request, uint8_t *dst, int32_t capacity);
 // Done with the slot: freed now, or abandoned to its callback if one is still owed. An adapter not taken is released.
 void gpuseam_adapter_request_drop(gpuseam_adapter_request *request);

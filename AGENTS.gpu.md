@@ -472,6 +472,23 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
     3. **`tools/webtest.mjs` stays for the pinned Chrome for Testing alone,** until that browser runs under `kama run`,
        so the gate keeps a browser that never updates under it. It is item 10's driver, still a stopgap.
 
+    **Built on 2026-11-12 (kyoten's sixteenth session), test-first, every leg green:**
+    - **A canvas the browser gives no WebGPU context is refused** (`Surface.make`, `Refused("the browser gives this
+      canvas no WebGPU context")`). The seam asks the page first, through `js/gpuseam.js`, the package's first JS
+      library (`jsLibraries`), since emdawnwebgpu asserts the context and a debug build ended there. Red first: a new
+      case on `#twod`, a canvas the page gives a 2D context, aborted the program in every browser.
+    - **`GpuError::NoAdapter(words)`** for webgpu.h's `WGPURequestAdapterStatus_Unavailable`, which emdawnwebgpu gives for
+      a null `requestAdapter()`: the seam keeps it apart (`GPUSEAM_UNAVAILABLE`, 4, since 3 is its own ABANDONED). The
+      tests take `--adapter-optional`, passed by Firefox's leg alone: every request answering `NoAdapter` then checks
+      that WebGPU said why, prints a named skip and finishes, where without it a missing adapter fails as before.
+    - **The too-wide case asks for `maxTextureDimension2D + 1` CSS pixels,** past the limit at any device scale.
+    - **The leg** (`tools/test.sh`, `tools/browsers.mjs`): `kama run` in Edge (`tests/` 75 cases, the clear's 60
+      frames) and Firefox 160 (18 cases and the skip), each bounded by `timeout 300`; the driver in Chrome for
+      Testing (75 cases, 60 frames).
+    - **Mutations:** 6 of 6 caught, in the browser each belongs to: in Edge, the context check dropped and every canvas
+      reported as having one (both abort), and the generic words on the web; in Firefox, `Unavailable` read as a
+      failure, `NoAdapter` read as `Refused`, and `NoAdapter`'s words dropped.
+
 ## Where the truth is
 
 - **This package's own documents,** above: the SPEC, the ROADMAP and its detail, COVERAGE.md, and the CHANGELOG.

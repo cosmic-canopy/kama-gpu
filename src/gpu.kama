@@ -51,7 +51,7 @@ import {
     gpu::native::WGPUTextureDimension, gpu::native::WGPULoadOp,
     gpu::native::WGPUStoreOp, gpu::native::WGPUTextureAspect, gpu::native::WGPUPowerPreference,
     gpu::native::WGPULimits, gpu::native::WGPUFeatureName, gpu::native::WGPUBackendType, gpu::native::WGPUAdapterType,
-    gpu::native::SEAM_PENDING, gpu::native::SEAM_FAILED,
+    gpu::native::SEAM_PENDING, gpu::native::SEAM_FAILED, gpu::native::SEAM_UNAVAILABLE,
     gpu::native::requestAdapter, gpu::native::adapterRequestPoll, gpu::native::adapterRequestTake,
     gpu::native::adapterRequestMessage, gpu::native::adapterRequestDrop,
     gpu::native::adapterInfoText, gpu::native::adapterInfoNumbers, gpu::native::adapterFeatureNames,
@@ -101,6 +101,8 @@ comptime int32 FEATURES_MAX = 64;
 
 type enum GpuError implements Error {
     NoInstance,             // WebGPU gave no instance
+    NoAdapter(string words),// WebGPU has no adapter here for the request (webgpu.h's Unavailable): a browser or system
+                            // without WebGPU, or none matching its options. In the implementation's words
     Refused(string words),  // the adapter, the device or a map was refused, in the implementation's words
     Taken,                  // what a request gave was handed over already
     OutOfOrder,             // an error scope was popped while one pushed after it on its thread was still open
@@ -109,6 +111,7 @@ type enum GpuError implements Error {
     public const fn string message() {
         return match (this) {
             case NoInstance: "WebGPU gave no instance";
+            case NoAdapter(words: w): copy w;
             case Refused(words: w): copy w;
             case Taken: "what this request gave was already taken";
             case OutOfOrder: "an error scope was popped while one pushed after it on the same thread was still open";
@@ -685,15 +688,17 @@ type resource AdapterRequest {
     }
 
     // Pending until the adapter has answered; then Ready once, handing the adapter over, or Failed with the
-    // implementation's words. A poll after Ready is Failed(Taken).
+    // implementation's words: NoAdapter when there is none here for the request, Refused otherwise. A poll after Ready
+    // is Failed(Taken).
     public unsafe const fn AdapterStatus poll() {
         if (this.slot == null) { return AdapterStatus::Failed(error: GpuError::Refused(words: "out of memory for the request")); }
         int32 s = adapterRequestPoll(request: this.slot);
         if (s == SEAM_PENDING) { return AdapterStatus::Pending; }
-        if (s == SEAM_FAILED) {
+        if (s == SEAM_FAILED || s == SEAM_UNAVAILABLE) {
             InlineArray<uint8>#(512) buf = [0; 512];
             int32 n = adapterRequestMessage(request: this.slot, dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
             string words = textOf(buf: buf, length: n);
+            if (s == SEAM_UNAVAILABLE) { return AdapterStatus::Failed(error: GpuError::NoAdapter(words: give words)); }
             return AdapterStatus::Failed(error: GpuError::Refused(words: give words));
         }
         UnsafePtr adapter = adapterRequestTake(request: this.slot);
@@ -1638,7 +1643,12 @@ type resource Surface implements Copyable<This>(bare: give) {
             case Canvas: 5;
         };
         UnsafePtr h = createSurface(instance: instance.raw(), kind: kind, display: n.display(), window: n.window());
-        if (h == null) { return Result::Err(error: GpuError::Refused(words: "no surface for this window on this system")); }
+        if (h == null) {
+            // On the web the seam asks the canvas first, so a NULL there is a canvas the browser gives no WebGPU
+            // context: a browser without WebGPU, or a canvas holding another kind of context.
+            string words = kind == 5 ? "the browser gives this canvas no WebGPU context" : "no surface for this window on this system";
+            return Result::Err(error: GpuError::Refused(words: give words));
+        }
         return Result::Ok(value: Surface.fromWindow(raw: h, window: give n));
     }
     unsafe ctor fromWindow(UnsafePtr raw, NativeWindow window) {

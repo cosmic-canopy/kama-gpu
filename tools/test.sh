@@ -8,9 +8,10 @@
 #
 # Run it from msys2 UCRT64 on Windows (bash -lic, so emcc and node are on PATH for the web leg), or any shell elsewhere.
 # It needs what tools/check-bindings.sh needs: kama, and wgpu-native's SDK at $KAMA_WGPU_DIR (default
-# third_party/wgpu/<platform>). The web leg is built when `emcc` is on PATH and run by tools/webtest.mjs in every
-# headless Chromium browser it finds: a Chrome for Testing pinned under ~/browsers, Edge, Chrome (KAMA_BROWSER names
-# one). Each part is skipped, and says so, without what it needs.
+# third_party/wgpu/<platform>). The web leg is built when `emcc` is on PATH and run, headless, in every browser
+# tools/browsers.mjs finds (AGENTS.gpu.md item 11): under `kama run --target WASM` in Edge and Chrome as installed and in
+# the pinned Firefox, and through tools/webtest.mjs in the pinned Chrome for Testing (KAMA_BROWSER names one). Each part
+# is skipped, and says so, without what it needs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -32,6 +33,9 @@ export PATH="$KAMA_WGPU_DIR/lib:$PATH"
 
 failed=0
 step() { echo; echo "== $*"; }
+# A browser run, bounded where `timeout` exists: `kama run` has no time limit, and a browser that never asks for the page
+# waits for ever (kyoten's KY-53).
+bounded() { if command -v timeout >/dev/null 2>&1; then timeout 300 "$@"; else "$@"; fi; }
 
 step "the roadmap"
 tools/check-roadmap.sh || failed=1
@@ -96,16 +100,37 @@ elif ! "$KAMA" build examples/clear/kama.json --target WASM -o tests/out/clear-w
 elif ! command -v node >/dev/null 2>&1; then
     echo "ok   built tests/out/web/gputests.html and tests/out/clear-web/clear.html"
     echo "skip no node on PATH, so no browser run"
-elif ! browsers="$(node tools/webtest.mjs --list 2>/dev/null)"; then
-    echo "ok   built tests/out/web/gputests.html and tests/out/clear-web/clear.html"
-    echo "skip no Chromium browser (pin Chrome for Testing under ~/browsers, or set KAMA_BROWSER)"
 else
-    while IFS= read -r browser; do
-        echo "-- $browser"
-        node tools/webtest.mjs tests/out/web gputests.html --browser "$browser" || failed=1
-        echo "-- $browser: examples/clear on #canvas for 60 frames"
-        node tools/webtest.mjs tests/out/clear-web "clear.html?arg=--frames&arg=60" --browser "$browser" || failed=1
-    done <<< "$browsers"
+    # Under `kama run` (AGENTS.gpu.md item 11), bounded since it has no time limit of its own: Edge and Chrome as
+    # installed, and the pinned Firefox, which gives WebGPU no adapter here, so its run says so and skips the cases that
+    # need one (--adapter-optional), and the clear, which needs one, is not run in it.
+    if browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
+        while IFS= read -r browser; do
+            name="${browser##*[/\\]}"
+            if [[ "${name,,}" == *firefox* ]]; then
+                echo "-- kama run, $browser (no WebGPU adapter here: the cases that need one say so)"
+                KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless -- --adapter-optional || failed=1
+            else
+                echo "-- kama run, $browser"
+                KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless || failed=1
+                echo "-- kama run, $browser: examples/clear on #canvas for 60 frames"
+                KAMA_BROWSER="$browser" bounded "$KAMA" run examples/clear/kama.json --target WASM --headless -- --frames 60 || failed=1
+            fi
+        done <<< "$browsers"
+    else
+        echo "skip no browser for kama run (Edge or Chrome installed, or Firefox pinned under ~/browsers; or set KAMA_BROWSER)"
+    fi
+    # The pinned Chrome for Testing, through the stopgap driver: it never loads a page under `kama run` (kyoten's KY-53).
+    if browsers="$(node tools/browsers.mjs driver 2>/dev/null)"; then
+        while IFS= read -r browser; do
+            echo "-- the driver, $browser"
+            node tools/webtest.mjs tests/out/web gputests.html --browser "$browser" || failed=1
+            echo "-- the driver, $browser: examples/clear on #canvas for 60 frames"
+            node tools/webtest.mjs tests/out/clear-web "clear.html?arg=--frames&arg=60" --browser "$browser" || failed=1
+        done <<< "$browsers"
+    else
+        echo "skip no Chrome for Testing pinned under ~/browsers, so no driver run"
+    fi
 fi
 
 echo

@@ -5,6 +5,16 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **The web leg runs under `kama run`** (2026-11-12, kama 0.9.928; AGENTS.gpu.md item 11): `tests/` and
+  `examples/clear` in Edge and Chrome as installed, and `tests/` in the pinned Firefox 160, which gives WebGPU no
+  adapter here and so reports that and skips the cases that need one (`--adapter-optional`). `tools/webtest.mjs` stays
+  for the pinned Chrome for Testing alone; `tools/browsers.mjs` names the browsers.
+- **New: `GpuError::NoAdapter(words)`** for an adapter request webgpu.h answers `Unavailable` (no adapter here for it),
+  where `Refused` was. **Breaking** for an exhaustive `match` on `GpuError`.
+- **A canvas the browser gives no WebGPU context is refused by `Surface.make`**, saying so, where emdawnwebgpu's
+  assertion ended a debug build (`js/gpuseam.js`, the package's first JS library).
+- The too-wide surface case asks for one CSS pixel past `maxTextureDimension2D`, so it holds at any device scale.
+
 - **A surface is configured at its window's size** (2026-11-11, kama 0.9.911; GPU-3, AGENTS.gpu.md item 10, decision 2),
   as a WebGPU canvas's `configure()` takes none. **Breaking:** `surface.configure(device:, config:)` loses `width:` and
   `height:`; the size is the window's, as `@kama/window`'s `NativeWindow.framebufferSize()` gives it (its WIN-20), so

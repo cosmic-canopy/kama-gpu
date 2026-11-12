@@ -18,6 +18,7 @@
   },
   "cincludes": ["csrc"],
   "csources": ["csrc/gpuseam.c"],
+  "jsLibraries": ["js/gpuseam.js"],
   "dependencies": {
     "@kama/window": { "path": "../kama-window" }
   }

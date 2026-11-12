@@ -44,7 +44,9 @@ top level. Natively kama finds wgpu-native's SDK at `$KAMA_WGPU_DIR`. Everything
   `AdapterOptions.withSurface(surface:, power:)`, which holds a reference on the surface while it lives
   (`PowerPreference`: `Default`, `LowPower`, `HighPerformance`).
 - **`request.poll() -> AdapterStatus`:** `Pending`, `Ready(adapter)` or `Failed(error)`. A poll after `Ready` answers
-  `Failed(Taken)`. The adapter keeps a reference on the instance it came from, so its device requests process that
+  `Failed(Taken)`. **No adapter here for the request is `GpuError::NoAdapter(words)`,** webgpu.h's `Unavailable`: a
+  browser or system without WebGPU (headless Firefox 160 here), or none matching the options. Any other failure is
+  `Refused(words)`, in the implementation's words. The adapter keeps a reference on the instance it came from, so its device requests process that
   instance's events.
 - **What an adapter answers:**
   - `info()`, an `AdapterInfo`: `vendor()`, `architecture()`, `device()` and `description()`, which a browser may leave
@@ -174,7 +176,9 @@ Measured, each held by the tests per leg:
 A surface is what WebGPU presents into, made on an `@kama/window` window.
 
 - **`Surface.make(instance:, window:) -> Result<Surface, GpuError>`.** A copy shares the surface, its window and how
-  it was last configured. **A surface holds its window** (a `NativeWindow`, `@kama/window`'s counted handle), so the two
+  it was last configured. On the web a canvas the browser gives no WebGPU context (a browser without WebGPU, or a
+  canvas holding another kind of context) is refused, `Refused("the browser gives this canvas no WebGPU context")`,
+  where emdawnwebgpu's own check would end the program. **A surface holds its window** (a `NativeWindow`, `@kama/window`'s counted handle), so the two
   drop in either order, and so do adapter options made with it and a frame from it.
 - **Once the window's `Window` is dropped, the window is closed, and the surface never reaches it again:**
   - `configure` refuses with `ConfigureError::Closed`;

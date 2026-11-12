@@ -454,7 +454,7 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
     if (status != WGPURequestAdapterStatus_Success || adapter == NULL) {
         r->message_length = keep_message(message, r->message);
         if (r->message_length == 0) r->message_length = keep_text("WebGPU offered no adapter", r->message);
-        outcome = GPUSEAM_FAILED;
+        outcome = status == WGPURequestAdapterStatus_Unavailable ? GPUSEAM_UNAVAILABLE : GPUSEAM_FAILED;
     } else {
         r->adapter = adapter;
     }
@@ -500,7 +500,8 @@ WGPUAdapter gpuseam_adapter_request_take(gpuseam_adapter_request *r) {
 }
 
 int32_t gpuseam_adapter_request_message(gpuseam_adapter_request *r, uint8_t *dst, int32_t capacity) {
-    if (atomic_load_explicit(&r->state, memory_order_acquire) != GPUSEAM_FAILED) return 0;
+    int state = atomic_load_explicit(&r->state, memory_order_acquire);
+    if (state != GPUSEAM_FAILED && state != GPUSEAM_UNAVAILABLE) return 0;
     return copy_out(r->message, r->message_length, dst, capacity);
 }
 
@@ -835,12 +836,19 @@ _Static_assert(WGPU_LIMIT_U64_UNDEFINED == 0xFFFFFFFFFFFFFFFFull, "gpu.kama's LI
 
 // ---- a surface -------------------------------------------------------------------------------------------------------
 
+#if defined(__EMSCRIPTEN__)
+// js/gpuseam.js: 1 when the canvas the selector names gives a WebGPU context.
+extern int32_t gpuseam_web_canvas_has_webgpu(const char *selector);
+#endif
+
 WGPUSurface gpuseam_create_surface(WGPUInstance instance, int32_t kind, void *display, void *window) {
     WGPUSurfaceDescriptor d;
     memset(&d, 0, sizeof d);
 #if defined(__EMSCRIPTEN__)
     (void)display;
     if (kind != 5 || window == NULL) return NULL;
+    // A canvas the browser gives no WebGPU context is refused here: emdawnwebgpu asserts one, ending the program.
+    if (!gpuseam_web_canvas_has_webgpu((const char *)window)) return NULL;
     WGPUEmscriptenSurfaceSourceCanvasHTMLSelector canvas;
     memset(&canvas, 0, sizeof canvas);
     canvas.chain.sType = WGPUSType_EmscriptenSurfaceSourceCanvasHTMLSelector;
