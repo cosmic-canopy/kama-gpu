@@ -126,7 +126,7 @@ Done: `tests/` and the clear example green on each.
 kama's floor for a first publish is `tests/` green on every target the package claims, and `AGENTS.package.md` has
 the rest. Before it:
 - the web a claimed target that passes: built on 2026-11-11 ([AGENTS.gpu.md](AGENTS.gpu.md) item 10), in Chrome and
-  Edge, and in Firefox once `@kama/window`'s WIN-18 gives the legs a WebDriver BiDi client;
+  Edge, and in Firefox (`tests/` only, reporting its missing adapter, item 11) under `kama run`;
 - `@kama/window` published first, so this depends on its version and a consumer stops naming it beside `@kama/gpu`.
 
 The README's status and the manifest's description are rewritten for the registry, which cannot be changed after.

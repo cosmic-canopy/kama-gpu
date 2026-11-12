@@ -451,6 +451,27 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
 
     `tests/` is 96 cases natively and 74 in Chrome for Testing 157 and Edge 157, on the pin, 0.9.911+g238198b3.
 
+11. **Decided on 2026-11-12, before it was built: the web leg under `kama run`** (with `@kama/window`'s WIN-18, its
+    AGENTS.window.md item 10). kama 0.9.928 runs a page in a browser (KR-377, which closed kyoten's KY-50, item 10's
+    decision 4). Measured first (kyoten's `.scratch/win18-kamarun/`; `@kama/window`'s ROADMAP_DETAIL.md § WIN-18):
+    - under `kama run --target WASM --headless`, Edge 157 gives WebGPU an adapter with no flag, and `tests/` passes
+      but one case: the too-wide canvas is 6000 CSS pixels, past `maxTextureDimension2D` (8192) only at the driver's
+      device scale of 1.5, while `kama run` opens at 1. `examples/clear` draws its 60 frames;
+    - **headless Firefox 160 gives no adapter here** (`requestAdapter()` answers null under five pref sets), and then
+      `tests/` **aborts** (`Aborted(Assertion failed)`) rather than finishing with its verdicts;
+    - an unzipped Chrome for Testing never loads a page under `kama run` (kyoten's KY-53).
+
+    **Decided by the owner on 2026-11-12 (kyoten's sixteenth session), each as recommended** ("I'll take your rec";
+    "I take your recommendation"):
+    1. **The web leg runs `tests/` and `examples/clear` under `kama run`** in Edge and Chrome as installed, and `tests/`
+       in the pinned Firefox too. The too-wide case asks for a width past the limit at any device scale.
+    2. **Firefox: Chromium-only WebGPU until a Firefox here gives an adapter.** In Firefox, `tests/` runs, reports the
+       missing adapter as a skip with its reason, and finishes with its summary; a program with no adapter never
+       aborts. **Stopgap:** Firefox's WebGPU, built on wgpu and so usefully unlike Dawn, is unmeasured until then;
+       whether a visible Firefox gives one is a hands-on minute at a later session's start, if the owner wants it.
+    3. **`tools/webtest.mjs` stays for the pinned Chrome for Testing alone,** until that browser runs under `kama run`,
+       so the gate keeps a browser that never updates under it. It is item 10's driver, still a stopgap.
+
 ## Where the truth is
 
 - **This package's own documents,** above: the SPEC, the ROADMAP and its detail, COVERAGE.md, and the CHANGELOG.
