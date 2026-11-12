@@ -15,7 +15,7 @@ import {
     core::println,
     core::env::args, core::env::Args,
     std::app::App, std::app::Lifecycle, std::app::run, std::app::quit,
-    std::fmt::ParseError,
+    std::fmt::ParseError, std::fmt::Parseable,
     std::memory::Owned,
     std::time::sleep, std::time::Duration,
     gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::DeviceOptions,
@@ -37,7 +37,7 @@ unsafe fn int32 frameLimit() {
     if (!asked) { return 0; }
     return match (give value) {
         case Some(value: v): {
-            Result<int32, ParseError> n = int32.parse(text: v);
+            Result<int32, ParseError> n = Parseable::<int32>.parse(text: v);
             match (n) { case Ok(value: k): { return k; } case Err(error: e): { return 0; } };
         }
         case None: 0;
