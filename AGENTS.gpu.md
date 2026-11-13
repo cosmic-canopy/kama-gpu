@@ -691,6 +691,28 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
          tell apart, and ends a shipped game on one computed NaN.
        - Part of the same parity, decided by "native at parity", not asked: natively a map sees every write made before
          it, as WebGPU defines, where wgpu-native shows it only after the next submit.
+    10. **What wgpu-native takes and WebGPU refuses is refused on both legs where the package can tell, and pinned as a
+        fact where it cannot** (asked as question 10 after part 3's probe; the owner, 2026-11-13, "I will take your
+        recommendation A as revised", having said "I would prefer not to nerf native unless it is something that isn't
+        needed"). Native is never held below what a program asks for and its hardware has: what WebGPU's defaults leave
+        out is asked for in `DeviceOptions.limits` and `features`, as WebGPU's `requiredLimits` and `requiredFeatures`
+        are. None of the three is such a capability, so refusing them takes nothing a program can use.
+        - **More vertex buffer slots than the device's `maxVertexBuffers`** are refused, in the package's words, which
+          name the limit and where to raise it. wgpu-native already refuses buffers carrying attributes past the limit
+          ("The number of vertex buffers 9 exceeds the limit 8"), but leaves the slots with no attributes uncounted: 9,
+          17 and 40 slots with one used, all taken, on a device whose limit is 8 and an adapter whose is 16 (measured,
+          kyoten's `.scratch/gpu4-part3/native/probe_lim.c`). The limit is the device's, as WebGPU's check is, so a
+          device asked for 16 takes 16.
+        - **Alpha to coverage at a sample count of 1** is refused. With one sample it keeps or drops a fragment at a
+          threshold the driver picks. The exact and portable way is a `discard` in the fragment stage, and alpha to
+          coverage with multisampling is taken on both legs.
+        - **A colour target the fragment stage never writes, with a write mask that is not zero,** is pinned as a fact
+          and documented in the SPEC, not refused: telling needs the stage's outputs, which only a WGSL front end knows.
+          Natively that target's pixels are undefined. What a program means, the target left alone, is
+          `ColorWriteMask::None` or `emptyTarget()`, and both legs take either.
+        - **All three are wgpu's gaps against WebGPU's validation,** so an issue is drafted for the owner to post. When
+          wgpu refuses them itself, the package's two refusals stay (they are redundant then, and harmless), and the
+          fact turns red.
 
     **Measured before part 2 was built** (kyoten's `.scratch/gpu4-part2/FINDINGS.md`): wgpu-native v29.0.1.1 natively,
     one process per case, and plain WebGPU in headless Edge 157, with emdawnwebgpu read. It catches no JavaScript
@@ -821,7 +843,8 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
     - **On the asynchronous path the web rejects instead of throwing,** with a `TypeError` whose `reason` is undefined,
       which emdawnwebgpu turns into status 0 (an assert in its debug build).
     - **wgpu-native takes three descriptions WebGPU refuses:** 9 vertex buffers, alpha to coverage at one sample, and
-      a target the fragment stage never writes with a write mask that is not zero. Asked of the owner (question 10).
+      a target the fragment stage never writes with a write mask that is not zero. Asked of the owner as question 10,
+      and decided (decision 10).
     - **Everything else is a validation error on both legs, naming the label:**
       - strides not a multiple of 4 or past 2048, and attribute locations past 16 or used twice;
       - sample counts of 0, 3 or 64, and 9 targets;
@@ -929,8 +952,9 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       - **Not caught yet, each carried to part 4:** the depth bias slope, the stencil faces and the step mode, which
         only a draw with a depth-stencil attachment or an instanced vertex buffer shows, and part 4's pass brings
         both.
-    - **Asked of the owner, not yet answered:** question 10, what wgpu-native takes that WebGPU refuses (9 vertex
-      buffers, alpha to coverage at one sample, a target the fragment never writes with a mask not zero).
+    - **Asked of the owner:** question 10, what wgpu-native takes that WebGPU refuses (9 vertex buffers, alpha to
+      coverage at one sample, a target the fragment never writes with a mask not zero). Answered after part 3: decision
+      10.
 
     **Built on 2026-11-13 (kyoten's nineteenth session), part 3's third step: `DeviceOptions.printErrors`** (decision
     3, item 2), test-first:
