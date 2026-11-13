@@ -1085,6 +1085,8 @@ type resource Check implements App {
         string b = TextureFormat::Depth24PlusStencil8.name();
         this.verdict(name: "a format's name is webgpu.h's",
                      why: a == "BGRA8UnormSrgb" && b == "Depth24PlusStencil8" ? "" : "${a}, ${b}");
+        this.verdict(name: "requiredFeature follows WebGPU's table: 14 BC formats, 10 ETC2 and EAC, 28 ASTC, Depth32FloatStencil8 and the six 16-bit norms need their feature, the other 42 none",
+                     why: requiredFeatures());
     }
 
     // What `preferred()` makes of a surface's answer, and the answers `of` refuses as breaking webgpu.h's promises.
@@ -2806,4 +2808,59 @@ unsafe fn void runChecks() {
 fn uint8 main() {
     runChecks();
     return cast<uint8>(exitStatus);
+}
+
+// A format's required feature as a number: 0 none, 1 TextureCompressionBC, 2 TextureCompressionETC2,
+// 3 TextureCompressionASTC, 4 Depth32FloatStencil8, 5 TextureFormatsTier1, 6 any other.
+fn int32 neededIndex(Optional<Feature> f) {
+    return match (f) {
+        case Some(value: x): neededKind(x: x);
+        case None: 0;
+    };
+}
+
+fn int32 neededKind(Feature x) {
+    return match (x) {
+        case TextureCompressionBC: 1;
+        case TextureCompressionETC2: 2;
+        case TextureCompressionASTC: 3;
+        case Depth32FloatStencil8: 4;
+        case TextureFormatsTier1: 5;
+        case _: 6;
+    };
+}
+
+// "" when every format's required feature is WebGPU's: the count of each, and the formats beside a rule's edge.
+fn string requiredFeatures() {
+    InlineArray<int32>#(7) counts = [0; 7];
+    int32 n = 0;
+    while (n < 1024) {
+        Optional<TextureFormat> f = TextureFormat::fromValue(value: n);
+        match (f) {
+            case Some(value: x): {
+                isize k = cast<isize>(neededIndex(f: x.requiredFeature()));
+                counts[k] = counts[k] + 1;
+            }
+            case None: { }
+        };
+        n = n + 1;
+    }
+    int32 none = counts[0];
+    int32 bc = counts[1];
+    int32 etc = counts[2];
+    int32 astc = counts[3];
+    int32 d32 = counts[4];
+    int32 tier1 = counts[5];
+    int32 other = counts[6];
+    string got = "none ${none}, BC ${bc}, ETC2 ${etc}, ASTC ${astc}, Depth32FloatStencil8 ${d32}, TextureFormatsTier1 ${tier1}, other ${other}";
+    if (none != 42 || bc != 14 || etc != 10 || astc != 28 || d32 != 1 || tier1 != 6 || other != 0) { return got; }
+    int32 depth16 = neededIndex(f: TextureFormat::Depth16Unorm.requiredFeature());
+    int32 r16float = neededIndex(f: TextureFormat::R16Float.requiredFeature());
+    int32 rgba16unorm = neededIndex(f: TextureFormat::RGBA16Unorm.requiredFeature());
+    int32 eac = neededIndex(f: TextureFormat::EACRG11Snorm.requiredFeature());
+    int32 depth32 = neededIndex(f: TextureFormat::Depth32Float.requiredFeature());
+    if (depth16 != 0 || r16float != 0 || rgba16unorm != 5 || eac != 2 || depth32 != 0) {
+        return "Depth16Unorm ${depth16}, R16Float ${r16float}, RGBA16Unorm ${rgba16unorm}, EACRG11Snorm ${eac}, Depth32Float ${depth32}";
+    }
+    return "";
 }

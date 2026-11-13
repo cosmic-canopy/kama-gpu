@@ -16,7 +16,8 @@
 // tools/check-wgpu-constants).
 //
 // The optional third output is the safe API's `TextureFormat` (src/formats.gen.kama), every format both headers name,
-// written from the same headers in the same run so the enum and the bindings cannot disagree.
+// written from the same headers in the same run so the enum and the bindings cannot disagree. Its `requiredFeature()`
+// follows WebGPU's "texture format required features" by the formats' names, since no header carries that table.
 //
 // `wgpugen --coverage …` writes COVERAGE.md instead: which of the headers' functions the safe API calls, from kama's
 // answer to where each binding and seam wrapper is referenced (§ coverage, below; tools/check-bindings.sh runs it).
@@ -1029,6 +1030,20 @@ unsafe fn void emitFunctions(ref DynamicArray<uint8> dst, ref DynamicArray<strin
     }
 }
 
+// The feature a device must be given before it may use the format `name` at all, as `Feature` spells it, or "": WebGPU's
+// "texture format required features", which no header carries, by the formats' names. The compressed families (BC, ETC2
+// and EAC, ASTC), Depth32FloatStencil8, and the six 16-bit norms (TextureFormatsTier1; Depth16Unorm is not one of them).
+// A browser throws on such a format used without its feature, so the safe API refuses it first.
+fn string requiredFeatureOf(const ref string name) {
+    if (name.startsWith(prefix: "BC")) { return "TextureCompressionBC"; }
+    if (name.startsWith(prefix: "ETC2") || name.startsWith(prefix: "EAC")) { return "TextureCompressionETC2"; }
+    if (name.startsWith(prefix: "ASTC")) { return "TextureCompressionASTC"; }
+    if (name == "Depth32FloatStencil8") { return "Depth32FloatStencil8"; }
+    bool sixteen = name.startsWith(prefix: "R16") || name.startsWith(prefix: "RG16") || name.startsWith(prefix: "RGBA16");
+    if (sixteen && (name.endsWith(suffix: "16Unorm") || name.endsWith(suffix: "16Snorm"))) { return "TextureFormatsTier1"; }
+    return "";
+}
+
 // The safe API's `TextureFormat` (src/formats.gen.kama): every `WGPUTextureFormat` member both headers name, but
 // `Undefined` and `Force32`, as a kama enum with its numbers both ways, its name, and its sRGB and linear forms (a
 // member `XSrgb` whose `X` is a member too). The numbers are the bindings' own constants, which the constant check holds
@@ -1089,7 +1104,7 @@ unsafe fn void emitFormats(ref DynamicArray<uint8> dst, ref Report report, const
     emit(dst: dst, s: "// tools/check-bindings.sh --write). Each number is the bindings' constant, which that script holds to each leg's");
     emit(dst: dst, s: "// header.");
     emit(dst: dst, s: "");
-    emit(dst: dst, s: "import { gpu::native::WGPUTextureFormat };");
+    emit(dst: dst, s: "import { gpu::native::WGPUTextureFormat, Feature };");
     emit(dst: dst, s: "");
     emit(dst: dst, s: "export { TextureFormat };");
     emit(dst: dst, s: "");
@@ -1168,6 +1183,23 @@ unsafe fn void emitFormats(ref DynamicArray<uint8> dst, ref Report report, const
         i = i + 1;
     }
     emit(dst: dst, s: "            case _: this;");
+    emit(dst: dst, s: "        };");
+    emit(dst: dst, s: "    }");
+    emit(dst: dst, s: "");
+    emit(dst: dst, s: "    // The feature a device must be given before it may use this format at all (WebGPU's \"texture format required");
+    emit(dst: dst, s: "    // features\"), or None. The safe API refuses the format on a device without it, where a browser throws.");
+    emit(dst: dst, s: "    public const fn Optional<Feature> requiredFeature() {");
+    emit(dst: dst, s: "        return match (this) {");
+    i = 0;
+    while (i < names.length()) {
+        string needed = requiredFeatureOf(name: names[i]);
+        if (!needed.isEmpty()) {
+            string row = "            case ${names[i]}: Optional::Some(value: Feature::${needed});";
+            appendLine(dst: dst, s: row);
+        }
+        i = i + 1;
+    }
+    emit(dst: dst, s: "            case _: Optional::None;");
     emit(dst: dst, s: "        };");
     emit(dst: dst, s: "    }");
     emit(dst: dst, s: "");

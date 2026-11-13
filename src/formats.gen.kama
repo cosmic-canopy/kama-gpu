@@ -3,7 +3,7 @@
 // tools/check-bindings.sh --write). Each number is the bindings' constant, which that script holds to each leg's
 // header.
 
-import { gpu::native::WGPUTextureFormat };
+import { gpu::native::WGPUTextureFormat, Feature };
 
 export { TextureFormat };
 
@@ -437,6 +437,73 @@ type enum TextureFormat {
             case ASTC12x10UnormSrgb: TextureFormat::ASTC12x10Unorm;
             case ASTC12x12UnormSrgb: TextureFormat::ASTC12x12Unorm;
             case _: this;
+        };
+    }
+
+    // The feature a device must be given before it may use this format at all (WebGPU's "texture format required
+    // features"), or None. The safe API refuses the format on a device without it, where a browser throws.
+    public const fn Optional<Feature> requiredFeature() {
+        return match (this) {
+            case R16Unorm: Optional::Some(value: Feature::TextureFormatsTier1);
+            case R16Snorm: Optional::Some(value: Feature::TextureFormatsTier1);
+            case RG16Unorm: Optional::Some(value: Feature::TextureFormatsTier1);
+            case RG16Snorm: Optional::Some(value: Feature::TextureFormatsTier1);
+            case RGBA16Unorm: Optional::Some(value: Feature::TextureFormatsTier1);
+            case RGBA16Snorm: Optional::Some(value: Feature::TextureFormatsTier1);
+            case Depth32FloatStencil8: Optional::Some(value: Feature::Depth32FloatStencil8);
+            case BC1RGBAUnorm: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC1RGBAUnormSrgb: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC2RGBAUnorm: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC2RGBAUnormSrgb: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC3RGBAUnorm: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC3RGBAUnormSrgb: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC4RUnorm: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC4RSnorm: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC5RGUnorm: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC5RGSnorm: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC6HRGBUfloat: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC6HRGBFloat: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC7RGBAUnorm: Optional::Some(value: Feature::TextureCompressionBC);
+            case BC7RGBAUnormSrgb: Optional::Some(value: Feature::TextureCompressionBC);
+            case ETC2RGB8Unorm: Optional::Some(value: Feature::TextureCompressionETC2);
+            case ETC2RGB8UnormSrgb: Optional::Some(value: Feature::TextureCompressionETC2);
+            case ETC2RGB8A1Unorm: Optional::Some(value: Feature::TextureCompressionETC2);
+            case ETC2RGB8A1UnormSrgb: Optional::Some(value: Feature::TextureCompressionETC2);
+            case ETC2RGBA8Unorm: Optional::Some(value: Feature::TextureCompressionETC2);
+            case ETC2RGBA8UnormSrgb: Optional::Some(value: Feature::TextureCompressionETC2);
+            case EACR11Unorm: Optional::Some(value: Feature::TextureCompressionETC2);
+            case EACR11Snorm: Optional::Some(value: Feature::TextureCompressionETC2);
+            case EACRG11Unorm: Optional::Some(value: Feature::TextureCompressionETC2);
+            case EACRG11Snorm: Optional::Some(value: Feature::TextureCompressionETC2);
+            case ASTC4x4Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC4x4UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC5x4Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC5x4UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC5x5Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC5x5UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC6x5Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC6x5UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC6x6Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC6x6UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC8x5Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC8x5UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC8x6Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC8x6UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC8x8Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC8x8UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC10x5Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC10x5UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC10x6Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC10x6UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC10x8Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC10x8UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC10x10Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC10x10UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC12x10Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC12x10UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC12x12Unorm: Optional::Some(value: Feature::TextureCompressionASTC);
+            case ASTC12x12UnormSrgb: Optional::Some(value: Feature::TextureCompressionASTC);
+            case _: Optional::None;
         };
     }
 

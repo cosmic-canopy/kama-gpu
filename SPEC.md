@@ -5,9 +5,9 @@ tested. What comes next is [ROADMAP.md](ROADMAP.md), why the package departs fro
 [AGENTS.gpu.md](AGENTS.gpu.md), which of webgpu.h's functions it calls is [COVERAGE.md](COVERAGE.md), and its history
 is the git log and [CHANGELOG.md](CHANGELOG.md).
 
-**Where it stands** (2026-11-11, kama 0.9.911): offscreen work and a surface on an `@kama/window` window, natively on
-Windows over Vulkan, on wgpu-native v29.0.1.1, and on the web (emdawnwebgpu, Dawn v20260423.175430) in headless Chrome
-for Testing 157 and Edge 157 on a canvas. It calls 55 of webgpu.h's 206 functions. Not published.
+**Where it stands** (2026-11-13, kama 0.9.938): offscreen work and a surface on an `@kama/window` window, natively on
+Windows over Vulkan, on wgpu-native v29.0.1.1, and on the web (emdawnwebgpu, Dawn v20260423.175430) in headless Edge
+157, Chrome for Testing 157 and Firefox 160 on a canvas. It calls 72 of webgpu.h's 206 functions. Not published.
 
 ## Using it
 
@@ -185,12 +185,20 @@ The sets:
 
 - **`device.createTexture(width:, height:, format:, usage:)`:** a 2D texture, one mip level, one sample, `usage` a
   `TextureUsage`.
+  - **A format whose feature the device was not given is refused in the package's words** (its `requiredFeature()`,
+    below), where a browser throws, which ends a web program, and wgpu-native reports a validation error. The texture
+    handed back is made empty in RGBA8Unorm under a quiet section, so it is invalid.
 - **`texture.createView()`,** in the texture's own format.
 - **`TextureFormat` names every format webgpu.h has (101),** the same numbers on both legs:
   - `value()`, webgpu.h's number, and `TextureFormat::fromValue(value:)`, `None` for a number webgpu.h names no
     format for (an implementation's own extensions among them);
   - `name()`;
-  - `isSrgb()`, and `srgb()` and `linear()`: a format's sRGB and linear forms.
+  - `isSrgb()`, and `srgb()` and `linear()`: a format's sRGB and linear forms;
+  - `requiredFeature()`: the feature a device must be given before the format is used at all (WebGPU's "texture format
+    required features"), or `None`. `TextureCompressionBC` for the 14 BC formats, `TextureCompressionETC2` for the 10
+    ETC2 and EAC ones, `TextureCompressionASTC` for the 28 ASTC ones, `Depth32FloatStencil8` for itself, and
+    `TextureFormatsTier1` for the six 16-bit norms (`R16Unorm` to `RGBA16Snorm`); the other 42 need none. Generated
+    with the enum, by the formats' names, since no header carries the table.
 
 ## Samplers
 
@@ -228,6 +236,9 @@ The sets:
 
     Each is a `type value` whose fields start at WebGPU's defaults.
   - A `minBindingSize` past 2^53 - 1 is clamped, which keeps its meaning, since no buffer reaches either.
+  - **A storage texture in a format whose feature the device was not given is refused in the package's words,** as a
+    texture is. The layout handed back has that entry's format made RGBA8UnormSrgb, never a storage format, under a
+    quiet section, so it is invalid.
 - **`device.createPipelineLayout(descriptor:)`:** a `PipelineLayoutDescriptor.make()`, `group(layout:)` per bind group
   layout, group 0 first, and `label(text:)`.
 - **`device.createBindGroup(descriptor:)`:** a `BindGroupDescriptor.make(layout:)`, `entry(binding:, resource:)` per
@@ -387,13 +398,14 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   make, the coverage rules on their fixture, and the constants;
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 28 facts, natively;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 109 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 150 cases natively with a display, debug and release.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
-- the xfail, an encoder used after `finish()`, which must be refused for the move;
-- the web leg, headless, on the page's canvases: `tests/` (88 cases) and `examples/clear` (60 frames on `#canvas`)
+- the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
+  wanted, held to its four refusals;
+- the web leg, headless, on the page's canvases: `tests/` (127 cases) and `examples/clear` (60 frames on `#canvas`)
   under `kama run --target WASM --headless` in Edge and Chrome as installed; `tests/` in the pinned Firefox 160, which
   gives WebGPU no adapter under `kama run` until its runner sets one pref (kyoten's KY-54), so it reports that and skips
   the cases that need one (`--adapter-optional`), holds `maxImmediateSize` to 0 (`--no-immediates`) and a WGSL

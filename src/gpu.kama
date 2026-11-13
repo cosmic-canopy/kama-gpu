@@ -456,6 +456,44 @@ type value FeatureSet {
     }
 }
 
+// Its name, as `Feature` spells it, for the package's own words.
+fn string featureName(Feature f) {
+    return match (f) {
+        case CoreFeaturesAndLimits: "CoreFeaturesAndLimits";
+        case DepthClipControl: "DepthClipControl";
+        case Depth32FloatStencil8: "Depth32FloatStencil8";
+        case TextureCompressionBC: "TextureCompressionBC";
+        case TextureCompressionBCSliced3D: "TextureCompressionBCSliced3D";
+        case TextureCompressionETC2: "TextureCompressionETC2";
+        case TextureCompressionASTC: "TextureCompressionASTC";
+        case TextureCompressionASTCSliced3D: "TextureCompressionASTCSliced3D";
+        case TimestampQuery: "TimestampQuery";
+        case IndirectFirstInstance: "IndirectFirstInstance";
+        case ShaderF16: "ShaderF16";
+        case RG11B10UfloatRenderable: "RG11B10UfloatRenderable";
+        case BGRA8UnormStorage: "BGRA8UnormStorage";
+        case Float32Filterable: "Float32Filterable";
+        case Float32Blendable: "Float32Blendable";
+        case ClipDistances: "ClipDistances";
+        case DualSourceBlending: "DualSourceBlending";
+        case Subgroups: "Subgroups";
+        case TextureFormatsTier1: "TextureFormatsTier1";
+        case TextureFormatsTier2: "TextureFormatsTier2";
+        case PrimitiveIndex: "PrimitiveIndex";
+        case TextureComponentSwizzle: "TextureComponentSwizzle";
+    };
+}
+
+// Why `what` may not use `format` on a device with `given` features, or "".
+fn string refusalOfFormat(TextureFormat format, FeatureSet given, const ref string what) {
+    Optional<Feature> needed = format.requiredFeature();
+    return match (needed) {
+        case Some(value: f): given.has(feature: f) ? "" : "${what} uses the texture format " + format.name()
+            + ", which needs the feature " + featureName(f: f) + "; the device was not given it, and WebGPU refuses it";
+        case None: "";
+    };
+}
+
 // The WGPUFeatureNames `count` of which a query copied into `names`, as a set; an implementation's own are left out.
 fn FeatureSet featuresFrom(const ref InlineArray<int32>#(64) names, int32 count) {
     FeatureSet s = FeatureSet.empty();
@@ -1045,7 +1083,8 @@ type resource Device implements Copyable<This>(bare: give) {
                                  block: this.hold.raw());
     }
 
-    // A 2D texture, one mip level, one sample.
+    // A 2D texture, one mip level, one sample. A format whose feature the device was not given is refused in the
+    // package's words, where a browser throws (decision 9).
     public unsafe fn Texture createTexture(uint32 width, uint32 height, TextureFormat format, TextureUsage usage) {
         WGPUTextureDescriptor d = WGPUTextureDescriptor.zero();
         d.usage = usage.bits();
@@ -1056,8 +1095,20 @@ type resource Device implements Copyable<This>(bare: give) {
         d.format = format.value();
         d.mipLevelCount = 1;
         d.sampleCount = 1;
-        return Texture.fromDevice(raw: deviceCreateTexture(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))),
-                                  block: this.hold.raw());
+        string refused = this.formatRefusal(format: format, what: "a texture");
+        if (refused.isEmpty()) {
+            return Texture.fromDevice(raw: deviceCreateTexture(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))),
+                                      block: this.hold.raw());
+        }
+        // the handle handed back is invalid: an empty RGBA8Unorm texture, which WebGPU refuses, its error dropped
+        this.refuse(words: refused);
+        TextureFormat plain = TextureFormat::RGBA8Unorm;
+        d.format = plain.value();
+        d.size.width = 0;
+        quietBegin(device: this.handle);
+        UnsafePtr raw = deviceCreateTexture(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d)));
+        quietEnd(device: this.handle);
+        return Texture.fromDevice(raw: raw, block: this.hold.raw());
     }
 
     // A shader module from WGSL (WebGPU's `createShaderModule`). It is handed back at once, as WebGPU's is: an error in
@@ -1100,6 +1151,12 @@ type resource Device implements Copyable<This>(bare: give) {
         return Sampler.fromDevice(raw: raw, block: this.hold.raw());
     }
 
+    // Why `what` may not use `format` on this device, or "": a format whose feature the device was not given, which a
+    // browser throws on (decision 9).
+    unsafe const fn string formatRefusal(TextureFormat format, const ref string what) {
+        return refusalOfFormat(format: format, given: this.features(), what: what);
+    }
+
     // What a backend would end the program on, refused and reported as a validation error where WebGPU reports one
     // (AGENTS.gpu.md item 12, decision 9).
     unsafe fn void refuse(const ref string words) {
@@ -1114,6 +1171,26 @@ type resource Device implements Copyable<This>(bare: give) {
         d.label = labelOf(text: descriptor.labelText());
         d.entryCount = cast<usize>(entries.length());
         d.entries = cast<UnsafePtr>(entries.dataPtrMut());
+        string what = "the bind group layout '" + descriptor.labelText() + "'";
+        isize i = 0;
+        while (i < entries.length()) {
+            Optional<TextureFormat> stored = TextureFormat::fromValue(value: entries[i].storageTexture.format);
+            string refused = match (stored) {
+                case Some(value: f): this.formatRefusal(format: f, what: what);
+                case None: "";
+            };
+            if (!refused.isEmpty()) {
+                // the handle handed back is invalid: the entry's format made RGBA8UnormSrgb, never a storage format
+                this.refuse(words: refused);
+                TextureFormat unstorable = TextureFormat::RGBA8UnormSrgb;
+                entries[i].storageTexture.format = unstorable.value();
+                quietBegin(device: this.handle);
+                UnsafePtr substitute = deviceCreateBindGroupLayout(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d)));
+                quietEnd(device: this.handle);
+                return BindGroupLayout.fromDevice(raw: substitute, block: this.hold.raw());
+            }
+            i = i + 1;
+        }
         UnsafePtr raw = deviceCreateBindGroupLayout(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d)));
         return BindGroupLayout.fromDevice(raw: raw, block: this.hold.raw());
     }

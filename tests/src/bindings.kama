@@ -14,7 +14,7 @@ import {
     gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer,
     gpu::Sampler, gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::CompareFunction,
     gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::Texture, gpu::TextureView, gpu::TextureFormat,
-    gpu::TextureUsage, gpu::ShaderStage,
+    gpu::TextureUsage, gpu::ShaderStage, gpu::Feature,
     gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
     gpu::BufferBindingType, gpu::SamplerBindingLayout, gpu::SamplerBindingType, gpu::TextureBindingLayout,
     gpu::StorageTextureBindingLayout, gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::BindGroup,
@@ -50,6 +50,9 @@ type resource BindingRun {
     Optional<Sampler> refused = Optional::None;   // a sampler refused for a NaN clamp, for a bind group
     Optional<Buffer> written = Optional::None;    // the buffer the write cases write and map
     Optional<BufferRead> reading = Optional::None;
+    bool givenBC = false;   // the device was given TextureCompressionBC, which its adapter offered
+    Optional<BindGroupLayout> refusedLayout = Optional::None;   // a layout refused for its storage format
+    Optional<Texture> refusedTexture = Optional::None;   // a texture refused for its format, for a view
 
     public ctor make(bool adapterOptional) {
         this.optional = adapterOptional;
@@ -112,10 +115,26 @@ type resource BindingRun {
         else if (this.stage == 220) { this.write(bytes: counted(n: 4, first: 5), offset: 1152921504606846976, flushed: true, next: 221); }
         else if (this.stage == 221) { this.awaitOne(name: "a write at an offset of 2^60 is a validation error, not the end of the program", label: "", says: "", next: 230); }
         else if (this.stage == 230) { this.writeUnwritable(); }
-        else if (this.stage == 231) { this.awaitOne(name: "a write into a buffer without CopyDst is a validation error naming its label", label: "uniform only", says: "", next: 240); }
+        else if (this.stage == 231) { this.awaitOne(name: "a write into a buffer without CopyDst is a validation error naming its label", label: "uniform only", says: "", next: 250); }
         else if (this.stage == 240) { this.write(bytes: counted(n: 16, first: 50), offset: 0, flushed: false, next: 241); }
         else if (this.stage == 241) { this.queue = Optional::None; this.next(to: 242); }
         else if (this.stage == 242) { this.awaitRead(name: "a map made after the queue's last copy is gone still sees the write made through it", want: counted(n: 16, first: 50), next: 999); }
+        else if (this.stage == 250) { this.givenFormat(); }
+        else if (this.stage == 251) { this.awaitNone(name: "a BC texture is taken on a device given TextureCompressionBC", next: 260); }
+        else if (this.stage == 260) { this.gatedTexture(format: TextureFormat::ETC2RGB8Unorm, usage: TextureUsage::TextureBinding, next: 261); }
+        else if (this.stage == 261) { this.awaitOne(name: "an ETC2 texture on a device without TextureCompressionETC2 is a validation error in the package's words, not the end of the program", label: "ETC2RGB8Unorm", says: "TextureCompressionETC2", next: 262); }
+        else if (this.stage == 262) { this.viewOfRefused(); }
+        else if (this.stage == 263) { this.awaitOne(name: "the texture a refusal hands back is invalid: a view of it is a validation error", label: "", says: "", next: 270); }
+        else if (this.stage == 270) { this.gatedTexture(format: TextureFormat::ASTC4x4Unorm, usage: TextureUsage::TextureBinding, next: 271); }
+        else if (this.stage == 271) { this.awaitOne(name: "an ASTC texture on a device without TextureCompressionASTC is a validation error in the package's words, not the end of the program", label: "ASTC4x4Unorm", says: "TextureCompressionASTC", next: 280); }
+        else if (this.stage == 280) { this.gatedTexture(format: TextureFormat::Depth32FloatStencil8, usage: TextureUsage::RenderAttachment, next: 281); }
+        else if (this.stage == 281) { this.awaitOne(name: "a Depth32FloatStencil8 texture on a device without its feature is a validation error in the package's words, not the end of the program", label: "Depth32FloatStencil8", says: "needs the feature Depth32FloatStencil8", next: 290); }
+        else if (this.stage == 290) { this.gatedTexture(format: TextureFormat::RGBA16Snorm, usage: TextureUsage::TextureBinding, next: 291); }
+        else if (this.stage == 291) { this.awaitOne(name: "a 16-bit norm texture on a device without TextureFormatsTier1 is a validation error in the package's words, not the end of the program", label: "RGBA16Snorm", says: "TextureFormatsTier1", next: 300); }
+        else if (this.stage == 300) { this.gatedStorage(); }
+        else if (this.stage == 301) { this.awaitOne(name: "a storage texture layout in a format whose feature the device lacks is a validation error in the package's words, not the end of the program", label: "sixteen-bit storage", says: "TextureFormatsTier1", next: 302); }
+        else if (this.stage == 302) { this.ofRefusedLayout(); }
+        else if (this.stage == 303) { this.awaitOne(name: "the layout a refusal hands back is invalid: a pipeline layout of it is a validation error naming its label", label: "of a refused layout", says: "", next: 240); }
         return this.stage >= 999;
     }
 
@@ -144,7 +163,12 @@ type resource BindingRun {
         match (give s) {
             case Pending: { }
             case Ready(adapter: a): {
-                this.deviceRequest = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                // TextureCompressionBC when the adapter offers it, for a BC texture taken; every other feature is left out,
+                // so the formats that need one are refused
+                DeviceOptions options = DeviceOptions.defaults();
+                this.givenBC = a.features().has(feature: Feature::TextureCompressionBC);
+                if (this.givenBC) { options.features = options.features.with(feature: Feature::TextureCompressionBC); }
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: options));
                 this.next(to: 2);
             }
             case Failed(error: e): {
@@ -185,7 +209,7 @@ type resource BindingRun {
             case Some(value: d): {
                 match (this.queue) {
                     case Some(value: q): { CommandEncoder enc = d.createCommandEncoder(); CommandBuffer cb = give enc.finish(); q.submit(commands: give cb); }
-                    case None: { }
+                    case None: { this.found.add(name: "a binding case flushes through the run's queue", why: "the queue is gone, so on the web the case's error would wait for nothing (stage ${this.stage})"); }
                 };
             }
             case None: { }
@@ -404,6 +428,83 @@ type resource BindingRun {
         this.reading = Optional::None;   // unmapped, so the next write may land
         this.found.add(name: copy name, why: give why);
         this.next(to: next);
+    }
+
+    // A BC texture on a device given TextureCompressionBC: no error. Skipped, and said so, where the adapter has no BC.
+    unsafe fn void givenFormat() {
+        if (!this.givenBC) {
+            println(s: "skip a BC texture taken: this adapter does not offer TextureCompressionBC");
+            this.next(to: 260);
+            return;
+        }
+        match (this.device) {
+            case Some(value: d): { Texture image = d.createTexture(width: 4, height: 4, format: TextureFormat::BC1RGBAUnorm, usage: TextureUsage::TextureBinding); }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 251);
+    }
+
+    // A texture in `format`, whose feature the device was not given: refused, where a browser throws (decision 9).
+    unsafe fn void gatedTexture(TextureFormat format, TextureUsage usage, int32 next) {
+        Optional<Texture> made = Optional::None;
+        match (this.device) {
+            case Some(value: d): { made = Optional::Some(value: d.createTexture(width: 4, height: 4, format: format, usage: usage)); }
+            case None: { }
+        };
+        this.refusedTexture = give made;
+        this.flush();
+        this.next(to: next);
+    }
+
+    // A view of the last refused texture: the refusal's handle is invalid, so WebGPU refuses this too.
+    unsafe fn void viewOfRefused() {
+        Optional<Texture> held = replace(place: this.refusedTexture, with: Optional::None);
+        match (give held) {
+            case Some(value: image): { TextureView view = image.createView(); }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 263);
+    }
+
+    // A storage texture layout in RGBA16Snorm, whose feature the device was not given; the layout kept for a pipeline layout.
+    unsafe fn void gatedStorage() {
+        Optional<BindGroupLayout> made = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                BindGroupLayoutDescriptor l = BindGroupLayoutDescriptor.make();
+                l.entry(binding: 0, visibility: ShaderStage::Fragment,
+                        layout: BindingLayout::StorageTexture(layout: StorageTextureBindingLayout.make(format: TextureFormat::RGBA16Snorm)));
+                l.label(text: "sixteen-bit storage");
+                made = Optional::Some(value: d.createBindGroupLayout(descriptor: give l));
+            }
+            case None: { }
+        };
+        this.refusedLayout = give made;
+        this.flush();
+        this.next(to: 301);
+    }
+
+    // A pipeline layout of the refused layout: the refusal's handle is invalid, so WebGPU refuses this too.
+    unsafe fn void ofRefusedLayout() {
+        Optional<BindGroupLayout> held = replace(place: this.refusedLayout, with: Optional::None);
+        match (this.device) {
+            case Some(value: d): {
+                match (give held) {
+                    case Some(value: l): {
+                        PipelineLayoutDescriptor p = PipelineLayoutDescriptor.make();
+                        p.group(layout: give l);
+                        p.label(text: "of a refused layout");
+                        PipelineLayout made = d.createPipelineLayout(descriptor: give p);
+                    }
+                    case None: { }
+                };
+            }
+            case None: { Optional<BindGroupLayout> unused = give held; }
+        };
+        this.flush();
+        this.next(to: 303);
     }
 
     // A write into a buffer with no CopyDst, which WebGPU refuses.
