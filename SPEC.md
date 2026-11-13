@@ -498,12 +498,12 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
 - the web leg, headless, on the page's canvases: `tests/` (185 cases) and `examples/clear` (60 frames on `#canvas`)
-  under `kama run --target WASM --headless` in Edge and Chrome as installed; `tests/` in the pinned Firefox 160, which
-  gives WebGPU no adapter under `kama run` until its runner sets one pref (kyoten's KY-54), so it reports that and skips
-  the cases that need one (`--adapter-optional`), holds `maxImmediateSize` to 0 (`--no-immediates`), a WGSL
-  warning to no message (`--no-shader-warnings`), and a buffer of 2^53 - 256 bytes to an out-of-memory error, which is
-  how Firefox reports it (`--huge-buffer-out-of-memory`); and both
-  through `tools/webtest.mjs` in the pinned Chrome for Testing, which does not run under `kama run` (kyoten's KY-53).
+  under `kama run --target WASM --headless` in Edge, Chrome as installed and the pinned Firefox 160, each with the
+  printErrors check. Firefox's run holds `maxImmediateSize` to 0 (`--no-immediates`), a WGSL warning to no message
+  (`--no-shader-warnings`), and a buffer of 2^53 - 256 bytes to an out-of-memory error, which is how Firefox reports it
+  (`--huge-buffer-out-of-memory`). Both also run through `tools/webtest.mjs` in the pinned Chrome for Testing, which
+  does not run under `kama run` (kyoten's KY-53). `--adapter-optional`, which turns a missing adapter into a named
+  skip, is passed by no leg; it is kept for a host with no GPU.
 
 What runs on one leg only: wgpu-native's own timing (an error in the channel when its call returns, a scope's pop ready
 at once, the seam's scopes) and its aborts natively; a window wider than `maxTextureDimension2D` on the web, since no

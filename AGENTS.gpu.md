@@ -540,6 +540,15 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
 
     `tests/` is 75 cases in Firefox 160 with the pref, as in Edge and Chrome for Testing.
 
+    **Built on 2026-11-13 (kyoten's nineteenth session): Firefox's whole leg joins the gate** (decision 1 of the
+    seventeenth session's), once kama 0.9.940 set the pref under `kama run --headless` (kyoten's KY-54, `fa9e13c3`). On
+    the bump, with nothing else changed, Firefox's run found an adapter and ran all 185 cases, none skipped, though it
+    still passed `--adapter-optional`. Now every browser under `kama run` runs `tests/`, the printErrors check and
+    `examples/clear` alike. Firefox's run passes only its three measured differences (`--no-immediates`,
+    `--no-shader-warnings`, `--huge-buffer-out-of-memory`). Firefox prints the abandoned scope's error before the
+    channel's, the reverse of Dawn's order, which the check does not hold. `--adapter-optional` is passed by no leg, and
+    kept for a host with no GPU. The stopgap `ffrun.sh` retires.
+
 12. **Decided on 2026-11-12, before it was built: the render pipeline set (GPU-4).** Measured first (kyoten's
     `.scratch/gpu4-pipelines/`, its `FINDINGS.md`): natively a C probe on wgpu-native v29.0.1.1 over Vulkan on the AMD
     Radeon 880M, one process per case; on the web a plain WebGPU page in headless Edge 157, and emdawnwebgpu's

@@ -133,25 +133,23 @@ elif ! command -v node >/dev/null 2>&1; then
     echo "skip no node on PATH, so no browser run"
 else
     # Under `kama run` (AGENTS.gpu.md item 11), bounded since it has no time limit of its own: Edge and Chrome as
-    # installed, and the pinned Firefox, which gives WebGPU no adapter under `kama run` until its runner sets the pref
-    # that keeps headless Firefox's GPU process (kyoten's KY-54), so its run says so and skips the cases that need one
-    # (--adapter-optional), and the clear, which needs one, is not run in it. Firefox has no immediates, so its run holds
-    # maxImmediateSize to 0 (--no-immediates), and its WGSL compiler is naga, which gives no warnings
-    # (--no-shader-warnings). Once KY-54 lands, --adapter-optional goes and the clear runs in it too.
+    # installed, and the pinned Firefox, whose headless page has WebGPU since kama 0.9.940 sets its pref (kyoten's
+    # KY-54, fixed), so every leg runs every case, the printErrors check and the clear. Firefox differs from Dawn in
+    # three ways its run passes: it has no immediates, so maxImmediateSize is held to 0 (--no-immediates); its WGSL
+    # compiler is naga, which gives no warnings (--no-shader-warnings); and a buffer of 2^53 - 256 bytes is an
+    # OutOfMemory error there (--huge-buffer-out-of-memory).
     if browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
         while IFS= read -r browser; do
             name="${browser##*[/\\]}"
+            differences=()
             if [[ "${name,,}" == *firefox* ]]; then
-                echo "-- kama run, $browser (no WebGPU adapter here: the cases that need one say so)"
-                KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless -- --adapter-optional --no-immediates --no-shader-warnings --huge-buffer-out-of-memory || failed=1
-                echo "skip the printErrors check in $name: with no adapter, no device prints"
-            else
-                echo "-- kama run, $browser"
-                KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless 2>&1 | tee tests/out/run-web.log || failed=1
-                printed tests/out/run-web.log "$name"
-                echo "-- kama run, $browser: examples/clear on #canvas for 60 frames"
-                KAMA_BROWSER="$browser" bounded "$KAMA" run examples/clear/kama.json --target WASM --headless -- --frames 60 || failed=1
+                differences=(--no-immediates --no-shader-warnings --huge-buffer-out-of-memory)
             fi
+            echo "-- kama run, $browser ${differences[*]}"
+            KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless -- "${differences[@]}" 2>&1 | tee tests/out/run-web.log || failed=1
+            printed tests/out/run-web.log "$name"
+            echo "-- kama run, $browser: examples/clear on #canvas for 60 frames"
+            KAMA_BROWSER="$browser" bounded "$KAMA" run examples/clear/kama.json --target WASM --headless -- --frames 60 || failed=1
         done <<< "$browsers"
     else
         echo "skip no browser for kama run (Edge or Chrome installed, or Firefox pinned under ~/browsers; or set KAMA_BROWSER)"
