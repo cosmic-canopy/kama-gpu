@@ -489,6 +489,99 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       reported as having one (both abort), and the generic words on the web; in Firefox, `Unavailable` read as a
       failure, `NoAdapter` read as `Refused`, and `NoAdapter`'s words dropped.
 
+    **Measured on 2026-11-12 (kyoten's seventeenth session; its `.scratch/ff-webgpu-visible/` and
+    `.scratch/ff-webgpu-headless/`): Firefox's missing adapter is headless mode's, and one pref restores it.**
+    - **Visible,** the pinned Firefox 160 gives WebGPU an adapter (not a fallback), a device, a `webgpu` canvas context
+      and a clear read back exactly.
+    - **Headless,** it runs without its GPU process. With `layers.gpu-process.allow-headless` set true (or
+      `dom.webgpu.allow-in-parent`, which runs WebGPU in the parent process instead) it gives the same: an adapter, a
+      device and an exact readback. `kama run` does not set the pref (kyoten's KY-54).
+    - **Under `kama run` with the pref added** (a stand-in for `$EM_NODE_JS` that adds it to the runner's `user.js`):
+      `examples/clear` presents 60 frames with no WebGPU error. `tests/`, without `--adapter-optional`, reaches every
+      case and finds two Firefox differences:
+      - **Firefox has no `maxImmediateSize`** in its `GPUSupportedLimits`, so emdawnwebgpu reads 0, and the two cases
+        that assert WebGPU's 64 fail;
+      - **Firefox refuses an RGBA16Float canvas with a JavaScript `TypeError`** (*"Canvas texture format `rgba16float`
+        is not yet supported"*, Mozilla bug 1834395). It is thrown out of `context.configure` through emdawnwebgpu's
+        `wgpuSurfaceConfigure` and ends the program, while the package lists RGBA16Float among every browser's
+        surface formats. BGRA8Unorm, RGBA8Unorm, premultiplied alpha and every usage configure fine.
+
+    **Decided by the owner on 2026-11-12 (kyoten's seventeenth session), as recommended** (asked as GPU-4's question 6;
+    "I will take your recommendations"), replacing decision 2's hands-on minute:
+    1. **Firefox's whole leg joins the gate, headless, once kama's runner sets the pref** (KY-54). Until then,
+       decision 2's `--adapter-optional` stands, its reason now measured. A visible Firefox never runs in the gate, and
+       CI (when it is built) runs the same headless leg.
+    2. **The two differences are fixed first, test-first, as GPU-14,** before GPU-4's build. A surface lists only the
+       formats its browser takes, and a browser's exception from `configure` is a refusal, never the program's end. The
+       tests stop assuming a limit a browser does not have. **Stopgap until KY-54:** each red and green is shown by a
+       run in Firefox with the pref added by hand; the gate holds them once kama sets it.
+
+12. **Decided on 2026-11-12, before it was built: the render pipeline set (GPU-4).** Measured first (kyoten's
+    `.scratch/gpu4-pipelines/`, its `FINDINGS.md`): natively a C probe on wgpu-native v29.0.1.1 over Vulkan on the AMD
+    Radeon 880M, one process per case; on the web a plain WebGPU page in headless Edge 157, and emdawnwebgpu's
+    `library_webgpu.js` read; and two kama sketches on 0.9.928, the descriptors' shape and a compile isolate.
+
+    | | native, measured | web, measured (Dawn) |
+    |---|---|---|
+    | a WGSL error | a validation error **inside `createShaderModule`**, naga's words with the place in them (`wgsl:3:11`), the first error only; an invalid module returned | a validation error a task later; `getCompilationInfo` has it 1 ms after (kind, line, column, offset, length), warnings and notes too; offsets in UTF-16 code units, passed unconverted (emdawnwebgpu's own TODO) |
+    | `GetCompilationInfo` | **aborts the process**, for a good module or a bad one ("not implemented") | works |
+    | `createRenderPipelineAsync` | **aborts the process** ("not implemented") | resolves (152 ms the first, 16 distinct ones in 29 ms); a failure **rejects** with `reason: validation`, never also an uncaptured error, and no error scope catches it |
+    | a pipeline made on another thread | works, 8 threads at once; its error reaches the device's callback on the worker's own thread | a device is never posted to a worker |
+    | a zero-filled description | a sample count of 0 is refused; **a sample mask of 0 draws nothing, silently** | a mask of 0 also draws nothing, silently |
+    | layout `auto` with `getBindGroupLayout`, 4× MSAA resolved, Depth24Plus and Depth32Float, RGBA16Float, a depth-only prepass loaded by a later pass | all work, read back | all work, read back |
+
+    webgpu.h's `*_INIT` macros carry WebGPU's defaults, and the package's generated bindings are zero-filled
+    (`@generate(zero)`), so the safe layer sets every default itself. In kama, a `type resource` holding an `Isolate`
+    and a `Sender` must declare the `Isolate` first: fields drop in reverse order, and the other order joins the worker
+    while the channel is still open, and hangs.
+
+    **Decided by the owner on 2026-11-12 (kyoten's seventeenth session), each as recommended,** asked in full in the
+    chat after the probe ("Sounds good to me", "Sounds good"; for 3 to 5, after asking that each be explained and that
+    the API be "easy to use correctly and hard to use incorrectly": "I will take your recommendations"):
+    1. **Descriptions are WebGPU's dictionaries, as kama types.** A plain part is a `type value` whose field initializers
+       are WebGPU's defaults and whose ctor takes what WebGPU requires (`PrimitiveState`, `MultisampleState` with its
+       mask of every sample, `DepthStencilState.make(format:, depthWriteEnabled:, depthCompare:)`, `ColorTargetState`,
+       `BlendState`), as `DeviceOptions` and `SurfaceConfig` are. A description that owns strings, lists or handles is
+       a `type resource` whose methods set its parts, as std's `Command` is (`RenderPipelineDescriptor.make(layout:,
+       module:, entryPoint:)`, then `buffer(layout:)`, `fragment(module:, entryPoint:)`, `target(state:)`,
+       `depthStencil(state:)`, `label(text:)`, and the places `primitiveMut()` and `multisampleMut()`). WebGPU's
+       "exactly one of" is an enum with a payload (`Layout { Auto, Explicit(layout) }`, `LoadOp { Clear(color), Load }`,
+       a binding's resource). Every argument is named. Labels come now, since Dawn's errors name them.
+    2. **Pipelines both ways, on both legs.** `device.createRenderPipeline(descriptor:)` returns a handle at once, its
+       error to the channel or a scope like every creation. `device.createRenderPipelineAsync(descriptor:)` returns a
+       polled `PipelineRequest` (`Pending`, `Ready(pipeline)`, `Failed(error)`), whose failure lands in the request
+       alone, never in the channel, as the browser's does. **Natively the package compiles on threads of its own,**
+       since wgpu-native's asynchronous call aborts: a pool of compile isolates per device, started by the first
+       asynchronous request and joined when the device's last copy drops, sized by `DeviceOptions.compileWorkers`
+       (half the cores, at least 1, to be revisited by measurement beside a scheduler). A job carries a reference on
+       the device and the description; the worker pushes its own scope (the seam's stacks are per thread), so a failure
+       reaches the request, as on the web. Not kama's job pool: a compile there would hold a `parallel_for` barrier.
+       The `Device` stays on its thread, as the browser keeps it. Compute pipelines get the same pair in GPU-5.
+    3. **A shader's errors are part of the API, and hard to miss:**
+       1. **A failed asynchronous pipeline carries its shaders' messages:** its `PipelineError` has the message and each
+          stage module's compilation messages, with line and column. kama's exhaustive `match` makes a program say what
+          a failure does. On the web the request waits for the modules' compilation info before it answers.
+       2. **An error nobody reads is never silent:** `DeviceOptions.printErrors`, on by default, prints each error the
+          device reports to stderr as it lands in the channel (natively, inside the call). A program that reads the
+          channel itself turns it off. This extends item 2's decision 1. On the web the browser's console already shows
+          an error no handler cancels, which emdawnwebgpu's does not; the build checks it.
+       3. **`module.compilationInfo()` for tools:** a polled request whose answer is the module's messages, each with
+          `kind()` (`Error`, `Warning`, `Info`), `message()`, `line()`, `column()`, `offset()` and `length()`, in UTF-8
+          bytes (the web's UTF-16 positions converted against the module's source). On the web they are Dawn's.
+          **Natively the package never calls `GetCompilationInfo`:** the seam keeps the error wgpu-native reports at
+          creation, still delivering it to the channel or a scope, and reads naga's `wgsl:L:C` into one message; there
+          are no warnings natively. A facts test pins the abort, so a wgpu-native that implements it fails it.
+    4. **`queue.writeBuffer(buffer:, offset:, data:)` comes forward from GPU-8,** taking a `ConstView<uint8>`, which kama's
+       byte views give only over a type proved free of padding and pointers. It is the production path for data that
+       changes each frame, not a stopgap. `writeTexture`, `mappedAtCreation` and staging buffers stay in GPU-8.
+    5. **A render pass and a texture are made from WebGPU's full description,** replacing the narrow calls (one way to
+       do a thing; the package is unpublished, so `examples/clear` and `tests/` move with it):
+       - `encoder.beginRenderPass(descriptor:)` replaces `beginRenderPass(target:, clear:)`: color attachments, each with
+         a `LoadOp`, a `StoreOp` and an optional resolve target; a depth attachment cleared to a depth or loaded, and
+         read-only depth; `ColorAttachment.clearing(view:, color:)` keeps the common case one line;
+       - `device.createTexture(descriptor:)` replaces `createTexture(width:, height:, format:, usage:)`: mip levels, a
+         sample count, the dimension and the depth formats.
+
 ## Where the truth is
 
 - **This package's own documents,** above: the SPEC, the ROADMAP and its detail, COVERAGE.md, and the CHANGELOG.

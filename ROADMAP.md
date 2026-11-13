@@ -11,7 +11,7 @@ in the git log.
 > **`GPU-<n>` is a permanent id, not a position.** It is assigned once, from the counter below, which the same edit
 > bumps; it is never reused or renumbered, and a shipped row's id retires with it.
 
-**Next id: GPU-14**
+**Next id: GPU-15**
 
 **The goal before 1.0 is every call in webgpu.h** ([AGENTS.gpu.md](AGENTS.gpu.md#what-this-is)), grown by the spec's
 sections in the order `@kama/graphics` pulls them.
@@ -20,6 +20,7 @@ sections in the order `@kama/graphics` pulls them.
 
 | id | item | why |
 |---|---|---|
+| GPU-14 | **Firefox's two differences**: a surface lists only the formats its browser takes, and a browser's exception from `configure` is a refusal; the tests assume no limit a browser lacks | [detail](ROADMAP_DETAIL.md#firefox) |
 | GPU-4 | **The render pipeline set**, shaped by `@kama/graphics`' design pass: shader modules, layouts and bind groups, samplers, render pipelines, vertex and index buffers, depth and multisampled targets | [detail](ROADMAP_DETAIL.md#render-pipelines) |
 
 ## LATER: the rest of webgpu.h before 1.0
@@ -29,7 +30,7 @@ sections in the order `@kama/graphics` pulls them.
 | GPU-5 | **Compute**: compute pipelines and passes, storage buffers and storage textures | [detail](ROADMAP_DETAIL.md#compute) |
 | GPU-6 | **Queries and timestamps**: query sets, occlusion queries, timestamps and their resolve | [detail](ROADMAP_DETAIL.md#queries) |
 | GPU-7 | **Indirect draws and dispatches, and render bundles** | [detail](ROADMAP_DETAIL.md#indirect) |
-| GPU-8 | **The rest of webgpu.h**, from COVERAGE.md's uncalled rows: uploads and copies, mapped writes, labels and debug groups, external textures, WGSL language features, asynchronous pipelines, compilation info | [detail](ROADMAP_DETAIL.md#the-rest) |
+| GPU-8 | **The rest of webgpu.h**, from COVERAGE.md's uncalled rows: texture uploads and copies, mapped writes, labels and debug groups, external textures, WGSL language features | [detail](ROADMAP_DETAIL.md#the-rest) |
 | GPU-9 | **A safe destroy** for buffers, textures, query sets and devices, its form decided when the row comes up | [detail](ROADMAP_DETAIL.md#destroy) |
 | GPU-10 | **wgpu-native's own extensions** (`wgpu.h`), as `@kama/graphics`' design pass decided: native features offered as device features, and ray tracing and mesh shaders through wgpu-native PR #630, pinned until it merges | [detail](ROADMAP_DETAIL.md#extensions) |
 | GPU-11 | **A surface on every platform**: X11, Wayland and Cocoa through `@kama/window`'s native handles, and Android's window | [detail](ROADMAP_DETAIL.md#platforms) |

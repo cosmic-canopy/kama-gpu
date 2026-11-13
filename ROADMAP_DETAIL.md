@@ -5,24 +5,33 @@ when it comes up, and their answers are recorded here or, for a departure from k
 [AGENTS.gpu.md](AGENTS.gpu.md). When a row ships, its section goes: what was built is the [SPEC](SPEC.md), and how it
 was decided is the git log. `tools/check-roadmap.sh` holds every section to a row.
 
+<a id="firefox"></a>
+## GPU-14: Firefox's two differences
+
+Firefox's WebGPU, measured headless on 2026-11-12 with the pref kama's runner does not yet set (kyoten's KY-54;
+[AGENTS.gpu.md](AGENTS.gpu.md) item 11), differs from Dawn in two ways the gate had been skipping:
+- it refuses an RGBA16Float canvas with a JavaScript `TypeError` (Mozilla bug 1834395), which ends the program, while
+  the package lists RGBA16Float among the surface's formats;
+- it has no `maxImmediateSize`, which the tests assert is WebGPU's 64.
+
+Done: the surface lists only what its browser takes, a browser's exception from `configure` is refused rather than
+ending the program, and the tests hold no limit a browser lacks, each red then green in Firefox with the pref added
+by hand, and held by the gate once kama sets it.
+
 <a id="render-pipelines"></a>
 ## GPU-4: the render pipeline set
 
-What a triangle and then a lit mesh need, in the order `@kama/graphics`' design pass asks for it. Its shape waits on
-that pass, so the binding serves the library's design rather than the other way round.
+What a triangle and then a lit mesh need, in the order `@kama/graphics`' design pass asks for it.
 
-- **The handles:** shader modules from WGSL, bind group layouts, pipeline layouts, bind groups, samplers, render
-  pipelines, and vertex and index buffers bound in a pass, with depth and multisampled targets.
+- **The handles:** shader modules from WGSL and their compilation info, bind group layouts, pipeline layouts, bind
+  groups, samplers, render pipelines made both ways, `queue.writeBuffer`, and vertex and index buffers bound in a pass
+  described in full, with depth and multisampled targets.
 - **It starts from kama's design** (its § 8, `s8-gpu-wrapper`, commit 2: "the remaining handles, with safe creation for
   exactly what the triangle uses") and from cosmic-forge's `render/src/gpu`.
-- **Questions for when it comes up:**
-  - how a descriptor reads in kama, given WebGPU's dictionaries with defaults and kama's lack of optional parameters;
-  - whether pipelines are made asynchronously (`createRenderPipelineAsync`, polled like the requests) or both ways.
-    Measured for `@kama/graphics` on 2026-11-11 (kyoten's `docs/research/graphics.md` § 5): wgpu-native's
-    `CreateRenderPipelineAsync` is `unimplemented!()` at v29.0.1.1 and trunk, and its ordinary call compiles in
-    parallel from many threads on one device (48 pipelines 4.7× faster on 8 threads, no errors). So the library needs
-    both: the asynchronous call on the web, and the ordinary one from a worker natively;
-  - how a shader's compilation errors reach a program, through a device's channel and its scopes, and `getCompilationInfo`.
+- **Decided on 2026-11-12, after a probe on both legs:** [AGENTS.gpu.md](AGENTS.gpu.md) item 12.
+- **Built in five parts,** each test-first and committed on its own: shader modules and their errors; layouts, bind
+  groups, samplers and `writeBuffer`; render pipelines both ways; the pass and textures by description; and
+  `examples/triangle`.
 - **Done:** a triangle drawn into a window and into a texture read back, on both legs, with zero hand-written
   releases, and COVERAGE.md's pipeline, binding, sampler and shader rows called.
 
@@ -51,7 +60,7 @@ whether the safe API offers it, and how, on each leg.
 ## GPU-8: the rest of webgpu.h
 
 COVERAGE.md's remaining rows, once GPU-4 to GPU-7 have taken theirs:
-- uploads and copies: `queue.writeBuffer`, `writeTexture`, and the buffer and texture copies;
+- uploads and copies: `writeTexture`, and the buffer and texture copies;
 - mapped writes and `mappedAtCreation`;
 - labels on every handle, and debug groups and markers;
 - external textures;
