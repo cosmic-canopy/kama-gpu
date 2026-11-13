@@ -113,7 +113,7 @@ typedef struct gpuseam_map gpuseam_map;
 
 // Map `size` bytes of `buffer` from `offset` (`mode` a WGPUMapMode). The slot holds a reference on the buffer until it
 // is dropped. NULL only when the slot cannot be allocated.
-gpuseam_map *gpuseam_map_async(WGPUBuffer buffer, uint64_t mode, size_t offset, size_t size);
+gpuseam_map *gpuseam_map_async(WGPUBuffer buffer, gpuseam_state *state, uint64_t mode, size_t offset, size_t size);
 int32_t gpuseam_map_poll(gpuseam_map *map);
 int32_t gpuseam_map_message(gpuseam_map *map, uint8_t *dst, int32_t capacity);
 // Done with the slot: a READY map is unmapped, the buffer's reference released, and the slot freed or abandoned.
@@ -139,6 +139,17 @@ gpuseam_state *gpuseam_state_unwatched(void);
 // Another holder, or one fewer: the block is freed with its last. Both take NULL.
 void gpuseam_state_hold(gpuseam_state *state);
 void gpuseam_state_release(gpuseam_state *state);
+// Natively, the device's queue, held by its state, which a map flushes first (WebGPU has a map see every earlier
+// write; wgpu-native keeps them until the next submit). Kept once; nothing on the web.
+void gpuseam_state_keep_queue(gpuseam_state *state, WGPUQueue queue);
+
+// What a backend would end the program on, refused by the package and reported as a validation error where WebGPU
+// reports one, in `message`'s words (UTF-8, `length` bytes): it rides a call `device` refuses (AGENTS.gpu.md item 12,
+// decision 9). And a quiet section, in which what the calls report is dropped: a substitute call that makes the
+// refused call's handle, invalid, while the refusal alone is reported.
+void gpuseam_refuse(WGPUDevice device, const uint8_t *message, int32_t length);
+void gpuseam_quiet_begin(WGPUDevice device);
+void gpuseam_quiet_end(WGPUDevice device);
 // How many blocks are alive in the process, for a test that one is freed with its last holder.
 int64_t gpuseam_states_alive(void);
 // Whether the device's callbacks reach the block: 0 for an adopted device, and for NULL.

@@ -13,7 +13,7 @@ From three headers, each by the sha256 of its text with LF line endings:
 - wgpu-native's wgpu.h `7bd23656d394f620a804b1f174444ea17082b6d330a2fca0c0e6b1121ec4b284`
 - emdawnwebgpu's webgpu.h `40e7ecd9647dc922e69d17d888d7038fbd5eb10277621eb414c8ffc278e353be`
 
-**webgpu.h: 59 of 206 called.** On both legs, 59 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
+**webgpu.h: 62 of 206 called.** On both legs, 62 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
 
 **wgpu.h, wgpu-native's own extensions, apart: 1 of 22 called.**
 
@@ -107,14 +107,14 @@ From three headers, each by the sha256 of its text with LF line endings:
 | `wgpuTextureViewAddRef` | both | yes |
 | `wgpuTextureViewRelease` | both | yes |
 
-### Samplers, 0 of 4
+### Samplers, 3 of 4
 
 | Function | Legs | Called |
 |---|---|---|
-| `wgpuDeviceCreateSampler` | both | no |
+| `wgpuDeviceCreateSampler` | both | yes |
 | `wgpuSamplerSetLabel` | both | no |
-| `wgpuSamplerAddRef` | both | no |
-| `wgpuSamplerRelease` | both | no |
+| `wgpuSamplerAddRef` | both | yes |
+| `wgpuSamplerRelease` | both | yes |
 
 ### Resource binding, 0 of 12
 

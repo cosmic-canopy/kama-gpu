@@ -737,6 +737,26 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
         - the size not clamped, and a clamp that lets anything through (only in Edge, where the program ended: natively
           wgpu-native refuses 2^60 itself);
         - the size and the usage not the description's.
+    - **Samplers (decision 8), and decision 9's plumbing:**
+      - `SamplerDescriptor` and `device.createSampler(descriptor:)`, with `AddressMode`, `FilterMode`,
+        `MipmapFilterMode` and `CompareFunction`.
+      - In the seam: `gpuseam_refuse`, the carrier on both legs, whose words `report_of` swaps for the refusal's;
+        `gpuseam_quiet_begin`/`_end`, a thread's count natively and a browser scope whose answer is dropped on the web.
+        Also the device's queue kept in its state natively, for a map's flush, tested with `writeBuffer` (below).
+      - A NaN or infinite LOD clamp is refused in the package's words, and the sampler handed back is made with a clamp
+        of -1 under a quiet section. A +inf max is taken as 10^30.
+      - The cases (`tests/src/bindings.kama`, `BindingRun`, a step a tick on both legs):
+        - the samplers WebGPU takes leave the channel empty;
+        - anisotropy with a nearest filter, and a min clamp above the max, are each one validation error naming the
+          label;
+        - a NaN and a -inf clamp are each one in the package's words.
+      - `tests/` is 120 cases natively, 97 in Edge and Chrome for Testing, and 21 in Firefox. COVERAGE.md: 62 of 206.
+      - **Mutations: 12 of 12 caught:**
+        - the refusal never refusing, and `finite` always true: natively a NaN gave no error at all;
+        - +inf handed over (Edge alone: the browser threw), and +inf refused;
+        - the substitute not quieted, and the quiet section not dropping (two reports);
+        - the carrier's words kept (the label missing), and a carrier with a usage (no report);
+        - anisotropy, the mag filter, the clamps' order and the label each not handed over.
 
 ## Where the truth is
 

@@ -5,6 +5,16 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: samplers** (2026-11-12, kama 0.9.938; GPU-4's second part, AGENTS.gpu.md item 12, decisions 8 and 9):
+  - `SamplerDescriptor.make()` with WebGPU's defaults, and `device.createSampler(descriptor:)`. Its parts are set as
+    `addressModes(u:, v:, w:)`, `filters(mag:, min:, mipmap:)`, `lodClamp(min:, max:)`, `compare(function:)`,
+    `maxAnisotropy(count:)` and `label(text:)`.
+  - New enums: `AddressMode`, `FilterMode`, `MipmapFilterMode` and `CompareFunction`.
+  - A NaN or infinite LOD clamp is a validation error in the package's words, not the end of the program.
+- **Nothing a program passes ends it** (decision 9). What a backend would abort the process on, or a browser throw on,
+  is refused first and reported as a validation error in the package's words, where WebGPU reports one. The report
+  rides a call the backend refuses, so scopes and the channel see it in order on both legs.
+
 - **Breaking: buffers are made from a description** (2026-11-12, kama 0.9.938; GPU-4's second part, AGENTS.gpu.md
   item 12, decisions 7 and 9):
   - `device.createBuffer(descriptor: BufferDescriptor.make(size:, usage:))`, with `label(text:)`, replaces

@@ -6,6 +6,7 @@
 #include "gpuseam.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #ifndef __EMSCRIPTEN__
@@ -65,6 +66,7 @@ struct gpuseam_state {
     char *lost_message;
     int32_t lost_length;
     gpuseam_scope *top;                 // its error scopes, the innermost first, of every thread (each holds the block)
+    WGPUQueue queue;                    // natively, a reference on the device's queue, which a map flushes first
 };
 
 struct gpuseam_scope {
@@ -102,12 +104,62 @@ static int32_t kind_of(WGPUErrorType type) {
     }
 }
 
-// A message kept whole, in an allocation of its own.
+// ---- the package's own refusals (AGENTS.gpu.md item 12, decision 9) ----------------------------------------------------
+//
+// What a backend would end the program on, the package refuses before the call and reports as a validation error, where
+// WebGPU reports one: the innermost validation scope on the calling thread, else the device's channel. A browser keeps
+// its scopes and has no way to add an error to them, so on both legs the report rides a call the backend refuses: a
+// 4-byte buffer with no usage, labelled `kama-gpu-refusal:<n>`, whose error lands where any would, in call order
+// (measured on both legs: the label is in the words). `report_of` puts the refusal's words in place of the backend's.
+
+#define GPUSEAM_CARRIED 64
+static const char CARRIER_PREFIX[] = "kama-gpu-refusal:";
+static struct { uint32_t id; char *message; int32_t length; } g_carried[GPUSEAM_CARRIED];
+static uint32_t g_carried_next = 1;
+static atomic_flag g_carried_lock = ATOMIC_FLAG_INIT;
+
+static void carried_lock(void) {
+    while (atomic_flag_test_and_set_explicit(&g_carried_lock, memory_order_acquire)) { }
+}
+static void carried_unlock(void) { atomic_flag_clear_explicit(&g_carried_lock, memory_order_release); }
+
+// The refusal a carrier's words name, taken out of the table (its id, after the prefix), or 0 when they name none.
+static int32_t carried_words(const char *data, size_t n, char **message) {
+    size_t k = sizeof CARRIER_PREFIX - 1;
+    for (size_t i = 0; i + k <= n; i++) {
+        if (memcmp(data + i, CARRIER_PREFIX, k) != 0) continue;
+        uint32_t id = 0;
+        size_t j = i + k;
+        int digits = 0;
+        while (j < n && data[j] >= '0' && data[j] <= '9' && digits < 10) { id = id * 10 + (uint32_t)(data[j] - '0'); j++; digits++; }
+        if (digits == 0) return 0;
+        int32_t length = 0;
+        carried_lock();
+        if (g_carried[id % GPUSEAM_CARRIED].id == id && g_carried[id % GPUSEAM_CARRIED].message != NULL) {
+            *message = g_carried[id % GPUSEAM_CARRIED].message;
+            length = g_carried[id % GPUSEAM_CARRIED].length;
+            g_carried[id % GPUSEAM_CARRIED].message = NULL;
+            g_carried[id % GPUSEAM_CARRIED].id = 0;
+        }
+        carried_unlock();
+        return length;
+    }
+    return 0;
+}
+
+// A message kept whole, in an allocation of its own; a refusal's carrier's, the refusal's words.
 static gpuseam_report report_of(int32_t kind, WGPUStringView v) {
     gpuseam_report r = { kind, NULL, 0 };
     if (v.data == NULL) return r;
     size_t n = v.length == WGPU_STRLEN ? strlen(v.data) : v.length;
     if (n == 0) return r;
+    char *carried = NULL;
+    int32_t carried_length = carried_words(v.data, n, &carried);
+    if (carried_length > 0) {
+        r.message = carried;
+        r.length = carried_length;
+        return r;
+    }
     if (n > INT32_MAX) n = INT32_MAX;
     r.message = (char *)malloc(n);
     if (r.message == NULL) return r;
@@ -152,6 +204,7 @@ void gpuseam_state_release(gpuseam_state *s) {
     if (atomic_fetch_sub_explicit(&s->holders, 1, memory_order_acq_rel) != 1) return;
     for (int32_t i = 0; i < s->count; i++) free(s->ring[(s->head + i) % GPUSEAM_RING].message);
     free(s->lost_message);
+    if (s->queue != NULL) wgpuQueueRelease(s->queue);
     free(s);
     atomic_fetch_sub_explicit(&g_states_alive, 1, memory_order_relaxed);
 }
@@ -167,6 +220,9 @@ static _Thread_local char t_thread;
 static _Thread_local gpuseam_state *t_finishing;
 static _Thread_local int32_t t_finish_failed;
 
+// Natively, above 0 while this thread makes a substitute call whose error is not the program's (gpuseam_quiet_begin).
+static _Thread_local int32_t t_quiet;
+
 // A shader module this thread is creating: natively its first error is copied here, for its compilation info, before it
 // goes where every error goes (gpuseam_create_shader_module).
 static _Thread_local gpuseam_report *t_observed;
@@ -177,6 +233,9 @@ static _Thread_local gpuseam_report *t_observed;
 // scopes have taken what they catch before this callback runs.
 static void on_uncaptured_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringView message, void *u1, void *u2) {
     (void)device; (void)u2;
+#ifndef __EMSCRIPTEN__
+    if (t_quiet > 0) return;   // a substitute call's own error, under gpuseam_quiet_begin
+#endif
     gpuseam_state *s = (gpuseam_state *)u1;
     if (t_finishing == s) t_finish_failed = 1;
     if (t_observed != NULL && t_observed->message == NULL) *t_observed = report_of(kind_of(type), message);
@@ -597,6 +656,71 @@ int32_t gpuseam_adapter_mark_consumed(gpuseam_adapter_mark *m) {
     return m != NULL && atomic_load_explicit(&m->consumed, memory_order_acquire) != 0;
 }
 
+// ---- a refusal reported, a substitute call quieted ------------------------------------------------------------------
+
+void gpuseam_refuse(WGPUDevice device, const uint8_t *message, int32_t length) {
+    if (device == NULL || message == NULL || length <= 0) return;
+    char *copy = (char *)malloc((size_t)length);
+    if (copy == NULL) return;
+    memcpy(copy, message, (size_t)length);
+    carried_lock();
+    uint32_t id = g_carried_next++;
+    if (g_carried_next == 0) g_carried_next = 1;
+    free(g_carried[id % GPUSEAM_CARRIED].message);   // a refusal its device never reported, 64 refusals ago
+    g_carried[id % GPUSEAM_CARRIED].id = id;
+    g_carried[id % GPUSEAM_CARRIED].message = copy;
+    g_carried[id % GPUSEAM_CARRIED].length = length;
+    carried_unlock();
+    char label[40];
+    int n = snprintf(label, sizeof label, "%s%u", CARRIER_PREFIX, id);
+    WGPUBufferDescriptor d;
+    memset(&d, 0, sizeof d);
+    d.label.data = label;
+    d.label.length = n > 0 ? (size_t)n : 0;
+    d.size = 4;
+    d.usage = WGPUBufferUsage_None;
+    WGPUBuffer carrier = wgpuDeviceCreateBuffer(device, &d);
+    if (carrier != NULL) wgpuBufferRelease(carrier);
+}
+
+#ifdef __EMSCRIPTEN__
+static void on_quiet_popped(WGPUPopErrorScopeStatus status, WGPUErrorType type, WGPUStringView message, void *u1, void *u2) {
+    (void)status; (void)type; (void)message; (void)u1; (void)u2;
+}
+#endif
+
+void gpuseam_quiet_begin(WGPUDevice device) {
+#ifdef __EMSCRIPTEN__
+    wgpuDevicePushErrorScope(device, WGPUErrorFilter_Validation);
+#else
+    (void)device;
+    t_quiet += 1;
+#endif
+}
+
+void gpuseam_quiet_end(WGPUDevice device) {
+#ifdef __EMSCRIPTEN__
+    WGPUPopErrorScopeCallbackInfo ci;
+    memset(&ci, 0, sizeof ci);
+    ci.mode = WGPUCallbackMode_AllowSpontaneous;
+    ci.callback = on_quiet_popped;
+    wgpuDevicePopErrorScope(device, ci);
+#else
+    (void)device;
+    t_quiet -= 1;
+#endif
+}
+
+void gpuseam_state_keep_queue(gpuseam_state *s, WGPUQueue queue) {
+#ifndef __EMSCRIPTEN__
+    if (s == NULL || queue == NULL || s->queue != NULL) return;
+    wgpuQueueAddRef(queue);
+    s->queue = queue;
+#else
+    (void)s; (void)queue;
+#endif
+}
+
 // ---- a device on its way ---------------------------------------------------------------------------------------------
 
 struct gpuseam_device_request {
@@ -776,9 +900,16 @@ static void on_mapped(WGPUMapAsyncStatus status, WGPUStringView message, void *u
     }
 }
 
-gpuseam_map *gpuseam_map_async(WGPUBuffer buffer, uint64_t mode, size_t offset, size_t size) {
+gpuseam_map *gpuseam_map_async(WGPUBuffer buffer, gpuseam_state *state, uint64_t mode, size_t offset, size_t size) {
     gpuseam_map *m = (gpuseam_map *)calloc(1, sizeof *m);
     if (m == NULL) return NULL;
+#ifndef __EMSCRIPTEN__
+    // wgpu-native keeps a queue's writes until its next submit, where WebGPU has a map see every write made before it
+    // (kyoten's .scratch/gpu4-part2: a map with no submit between read the old bytes), so an empty submit sends them.
+    if (state != NULL && state->queue != NULL) wgpuQueueSubmit(state->queue, 0, NULL);
+#else
+    (void)state;
+#endif
     atomic_init(&m->state, GPUSEAM_PENDING);
     wgpuBufferAddRef(buffer);
     m->buffer = buffer;

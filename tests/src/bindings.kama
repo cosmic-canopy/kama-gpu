@@ -1,0 +1,276 @@
+// The cases of GPU-4's second part (AGENTS.gpu.md item 12, decisions 6 to 9), a step a tick on every leg: samplers,
+// and what WebGPU refuses of them; and that nothing a program passes ends it (decision 9). Every misuse is one
+// validation error in the device's channel naming its label, where on the web the browser's own error arrives a tick
+// after the device's queue is next used.
+//
+// They report through `Verdicts`, which the check reads each tick, as the shader cases do.
+
+import {
+    core::println,
+    gpu::Instance, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::PowerPreference,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::DeviceOptions, gpu::GpuError,
+    gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer,
+    gpu::Sampler, gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::CompareFunction,
+    Verdicts,
+};
+export { BindingRun };
+
+comptime int32 SETTLE = 60;   // the most ticks a case waits for an error the browser owes
+comptime int32 QUIET = 10;    // the ticks a case waits to see that no error comes
+
+// NaN and the infinities, made at run time: kama refuses a constant division by zero.
+fn float32 divided(float32 by) {
+    float32 one = 1.0;
+    return one / by;
+}
+fn float32 notANumber() {
+    float32 zero = 0.0;
+    return zero / zero;
+}
+
+type resource BindingRun {
+    int32 stage = 0;
+    int32 waited = 0;
+    bool optional;   // `--adapter-optional`: no adapter here is a skip
+    Verdicts found;
+    Optional<Instance> instance = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+
+    public ctor make(bool adapterOptional) {
+        this.optional = adapterOptional;
+        this.found = Verdicts.make();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // One tick's step: true once every case has run.
+    public unsafe fn bool step() {
+        this.waited = this.waited + 1;
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.awaitAdapter(); }
+        else if (this.stage == 2) { this.awaitDevice(); }
+        else if (this.stage == 10) { this.goodSamplers(); }
+        else if (this.stage == 11) { this.awaitNone(name: "samplers WebGPU takes are made with no error: its defaults, trilinear with anisotropy 16, a comparison, and a +inf max clamp", next: 20); }
+        else if (this.stage == 20) { this.anisotropicNearest(); }
+        else if (this.stage == 21) { this.awaitOne(name: "a sampler with anisotropy and a nearest filter is a validation error naming its label", label: "aniso nearest", says: "", next: 30); }
+        else if (this.stage == 30) { this.lodBackwards(); }
+        else if (this.stage == 31) { this.awaitOne(name: "a sampler whose min clamp is above its max is a validation error naming its label", label: "lod backwards", says: "", next: 40); }
+        else if (this.stage == 40) { this.lodNan(); }
+        else if (this.stage == 41) { this.awaitOne(name: "a NaN LOD clamp is a validation error in the package's words, not the end of the program", label: "nan clamp", says: "not a finite number", next: 50); }
+        else if (this.stage == 50) { this.lodMinusInfinity(); }
+        else if (this.stage == 51) { this.awaitOne(name: "a -inf LOD clamp is a validation error in the package's words, not the end of the program", label: "minus infinity", says: "not a finite number", next: 99); }
+        return this.stage >= 99;
+    }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
+
+    unsafe fn void open() {
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.make(power: PowerPreference::Default)));
+                this.instance = Optional::Some(value: give inst);
+                this.next(to: 1);
+            }
+            case Err(error: e): { string why = e.message(); this.found.add(name: "an instance for the binding cases", why: give why); this.next(to: 99); }
+        };
+    }
+
+    unsafe fn void awaitAdapter() {
+        if (this.adapterRequest.isNone()) { this.next(to: 99); return; }
+        AdapterStatus s = match (this.adapterRequest) {
+            case Some(value: r): r.poll();
+            case None: AdapterStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.adapterRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(adapter: a): {
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                this.next(to: 2);
+            }
+            case Failed(error: e): {
+                bool none = match (e) { case NoAdapter(words: w): true; case _: false; };
+                if (none && this.optional) {
+                    println(s: "skip the binding cases: there is no WebGPU adapter here (--adapter-optional)");
+                } else {
+                    string why = e.message();
+                    this.found.add(name: "an adapter for the binding cases", why: give why);
+                }
+                this.next(to: 99);
+            }
+        };
+    }
+
+    unsafe fn void awaitDevice() {
+        if (this.deviceRequest.isNone()) { this.next(to: 99); return; }
+        DeviceStatus s = match (this.deviceRequest) {
+            case Some(value: r): r.poll();
+            case None: DeviceStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.deviceRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(device: d, queue: q): {
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+                this.next(to: 10);
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a device for the binding cases", why: give why); this.next(to: 99); }
+        };
+    }
+
+    // An empty command buffer submitted: on the web, what lets a pending error through to the channel.
+    unsafe fn void flush() {
+        match (this.device) {
+            case Some(value: d): {
+                match (this.queue) {
+                    case Some(value: q): { CommandEncoder enc = d.createCommandEncoder(); CommandBuffer cb = give enc.finish(); q.submit(commands: give cb); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+    }
+
+    unsafe fn Optional<DeviceErrors> drain() {
+        match (this.device) {
+            case Some(value: d): { return Optional::Some(value: d.takeErrors()); }
+            case None: { return Optional::None; }
+        };
+    }
+
+    // Once QUIET ticks have passed, the channel holds nothing.
+    unsafe fn void awaitNone(const ref string name, int32 next) {
+        if (this.waited < QUIET) { return; }
+        Optional<DeviceErrors> got = this.drain();
+        string why = match (got) {
+            case Some(value: errs): errs.isEmpty() ? "" : "the channel holds " + described(errs: errs);
+            case None: "no device";
+        };
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // Once an error arrives, or SETTLE ticks pass: one validation error, its words naming `label` (and saying `says`).
+    unsafe fn void awaitOne(const ref string name, const ref string label, const ref string says, int32 next) {
+        Optional<DeviceErrors> got = this.drain();
+        bool none = match (got) { case Some(value: errs): errs.isEmpty(); case None: true; };
+        if (none && this.waited < SETTLE) { return; }
+        string why = match (got) {
+            case Some(value: errs): oneNaming(errs: errs, label: label, says: says);
+            case None: "no device";
+        };
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // Samplers WebGPU takes: no error.
+    unsafe fn void goodSamplers() {
+        match (this.device) {
+            case Some(value: d): {
+                SamplerDescriptor plain = SamplerDescriptor.make();
+                plain.label(text: "default");
+                Sampler a = d.createSampler(descriptor: give plain);
+                SamplerDescriptor tri = SamplerDescriptor.make();
+                tri.addressModes(u: AddressMode::Repeat, v: AddressMode::Repeat, w: AddressMode::MirrorRepeat);
+                tri.filters(mag: FilterMode::Linear, min: FilterMode::Linear, mipmap: MipmapFilterMode::Linear);
+                tri.maxAnisotropy(count: 16);
+                tri.label(text: "trilinear");
+                Sampler b = d.createSampler(descriptor: give tri);
+                SamplerDescriptor shadow = SamplerDescriptor.make();
+                shadow.compare(function: CompareFunction::LessEqual);
+                shadow.label(text: "shadow");
+                Sampler c = d.createSampler(descriptor: give shadow);
+                SamplerDescriptor open = SamplerDescriptor.make();
+                open.lodClamp(min: 0.0, max: divided(by: 0.0));
+                open.label(text: "unclamped");
+                Sampler e = d.createSampler(descriptor: give open);
+                Sampler kept = copy e;
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 11);
+    }
+
+    unsafe fn void anisotropicNearest() {
+        match (this.device) {
+            case Some(value: d): {
+                SamplerDescriptor s = SamplerDescriptor.make();
+                s.maxAnisotropy(count: 16);
+                s.label(text: "aniso nearest");
+                Sampler made = d.createSampler(descriptor: give s);
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 21);
+    }
+
+    unsafe fn void lodBackwards() {
+        match (this.device) {
+            case Some(value: d): {
+                SamplerDescriptor s = SamplerDescriptor.make();
+                s.lodClamp(min: 5.0, max: 1.0);
+                s.label(text: "lod backwards");
+                Sampler made = d.createSampler(descriptor: give s);
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 31);
+    }
+
+    unsafe fn void lodNan() {
+        match (this.device) {
+            case Some(value: d): {
+                SamplerDescriptor s = SamplerDescriptor.make();
+                s.lodClamp(min: notANumber(), max: 32.0);
+                s.label(text: "nan clamp");
+                Sampler made = d.createSampler(descriptor: give s);
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 41);
+    }
+
+    unsafe fn void lodMinusInfinity() {
+        match (this.device) {
+            case Some(value: d): {
+                SamplerDescriptor s = SamplerDescriptor.make();
+                s.lodClamp(min: divided(by: -0.0), max: 32.0);
+                s.label(text: "minus infinity");
+                Sampler made = d.createSampler(descriptor: give s);
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 51);
+    }
+}
+
+// The channel's reports, for a failure's words.
+fn string described(const ref DeviceErrors errs) {
+    isize n = errs.reports().length();
+    if (n == 0) { return "nothing"; }
+    string first = errs.reports()[0].message();
+    return "${n} report(s), the first: ${first}";
+}
+
+// "" when `errs` holds one validation error whose words name `label`, and say `says` when it is not "".
+fn string oneNaming(const ref DeviceErrors errs, const ref string label, const ref string says) {
+    if (errs.reports().length() != 1) { return "want one error; " + described(errs: errs); }
+    bool validation = match (errs.reports()[0].kind()) { case Validation: true; case _: false; };
+    string words = errs.reports()[0].message();
+    if (!validation) { return "not a validation error: ${words}"; }
+    if (!words.contains(substring: label)) { return "its words do not name `${label}`: ${words}"; }
+    if (!says.isEmpty() && !words.contains(substring: says)) { return "its words do not say `${says}`: ${words}"; }
+    return "";
+}

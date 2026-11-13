@@ -33,7 +33,7 @@ import {
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::WindowOptions, window::Size, window::NativeWindow,
     addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly, heapInUse,
-    ShaderRun, Verdicts,
+    ShaderRun, Verdicts, BindingRun,
 };
 
 comptime uint32 SIDE = 64;
@@ -574,6 +574,7 @@ type resource Check implements App {
     Optional<SurfaceRun> surfaces = Optional::None;
     Optional<ErrorRun> errorRun = Optional::None;
     Optional<ShaderRun> shaderRun = Optional::None;
+    Optional<BindingRun> bindingRun = Optional::None;
     Instant began = monotonicNow();
     int32 runs = 0;
     int32 failures = 0;
@@ -639,7 +640,8 @@ type resource Check implements App {
             int32 now = this.stage;
             if (heap >= 0) { println(s: "info the heap in use, stage ${was} to ${now}: ${heap} bytes"); }
         }
-        if (this.stage == 6) { return this.finish(); }
+        if (this.stage == 6) { this.bindingStep(); }
+        if (this.stage == 7) { return this.finish(); }
         return 1;
     }
 
@@ -678,6 +680,23 @@ type resource Check implements App {
         if (done) { this.shaderRun = Optional::None; this.stage = 6; }
     }
 
+    // The cases of GPU-4's second part (tests/src/bindings.kama), a step this tick, their verdicts reported here.
+    unsafe fn void bindingStep() {
+        Optional<BindingRun> taken = replace(place: this.bindingRun, with: Optional::None);
+        BindingRun pending = match (give taken) { case Some(value: r): give r; case None: BindingRun.make(adapterOptional: adapterOptional()); };
+        bool done = pending.step();
+        isize i = 0;
+        while (i < pending.verdicts().count()) {
+            string name = pending.verdicts().nameAt(at: i);
+            string why = pending.verdicts().whyAt(at: i);
+            this.verdict(name: name, why: why);
+            i = i + 1;
+        }
+        pending.verdicts().clear();
+        this.bindingRun = Optional::Some(value: give pending);
+        if (done) { this.bindingRun = Optional::None; this.stage = 7; }
+    }
+
     unsafe fn void awaitAdapter() {
         Optional<AdapterPool> taken = replace(place: this.pool, with: Optional::None);
         match (give taken) {
@@ -693,7 +712,7 @@ type resource Check implements App {
                         this.verdict(name: "with no adapter here, WebGPU says why (NoAdapter's words)",
                                      why: words.isEmpty() ? "no words" : "");
                         println(s: "skip every case that needs a WebGPU adapter: there is none here (--adapter-optional): ${words}");
-                        this.stage = 6;
+                        this.stage = 7;
                         return;
                     }
                     this.verdict(name: "adapters, asked of the instance", why: "${n} of ${ADAPTERS} given: ${words}");

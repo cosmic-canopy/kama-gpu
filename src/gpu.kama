@@ -31,7 +31,7 @@ import {
     TextureFormat,
     std::collections::DynamicArray,
     std::memory::Shared,
-    std::encoding::utf8::decode, std::encoding::utf8::Utf8Error,
+    std::encoding::utf8::decode, std::encoding::utf8::Utf8Error, std::num::float32Max,
     gpu::native::createInstance, gpu::native::instanceAddRef, gpu::native::instanceRelease,
     gpu::native::adapterAddRef, gpu::native::adapterRelease, gpu::native::adapterGetLimits,
     gpu::native::deviceAddRef, gpu::native::deviceRelease, gpu::native::deviceGetQueue, gpu::native::deviceGetLimits,
@@ -60,6 +60,10 @@ import {
     gpu::native::requestDeviceOf, gpu::native::deviceRequestPoll, gpu::native::deviceRequestConsumed,
     gpu::native::deviceRequestTakeDevice, gpu::native::deviceRequestMessage, gpu::native::deviceRequestDrop,
     gpu::native::mapAsync, gpu::native::mapPoll, gpu::native::mapMessage, gpu::native::mapDrop, gpu::native::mapBytes,
+    gpu::native::stateKeepQueue, gpu::native::refuseOn, gpu::native::quietBegin, gpu::native::quietEnd,
+    gpu::native::samplerAddRef, gpu::native::samplerRelease, gpu::native::deviceCreateSampler,
+    gpu::native::WGPUSamplerDescriptor, gpu::native::WGPUAddressMode, gpu::native::WGPUFilterMode,
+    gpu::native::WGPUMipmapFilterMode, gpu::native::WGPUCompareFunction,
     gpu::native::pollDevice, gpu::native::deviceRequestTakeState, gpu::native::LOSS_DESTROYED,
     gpu::native::stateUnwatched, gpu::native::stateHold, gpu::native::stateRelease, gpu::native::stateWatched,
     gpu::native::stateTakeErrors, gpu::native::errorsCount, gpu::native::errorsDropped, gpu::native::errorsKind,
@@ -91,6 +95,7 @@ export {
     CommandEncoder, RenderPass, CommandBuffer, Color,
     Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
     GpuErrorKind, GpuErrorReport, DeviceErrors, DeviceLoss, LossReason, ErrorFilter, ErrorScope, ScopePop, PopStatus,
+    Sampler, SamplerDescriptor, AddressMode, FilterMode, MipmapFilterMode, CompareFunction,
     ShaderModuleDescriptor, ShaderModule, CompilationRequest, CompilationStatus, CompilationInfo, CompilationMessage,
     CompilationMessageKind,
 };
@@ -916,8 +921,9 @@ type resource DeviceRequest {
         if (device == null) { return DeviceStatus::Failed(error: GpuError::Taken); }
         UnsafePtr state = deviceRequestTakeState(request: this.slot);
         UnsafePtr queue = deviceGetQueue(device: device);
+        stateKeepQueue(state: state, queue: queue);
         return DeviceStatus::Ready(device: Device.fromRequest(raw: device, adapter: this.adapter, block: state),
-                                   queue: Queue.fromDevice(raw: queue, block: state));
+                                   queue: Queue.fromDevice(raw: queue, block: state, device: device));
     }
 
     unsafe ~DeviceRequest() {
@@ -1061,6 +1067,32 @@ type resource Device implements Copyable<This>(bare: give) {
         return ShaderModule.fromDevice(raw: raw, block: this.hold.raw(), text: give text);
     }
 
+    // A sampler as `descriptor` describes it (WebGPU's `createSampler`; AGENTS.gpu.md item 12, decision 8). A LOD clamp
+    // that is not a number, or infinite, is refused as a validation error in the package's words, where a browser would
+    // throw and end the program, and the sampler handed back is invalid, as a refused one is (decision 9); a +inf
+    // `lodMaxClamp` clamps nothing, and is taken as such.
+    public unsafe fn Sampler createSampler(SamplerDescriptor descriptor) {
+        WGPUSamplerDescriptor d = descriptor.raw();
+        string refused = descriptor.refusal();
+        if (refused.isEmpty()) {
+            return Sampler.fromDevice(raw: deviceCreateSampler(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))),
+                                      block: this.hold.raw());
+        }
+        this.refuse(words: refused);
+        d.lodMinClamp = -1.0;   // a sampler the device refuses: the handle is invalid, as the refused call's would be
+        d.lodMaxClamp = 32.0;
+        quietBegin(device: this.handle);
+        UnsafePtr raw = deviceCreateSampler(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d)));
+        quietEnd(device: this.handle);
+        return Sampler.fromDevice(raw: raw, block: this.hold.raw());
+    }
+
+    // What a backend would end the program on, refused and reported as a validation error where WebGPU reports one
+    // (AGENTS.gpu.md item 12, decision 9).
+    unsafe fn void refuse(const ref string words) {
+        refuseOn(device: this.handle, message: cast<UnsafeConstPtr<uint8>>(words.cstr()), length: cast<int32>(words.length()));
+    }
+
     public unsafe fn CommandEncoder createCommandEncoder() {
         return CommandEncoder.fromDevice(raw: deviceCreateCommandEncoder(device: this.handle, descriptor: null),
                                          block: this.hold.raw());
@@ -1082,19 +1114,25 @@ type resource Device implements Copyable<This>(bare: give) {
 
 type resource Queue implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    UnsafePtr device;                      // a reference on its device, which carries the package's refusals; null adopted
     StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
     friend DeviceRequest::poll[fromDevice];
 
-    // One made elsewhere; it takes over one reference, and holds no device state.
-    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+    // One made elsewhere; it takes over one reference, and holds no device state. A call the package refuses on it is
+    // dropped unreported, since it has no device to report through.
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; this.device = null; }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block, UnsafePtr device) {
         this.handle = raw;
+        this.device = device;
+        deviceAddRef(device: device);
         this.hold = StateHold.make(block: block);
     }
     public unsafe ctor copy(ref Queue source) {
         this.handle = source.handle;
         queueAddRef(queue: this.handle);
+        this.device = source.device;
+        if (this.device != null) { deviceAddRef(device: this.device); }
         this.hold = copy source.hold;
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
@@ -1108,7 +1146,10 @@ type resource Queue implements Copyable<This>(bare: give) {
         queueSubmit(queue: this.handle, commandCount: 1, commands: cast<UnsafePtr>(addr(of: one)));
     }
 
-    unsafe ~Queue() { if (this.handle != null) { queueRelease(queue: this.handle); } }
+    unsafe ~Queue() {
+        if (this.handle != null) { queueRelease(queue: this.handle); }
+        if (this.device != null) { deviceRelease(device: this.device); }
+    }
 }
 
 // ---- buffers ---------------------------------------------------------------------------------------------------------
@@ -1160,7 +1201,7 @@ type resource Buffer implements Copyable<This>(bare: give) {
 
     // Map `size` bytes from `offset` for reading (a MapRead buffer); `poll()` the read until it is Ready.
     public unsafe fn BufferRead mapRead(uint64 offset, uint64 size) {
-        return BufferRead.start(buffer: this.handle, offset: offset, size: size);
+        return BufferRead.start(buffer: this.handle, block: this.hold.raw(), offset: offset, size: size);
     }
 
     unsafe ~Buffer() { if (this.handle != null) { bufferRelease(buffer: this.handle); } }
@@ -1176,9 +1217,12 @@ type resource BufferRead {
 
     friend Buffer::mapRead[start];
 
-    unsafe ctor start(UnsafePtr buffer, uint64 offset, uint64 size) {
+    // Natively the device's queue is flushed first, so the map sees every write made before it (AGENTS.gpu.md item 12,
+    // decision 9): wgpu-native keeps them until the next submit.
+    unsafe ctor start(UnsafePtr buffer, UnsafePtr block, uint64 offset, uint64 size) {
         this.length = size;
-        this.slot = mapAsync(buffer: buffer, mode: WGPUMapMode::Read, offset: cast<usize>(offset), size: cast<usize>(size));
+        this.slot = mapAsync(buffer: buffer, state: block, mode: WGPUMapMode::Read, offset: cast<usize>(offset),
+                             size: cast<usize>(size));
     }
 
     public unsafe const fn ReadStatus poll() {
@@ -1261,6 +1305,140 @@ type resource TextureView implements Copyable<This>(bare: give) {
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
     unsafe ~TextureView() { if (this.handle != null) { textureViewRelease(textureView: this.handle); } }
+}
+
+// ---- samplers (GPU-4; AGENTS.gpu.md item 12, decision 8) ------------------------------------------------------------
+
+// How a coordinate past a texture's edge is read (WebGPU's `GPUAddressMode`).
+type enum AddressMode { ClampToEdge, Repeat, MirrorRepeat }
+// How texels are blended between their centres (WebGPU's `GPUFilterMode`), and between mip levels (`GPUMipmapFilterMode`).
+type enum FilterMode { Nearest, Linear }
+type enum MipmapFilterMode { Nearest, Linear }
+// A comparison (WebGPU's `GPUCompareFunction`): a comparison sampler's, and a depth test's.
+type enum CompareFunction { Never, Less, Equal, LessEqual, Greater, NotEqual, GreaterEqual, Always }
+
+fn int32 addressValue(AddressMode m) {
+    return match (m) {
+        case ClampToEdge: WGPUAddressMode::ClampToEdge;
+        case Repeat: WGPUAddressMode::Repeat;
+        case MirrorRepeat: WGPUAddressMode::MirrorRepeat;
+    };
+}
+
+fn int32 filterModeValue(FilterMode m) {
+    return match (m) { case Nearest: WGPUFilterMode::Nearest; case Linear: WGPUFilterMode::Linear; };
+}
+
+fn int32 mipmapValue(MipmapFilterMode m) {
+    return match (m) { case Nearest: WGPUMipmapFilterMode::Nearest; case Linear: WGPUMipmapFilterMode::Linear; };
+}
+
+fn int32 compareValue(CompareFunction c) {
+    return match (c) {
+        case Never: WGPUCompareFunction::Never;
+        case Less: WGPUCompareFunction::Less;
+        case Equal: WGPUCompareFunction::Equal;
+        case LessEqual: WGPUCompareFunction::LessEqual;
+        case Greater: WGPUCompareFunction::Greater;
+        case NotEqual: WGPUCompareFunction::NotEqual;
+        case GreaterEqual: WGPUCompareFunction::GreaterEqual;
+        case Always: WGPUCompareFunction::Always;
+    };
+}
+
+fn bool finite(float32 x) { return x == x && x <= float32Max() && x >= -float32Max(); }
+
+// WebGPU's `GPUSamplerDescriptor` (AGENTS.gpu.md item 12, decision 8): every part has WebGPU's default (clamp to the
+// edge, nearest, LOD clamps 0 to 32, no comparison, anisotropy 1), and is set in the groups WebGPU's validation relates.
+type resource SamplerDescriptor {
+    AddressMode modeU = AddressMode::ClampToEdge;
+    AddressMode modeV = AddressMode::ClampToEdge;
+    AddressMode modeW = AddressMode::ClampToEdge;
+    FilterMode magnify = FilterMode::Nearest;
+    FilterMode minify = FilterMode::Nearest;
+    MipmapFilterMode betweenLevels = MipmapFilterMode::Nearest;
+    float32 lodMin = 0.0;
+    float32 lodMax = 32.0;
+    Optional<CompareFunction> comparing = Optional::None;
+    uint16 anisotropy = 1;
+    string labelled = "";
+
+    friend Device::createSampler[raw, refusal];
+
+    public ctor make() { }
+    // How a coordinate past each edge is read.
+    public fn void addressModes(AddressMode u, AddressMode v, AddressMode w) {
+        this.modeU = u;
+        this.modeV = v;
+        this.modeW = w;
+    }
+    // How texels are blended magnified, minified, and between mip levels. An anisotropy above 1 needs all three Linear.
+    public fn void filters(FilterMode mag, FilterMode min, MipmapFilterMode mipmap) {
+        this.magnify = mag;
+        this.minify = min;
+        this.betweenLevels = mipmap;
+    }
+    // The levels of detail sampled, `min` at most `max`, neither below 0.
+    public fn void lodClamp(float32 min, float32 max) {
+        this.lodMin = min;
+        this.lodMax = max;
+    }
+    // A comparison sampler: each texel compared with a reference.
+    public fn void compare(CompareFunction function) { this.comparing = Optional::Some(value: function); }
+    // At most `count` samples across a slanted footprint, 1 to 16 as the implementation clamps it.
+    public fn void maxAnisotropy(uint16 count) { this.anisotropy = count; }
+    public fn void label(string text) { this.labelled = give text; }
+
+    // webgpu.h's description, its label borrowed from this one, which must outlive the call it is handed to.
+    unsafe const fn WGPUSamplerDescriptor raw() {
+        WGPUSamplerDescriptor d = WGPUSamplerDescriptor.zero();
+        d.label = labelOf(text: this.labelled);
+        d.addressModeU = addressValue(m: this.modeU);
+        d.addressModeV = addressValue(m: this.modeV);
+        d.addressModeW = addressValue(m: this.modeW);
+        d.magFilter = filterModeValue(m: this.magnify);
+        d.minFilter = filterModeValue(m: this.minify);
+        d.mipmapFilter = mipmapValue(m: this.betweenLevels);
+        d.lodMinClamp = this.lodMin;
+        // +inf clamps nothing: 1e30 is past any level of detail, and a browser throws on +inf
+        d.lodMaxClamp = this.lodMax > float32Max() ? 1.0e30 : this.lodMax;
+        int32 comparison = match (this.comparing) { case Some(value: c): compareValue(c: c); case None: WGPUCompareFunction::Undefined; };
+        d.compare = comparison;
+        d.maxAnisotropy = this.anisotropy;
+        return d;
+    }
+
+    // Why the package refuses this description (a LOD clamp not a number, or infinite but a +inf max), or "".
+    const fn string refusal() {
+        float32 lo = this.lodMin;
+        float32 hi = this.lodMax;
+        bool maxOk = finite(x: hi) || hi > float32Max();
+        if (finite(x: lo) && maxOk) { return ""; }
+        string name = copy this.labelled;
+        return "the sampler '${name}' has a LOD clamp that is not a finite number (lodMinClamp ${lo}, lodMaxClamp ${hi}): WebGPU refuses it";
+    }
+}
+
+type resource Sampler implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
+
+    friend Device::createSampler[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
+    public unsafe ctor copy(ref Sampler source) {
+        this.handle = source.handle;
+        samplerAddRef(sampler: this.handle);
+        this.hold = copy source.hold;
+    }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    unsafe ~Sampler() { if (this.handle != null) { samplerRelease(sampler: this.handle); } }
 }
 
 // ---- shader modules (GPU-4; AGENTS.gpu.md item 12) -------------------------------------------------------------------

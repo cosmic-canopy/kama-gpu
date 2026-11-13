@@ -8,7 +8,7 @@ export {
     adapterMarkNew, adapterMarkHold, adapterMarkRelease,
     requestDeviceOf, deviceRequestPoll, deviceRequestTakeDevice, deviceRequestTakeState, deviceRequestMessage,
     deviceRequestConsumed, deviceRequestDrop,
-    mapAsync, mapPoll, mapMessage, mapDrop, mapBytes,
+    mapAsync, mapPoll, mapMessage, mapDrop, mapBytes, stateKeepQueue, refuseOn, quietBegin, quietEnd,
     pollDevice,
     LOSS_DESTROYED, stateUnwatched, stateHold, stateRelease, stateWatched, stateTakeErrors, errorsCount,
     errorsDropped, errorsKind, errorsLength, errorsMessage, errorsFree, stateLost, stateLostLength, stateLostMessage,
@@ -55,7 +55,11 @@ extern fn UnsafePtr gpuseam_device_request_take_device(UnsafePtr request);
 extern fn UnsafePtr gpuseam_device_request_take_state(UnsafePtr request);
 extern fn int32 gpuseam_device_request_message(UnsafePtr request, UnsafePtr<uint8> dst, int32 capacity);
 extern fn void gpuseam_device_request_drop(UnsafePtr request);
-extern fn UnsafePtr gpuseam_map_async(UnsafePtr buffer, uint64 mode, usize offset, usize size);
+extern fn UnsafePtr gpuseam_map_async(UnsafePtr buffer, UnsafePtr state, uint64 mode, usize offset, usize size);
+extern fn void gpuseam_state_keep_queue(UnsafePtr state, UnsafePtr queue);
+extern fn void gpuseam_refuse(UnsafePtr device, UnsafeConstPtr<uint8> message, int32 length);
+extern fn void gpuseam_quiet_begin(UnsafePtr device);
+extern fn void gpuseam_quiet_end(UnsafePtr device);
 extern fn int32 gpuseam_map_poll(UnsafePtr map);
 extern fn int32 gpuseam_map_message(UnsafePtr map, UnsafePtr<uint8> dst, int32 capacity);
 extern fn void gpuseam_map_drop(UnsafePtr map);
@@ -124,9 +128,15 @@ unsafe fn int32 deviceRequestMessage(UnsafePtr request, UnsafePtr<uint8> dst, in
     return gpuseam_device_request_message(request: request, dst: dst, capacity: capacity);
 }
 unsafe fn void deviceRequestDrop(UnsafePtr request) { gpuseam_device_request_drop(request: request); }
-unsafe fn UnsafePtr mapAsync(UnsafePtr buffer, uint64 mode, usize offset, usize size) {
-    return gpuseam_map_async(buffer: buffer, mode: mode, offset: offset, size: size);
+unsafe fn UnsafePtr mapAsync(UnsafePtr buffer, UnsafePtr state, uint64 mode, usize offset, usize size) {
+    return gpuseam_map_async(buffer: buffer, state: state, mode: mode, offset: offset, size: size);
 }
+unsafe fn void stateKeepQueue(UnsafePtr state, UnsafePtr queue) { gpuseam_state_keep_queue(state: state, queue: queue); }
+unsafe fn void refuseOn(UnsafePtr device, UnsafeConstPtr<uint8> message, int32 length) {
+    gpuseam_refuse(device: device, message: message, length: length);
+}
+unsafe fn void quietBegin(UnsafePtr device) { gpuseam_quiet_begin(device: device); }
+unsafe fn void quietEnd(UnsafePtr device) { gpuseam_quiet_end(device: device); }
 unsafe fn int32 mapPoll(UnsafePtr map) { return gpuseam_map_poll(map: map); }
 unsafe fn int32 mapMessage(UnsafePtr map, UnsafePtr<uint8> dst, int32 capacity) {
     return gpuseam_map_message(map: map, dst: dst, capacity: capacity);

@@ -29,8 +29,17 @@ top level. Natively kama finds wgpu-native's SDK at `$KAMA_WGPU_DIR`. Everything
   polled. A request dropped while pending is safe: the seam frees it when its callback fires.
 - **Nothing waits through `wgpuInstanceWaitAny`,** which aborts the process on both legs (wgpu-native: "not
   implemented"; emdawnwebgpu without ASYNCIFY).
-- **What wgpu-native would abort the process on is refused first,** in a `Result` that names it (a surface's
-  configuration, below).
+- **Nothing a program passes ends it** (AGENTS.gpu.md item 12, decision 9). What wgpu-native would abort the process
+  on, or a browser would throw on, is refused first, in one of two ways:
+  - a surface's configuration, in a `Result` that names it (below);
+  - a creation or a write, as a validation error in the package's words. It is reported where WebGPU reports one: the
+    innermost validation scope on the calling thread, else the device's channel. The handle comes back invalid, as a
+    refused one would.
+
+  The report rides a call the backend refuses, a 4-byte buffer with no usage labelled `kama-gpu-refusal:<n>`, so it
+  lands in the same scope and order on both legs; the seam swaps the package's words for the backend's. A size or
+  offset past 2^53 - 1 is clamped to 2^53 - 256, which no device reaches, so the device refuses it as it refuses any
+  size past its limits.
 - **Every handle has `unsafe` `adopt(raw:)` and `raw()`,** so code can bind more of webgpu.h with its own externs.
 - **The numbers are generated, never written by hand.** `tools/wgpugen` writes `src/native/webgpu.gen.kama` and
   `src/formats.gen.kama` from both legs' headers, and `tools/check-bindings.sh` regenerates and compares both and holds
@@ -182,6 +191,24 @@ The sets:
     format for (an implementation's own extensions among them);
   - `name()`;
   - `isSrgb()`, and `srgb()` and `linear()`: a format's sRGB and linear forms.
+
+## Samplers
+
+- **`device.createSampler(descriptor:)`,** from WebGPU's `GPUSamplerDescriptor`. `SamplerDescriptor.make()` holds
+  WebGPU's defaults (clamp to the edge, nearest, LOD clamps 0 to 32, no comparison, anisotropy 1). Its parts are set in
+  the groups WebGPU's validation relates:
+  - `addressModes(u:, v:, w:)`, each an `AddressMode` (`ClampToEdge`, `Repeat`, `MirrorRepeat`);
+  - `filters(mag:, min:, mipmap:)`, `FilterMode`s and a `MipmapFilterMode` (`Nearest`, `Linear`). An anisotropy above
+    1 needs all three `Linear`;
+  - `lodClamp(min:, max:)`;
+  - `compare(function:)`, a `CompareFunction` (`Never`, `Less`, `Equal`, `LessEqual`, `Greater`, `NotEqual`,
+    `GreaterEqual`, `Always`), which makes it a comparison sampler;
+  - `maxAnisotropy(count:)`;
+  - `label(text:)`.
+- What WebGPU refuses is a validation error naming the label: anisotropy with a nearest filter, a min clamp above the
+  max, a negative clamp.
+- **A LOD clamp that is NaN or infinite is refused in the package's words,** where a browser would throw, and where
+  wgpu-native takes a NaN silently. A +inf max clamps nothing, and is taken as 10^30.
 
 ## Shader modules
 
