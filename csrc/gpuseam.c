@@ -1156,6 +1156,9 @@ _Static_assert(WGPU_DEPTH_SLICE_UNDEFINED == 0xFFFFFFFFu, "gpu.kama's DEPTH_SLIC
 // A limit a request leaves to WebGPU's default is WGPU_LIMIT_U32_UNDEFINED or _U64_UNDEFINED, #defines likewise unseen.
 _Static_assert(WGPU_LIMIT_U32_UNDEFINED == 0xFFFFFFFFu, "gpu.kama's LIMIT_U32_UNDEFINED");
 _Static_assert(WGPU_LIMIT_U64_UNDEFINED == 0xFFFFFFFFFFFFFFFFull, "gpu.kama's LIMIT_U64_UNDEFINED");
+// A view's "the rest" of the mip levels and of the array layers, #defines likewise unseen.
+_Static_assert(WGPU_MIP_LEVEL_COUNT_UNDEFINED == 0xFFFFFFFFu, "gpu.kama's MIP_LEVEL_COUNT_UNDEFINED");
+_Static_assert(WGPU_ARRAY_LAYER_COUNT_UNDEFINED == 0xFFFFFFFFu, "gpu.kama's ARRAY_LAYER_COUNT_UNDEFINED");
 
 // ---- a surface -------------------------------------------------------------------------------------------------------
 

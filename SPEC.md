@@ -211,7 +211,29 @@ The sets:
   `format()` and `usage()`:** WebGPU's `GPUTexture` attributes, as the backend holds them, whether or not it took the
   texture. `format()` is `None` only for a format webgpu.h names none for, on a texture made elsewhere. A texture the
   package refused answers its substitute's: 0 wide, 2D, in RGBA8Unorm.
-- **`texture.createView()`,** in the texture's own format.
+- **`texture.createView(descriptor:)`,** from a `TextureViewDescriptor`, WebGPU's `GPUTextureViewDescriptor`.
+  - `TextureViewDescriptor.make()` is a view of the whole texture, in its own format and usage, with WebGPU's default
+    dimension for it. Its parts:
+    - `format(format:)`: the texture's own, or one of its view formats;
+    - `dimension(kind:)`, a `TextureViewDimension`;
+    - `mips(first:, count:)` and `layers(first:, count:)` (WebGPU's `baseMipLevel` and `baseArrayLayer`; kama reserves
+      `base`);
+    - `aspect(kind:)`, a `TextureAspect` (`All`, `StencilOnly`, `DepthOnly`);
+    - `usage(flags:)`: some of the texture's usages;
+    - `label(text:)`.
+  - What WebGPU refuses is a validation error, to the device's channel or a scope: a range of mips or layers past the
+    texture's, a cube of other than 6 layers, a format not among the view formats, and an aspect the format lacks.
+    Dawn's words name the view's label; wgpu-native's never do.
+  - A count of 2^32 - 1 is clamped to 2^32 - 2, since webgpu.h reads 2^32 - 1 as "the rest", so WebGPU refuses it as
+    past the texture.
+  - **Refused in the package's words, the view handed back invalid** (the texture's from one past its last mip level,
+    under a quiet section):
+    - a count of 0, which ends a native program;
+    - a format whose feature the device was not given, where a browser throws;
+    - a usage the texture was not made with, which wgpu-native takes and WebGPU refuses.
+
+    A texture holds a reference on its device to report them through. An adopted texture has none, so they are
+    refused unreported there.
 - **`TextureFormat` names every format webgpu.h has (101),** the same numbers on both legs:
   - `value()`, webgpu.h's number, and `TextureFormat::fromValue(value:)`, `None` for a number webgpu.h names no
     format for (an implementation's own extensions among them);
@@ -518,7 +540,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 30 facts, natively, its asynchronous
   pipeline call's abort and its taking a colour target the fragment stage never writes among them;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 228 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 243 cases natively with a display, debug and release.
   Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
@@ -528,7 +550,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
-- the web leg, headless, on the page's canvases: `tests/` (205 cases) and `examples/clear` (60 frames on `#canvas`)
+- the web leg, headless, on the page's canvases: `tests/` (220 cases) and `examples/clear` (60 frames on `#canvas`)
   under `kama run --target WASM --headless` in Edge, Chrome as installed and the pinned Firefox 160, each with the
   printErrors check. Firefox's run holds `maxImmediateSize` to 0 (`--no-immediates`), a WGSL warning to no message
   (`--no-shader-warnings`), and a buffer of 2^53 - 256 bytes to an out-of-memory error, which is how Firefox reports it

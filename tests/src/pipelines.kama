@@ -12,7 +12,7 @@ import {
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::DeviceOptions, gpu::GpuError,
     gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::Color,
     gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus,
-    gpu::Texture, gpu::TextureDescriptor, gpu::TextureView, gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::CompareFunction,
+    gpu::Texture, gpu::TextureDescriptor, gpu::TextureViewDescriptor, gpu::TextureView, gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::CompareFunction,
     gpu::ShaderModuleDescriptor, gpu::ShaderModule,
     gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
     gpu::BufferBindingType, gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindingResource,
@@ -383,7 +383,7 @@ type resource PipelineRun {
                         RenderPipeline p = copiedPipeline(d: d, descriptor: drawnDescriptor(shaders: m, kind: kind));
                         Texture target = d.createTexture(descriptor: TextureDescriptor.make(width: SIDE, height: SIDE, format: TextureFormat::RGBA8Unorm,
                                                          usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc));
-                        TextureView view = target.createView();
+                        TextureView view = target.createView(descriptor: TextureViewDescriptor.make());
                         uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
                         Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
                         CommandEncoder encoder = d.createCommandEncoder();
@@ -592,7 +592,7 @@ type resource PipelineRun {
                     case Some(value: p): {
                         Texture target = d.createTexture(descriptor: TextureDescriptor.make(width: SIDE, height: SIDE, format: TextureFormat::RGBA8Unorm,
                                                          usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc));
-                        TextureView view = target.createView();
+                        TextureView view = target.createView(descriptor: TextureViewDescriptor.make());
                         uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
                         Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
                         CommandEncoder encoder = d.createCommandEncoder();

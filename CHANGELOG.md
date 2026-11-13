@@ -5,6 +5,15 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Changed, breaking: a texture view is made from its description** (2026-11-13, kama 0.9.943; GPU-4's fourth part,
+  AGENTS.gpu.md item 12, decisions 9, 10 and 12). `texture.createView(descriptor: TextureViewDescriptor.make())`
+  replaces `createView()`. The description's parts give a format, a `TextureViewDimension`, `mips(first:, count:)`,
+  `layers(first:, count:)`, a new `TextureAspect`, a usage and a label.
+  - A count of 0, a format whose feature the device lacks, and a usage the texture was not made with are refused in
+    the package's words.
+  - A texture now holds a reference on its device, and a surface on the device it was configured with, so a refusal
+    reaches the device's channel.
+
 - **Changed, breaking: a texture is made from its description** (2026-11-13, kama 0.9.943; GPU-4's fourth part,
   AGENTS.gpu.md item 12, decisions 1, 5 and 9). `device.createTexture(descriptor: TextureDescriptor.make(width:,
   height:, format:, usage:))` replaces `createTexture(width:, height:, format:, usage:)`, and the description's parts

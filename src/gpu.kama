@@ -51,7 +51,7 @@ import {
     gpu::native::commandBufferAddRef, gpu::native::commandBufferRelease,
     gpu::native::WGPUBufferDescriptor, gpu::native::WGPUTextureDescriptor, gpu::native::WGPURenderPassDescriptor,
     gpu::native::WGPURenderPassColorAttachment, gpu::native::WGPUTexelCopyTextureInfo,
-    gpu::native::WGPUTexelCopyBufferInfo, gpu::native::WGPUExtent3D, gpu::native::WGPUStringView,
+    gpu::native::WGPUTexelCopyBufferInfo, gpu::native::WGPUExtent3D, gpu::native::WGPUTextureViewDescriptor, gpu::native::WGPUStringView,
     gpu::native::WGPUBufferUsage, gpu::native::WGPUTextureUsage, gpu::native::WGPUShaderStage, gpu::native::WGPUMapMode,
     gpu::native::WGPUTextureDimension, gpu::native::WGPULoadOp,
     gpu::native::WGPUStoreOp, gpu::native::WGPUTextureAspect, gpu::native::WGPUPowerPreference,
@@ -118,7 +118,7 @@ export {
     Limits, Feature, FeatureSet, DeviceOptions,
     Device, Queue, DeviceRequest, DeviceStatus, GpuError, PowerPreference,
     Buffer, BufferDescriptor, BufferUsage, BufferRead, ReadStatus,
-    Texture, TextureDescriptor, TextureDimension, TextureUsage, TextureView, ShaderStage,
+    Texture, TextureDescriptor, TextureDimension, TextureUsage, TextureView, TextureViewDescriptor, TextureAspect, ShaderStage,
     CommandEncoder, RenderPass, CommandBuffer, Color,
     Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
     GpuErrorKind, GpuErrorReport, DeviceErrors, DeviceLoss, LossReason, ErrorFilter, ErrorScope, ScopePop, PopStatus,
@@ -151,6 +151,12 @@ comptime uint64 LIMIT_U64_UNDEFINED = 0xFFFFFFFFFFFFFFFF;
 comptime uint64 SIZE_LIMIT = 9007199254740736;
 
 fn uint64 inRange(uint64 v) { return v > SIZE_LIMIT ? SIZE_LIMIT : v; }
+// webgpu.h's WGPU_MIP_LEVEL_COUNT_UNDEFINED and WGPU_ARRAY_LAYER_COUNT_UNDEFINED: a view's "the rest". Asserted likewise.
+comptime uint32 MIP_LEVEL_COUNT_UNDEFINED = 0xFFFFFFFF;
+comptime uint32 ARRAY_LAYER_COUNT_UNDEFINED = 0xFFFFFFFF;
+// A count handed to webgpu.h, where 2^32 - 1 means "the rest": a program's 2^32 - 1 is clamped to 2^32 - 2, which no
+// texture has, so WebGPU refuses it as it refuses any count past the texture (decision 9).
+fn uint32 countOf(uint32 n) { return n == 0xFFFFFFFF ? 0xFFFFFFFE : n; }
 // The most features a set holds or a query copies out: webgpu.h names 22, and an implementation may add its own.
 comptime int32 FEATURES_MAX = 64;
 
@@ -1134,11 +1140,7 @@ type resource Device implements Copyable<This>(bare: give) {
     }
 
     // The features it was given.
-    public unsafe const fn FeatureSet features() {
-        InlineArray<int32>#(64) names = [0; 64];
-        int32 n = deviceFeatureNames(device: this.handle, dst: addr(of: names[0]), capacity: FEATURES_MAX);
-        return featuresFrom(names: names, count: n);
-    }
+    public unsafe const fn FeatureSet features() { return featuresOfDevice(device: this.handle); }
 
     // A buffer as `descriptor` describes it (WebGPU's `createBuffer`; AGENTS.gpu.md item 12, decision 7).
     public unsafe fn Buffer createBuffer(BufferDescriptor descriptor) {
@@ -1179,7 +1181,7 @@ type resource Device implements Copyable<This>(bare: give) {
         d.viewFormats = views.length() > 0 ? cast<UnsafePtr>(views.dataPtr()) : null;
         if (refused.isEmpty()) {
             return Texture.fromDevice(raw: deviceCreateTexture(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))),
-                                      block: this.hold.raw());
+                                      block: this.hold.raw(), device: this.handle);
         }
         // the handle handed back is invalid: an empty 2D RGBA8Unorm texture with no view formats, which WebGPU refuses,
         // its error dropped
@@ -1196,7 +1198,7 @@ type resource Device implements Copyable<This>(bare: give) {
         quietBegin(device: this.handle);
         UnsafePtr raw = deviceCreateTexture(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d)));
         quietEnd(device: this.handle);
-        return Texture.fromDevice(raw: raw, block: this.hold.raw());
+        return Texture.fromDevice(raw: raw, block: this.hold.raw(), device: this.handle);
     }
 
     // A shader module from WGSL (WebGPU's `createShaderModule`). It is handed back at once, as WebGPU's is: an error in
@@ -1601,6 +1603,71 @@ type resource BufferRead {
 
 // ---- textures --------------------------------------------------------------------------------------------------------
 
+// The features `device` was given.
+unsafe fn FeatureSet featuresOfDevice(UnsafePtr device) {
+    InlineArray<int32>#(64) names = [0; 64];
+    int32 n = deviceFeatureNames(device: device, dst: addr(of: names[0]), capacity: FEATURES_MAX);
+    return featuresFrom(names: names, count: n);
+}
+
+// A refusal in the package's words, reported through `device` as every error is (decision 9); dropped where there is
+// no device, on a handle made elsewhere.
+unsafe fn void refuseThrough(UnsafePtr device, const ref string words) {
+    if (device == null) { return; }
+    refuseOn(device: device, message: cast<UnsafeConstPtr<uint8>>(words.cstr()), length: cast<int32>(words.length()));
+}
+
+// Which aspects of a depth-stencil texture a view sees (WebGPU's `GPUTextureAspect`).
+type enum TextureAspect { All, StencilOnly, DepthOnly }
+
+fn int32 aspectValue(TextureAspect a) {
+    return match (a) {
+        case All: WGPUTextureAspect::All;
+        case StencilOnly: WGPUTextureAspect::StencilOnly;
+        case DepthOnly: WGPUTextureAspect::DepthOnly;
+    };
+}
+
+// WebGPU's `GPUTextureViewDescriptor` (AGENTS.gpu.md item 12, decision 12): a view of the whole texture, in its own
+// format and usage, with WebGPU's default dimension for it, unless its parts say otherwise.
+type resource TextureViewDescriptor {
+    Optional<TextureFormat> form = Optional::None;
+    Optional<TextureViewDimension> dim = Optional::None;
+    uint32 baseMip = 0;
+    uint32 mipTotal = MIP_LEVEL_COUNT_UNDEFINED;
+    bool mipsGiven = false;
+    uint32 baseLayer = 0;
+    uint32 layerTotal = ARRAY_LAYER_COUNT_UNDEFINED;
+    bool layersGiven = false;
+    TextureAspect part = TextureAspect::All;
+    Optional<TextureUsage> uses = Optional::None;
+    string labelled = "";
+
+    friend Texture::createView[form, dim, baseMip, mipTotal, mipsGiven, baseLayer, layerTotal, layersGiven, part, uses,
+                               labelled];
+
+    public ctor make() { }
+    // The format the view reads and writes: the texture's own, or one of its view formats.
+    public fn void format(TextureFormat format) { this.form = Optional::Some(value: format); }
+    public fn void dimension(TextureViewDimension kind) { this.dim = Optional::Some(value: kind); }
+    // `count` mip levels, from `first` (WebGPU's `baseMipLevel`; kama reserves `base`).
+    public fn void mips(uint32 first, uint32 count) {
+        this.baseMip = first;
+        this.mipTotal = count;
+        this.mipsGiven = true;
+    }
+    // `count` array layers, from `first` (WebGPU's `baseArrayLayer`).
+    public fn void layers(uint32 first, uint32 count) {
+        this.baseLayer = first;
+        this.layerTotal = count;
+        this.layersGiven = true;
+    }
+    public fn void aspect(TextureAspect kind) { this.part = kind; }
+    // The usages the view is used with: some of its texture's.
+    public fn void usage(TextureUsage flags) { this.uses = Optional::Some(value: flags); }
+    public fn void label(string text) { this.labelled = give text; }
+}
+
 // A texture's dimension (WebGPU's `GPUTextureDimension`).
 type enum TextureDimension { D1, D2, D3 }
 
@@ -1654,27 +1721,89 @@ type resource TextureDescriptor {
 
 type resource Texture implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    UnsafePtr device = null;              // a reference on its device, which carries the package's refusals; null adopted
     StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
     friend Device::createTexture[fromDevice];
     friend SurfaceTexture::texture[fromDevice];
 
-    // One made elsewhere; it takes over one reference, and holds no device state.
+    // One made elsewhere; it takes over one reference, and holds no device state. A view the package refuses of it is
+    // refused unreported, since it has no device to report through.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block, UnsafePtr device) {
         this.handle = raw;
+        this.device = device;
+        if (device != null) { deviceAddRef(device: device); }
         this.hold = StateHold.make(block: block);
     }
     public unsafe ctor copy(ref Texture source) {
         this.handle = source.handle;
         textureAddRef(texture: this.handle);
+        this.device = source.device;
+        if (this.device != null) { deviceAddRef(device: this.device); }
         this.hold = copy source.hold;
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
-    // A view of the whole texture.
-    public unsafe fn TextureView createView() {
-        return TextureView.fromDevice(raw: textureCreateView(texture: this.handle, descriptor: null), block: this.hold.raw());
+    // A view as `descriptor` describes it (WebGPU's `createView`; AGENTS.gpu.md item 12, decision 12): the whole texture
+    // is `createView(descriptor: TextureViewDescriptor.make())`. It is handed back at once, its error reported as every
+    // error is. These are refused in the package's words, and the view handed back is invalid (decisions 9 and 10): a
+    // count of 0, which ends a native program; a format whose feature the device was not given, where a browser throws;
+    // and a usage the texture was not made with, which wgpu-native takes and WebGPU refuses.
+    public unsafe fn TextureView createView(TextureViewDescriptor descriptor) {
+        WGPUTextureViewDescriptor d = WGPUTextureViewDescriptor.zero();
+        d.label = labelOf(text: descriptor.labelled);
+        int32 viewFormat = match (descriptor.form) { case Some(value: f): f.value(); case None: 0; };
+        int32 viewDimension = match (descriptor.dim) { case Some(value: v): viewDimensionValue(v: v); case None: 0; };
+        d.format = viewFormat;
+        d.dimension = viewDimension;
+        d.baseMipLevel = descriptor.baseMip;
+        d.mipLevelCount = descriptor.mipsGiven ? countOf(n: descriptor.mipTotal) : MIP_LEVEL_COUNT_UNDEFINED;
+        d.baseArrayLayer = descriptor.baseLayer;
+        d.arrayLayerCount = descriptor.layersGiven ? countOf(n: descriptor.layerTotal) : ARRAY_LAYER_COUNT_UNDEFINED;
+        d.aspect = aspectValue(a: descriptor.part);
+        uint64 viewUsage = match (descriptor.uses) { case Some(value: u): u.bits(); case None: 0; };
+        d.usage = viewUsage;
+        int32 seen = d.format != 0 ? d.format : textureGetFormat(texture: this.handle);
+
+        string what = "the view '" + descriptor.labelled + "'";
+        string refused = "";
+        if (descriptor.mipsGiven && descriptor.mipTotal == 0) {
+            refused = what + " has a mip level count of 0: WebGPU refuses an empty view";
+        } else if (descriptor.layersGiven && descriptor.layerTotal == 0) {
+            refused = what + " has an array layer count of 0: WebGPU refuses an empty view";
+        } else if (this.device != null) {
+            match (descriptor.form) {
+                case Some(value: f): { refused = refusalOfFormat(format: f, given: featuresOfDevice(device: this.device), what: what); }
+                case None: { }
+            };
+        }
+        if (refused.isEmpty()) {
+            match (descriptor.uses) {
+                case Some(value: u): {
+                    TextureUsage made = this.usage();
+                    if (!made.has(flags: u)) {
+                        refused = what + " asks for a usage its texture was not made with: WebGPU refuses it";
+                    }
+                }
+                case None: { }
+            };
+        }
+        if (refused.isEmpty()) {
+            return TextureView.fromDevice(raw: textureCreateView(texture: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))),
+                                          block: this.hold.raw(), format: seen);
+        }
+        // the view handed back is invalid: the texture's from one past its last mip level, which WebGPU refuses, its
+        // error dropped
+        refuseThrough(device: this.device, words: refused);
+        WGPUTextureViewDescriptor past = WGPUTextureViewDescriptor.zero();
+        past.baseMipLevel = textureGetMipLevelCount(texture: this.handle);
+        past.mipLevelCount = MIP_LEVEL_COUNT_UNDEFINED;
+        past.arrayLayerCount = ARRAY_LAYER_COUNT_UNDEFINED;
+        if (this.device != null) { quietBegin(device: this.device); }
+        UnsafePtr raw = textureCreateView(texture: this.handle, descriptor: cast<UnsafePtr>(addr(of: past)));
+        if (this.device != null) { quietEnd(device: this.device); }
+        return TextureView.fromDevice(raw: raw, block: this.hold.raw(), format: seen);
     }
 
     // WebGPU's `GPUTexture` attributes: what the texture was made with, as the backend holds it, whether or not the
@@ -1693,11 +1822,15 @@ type resource Texture implements Copyable<This>(bare: give) {
     }
     public unsafe const fn TextureUsage usage() { return TextureUsage.fromBits(bits: textureGetUsage(texture: this.handle)); }
 
-    unsafe ~Texture() { if (this.handle != null) { textureRelease(texture: this.handle); } }
+    unsafe ~Texture() {
+        if (this.handle != null) { textureRelease(texture: this.handle); }
+        if (this.device != null) { deviceRelease(device: this.device); }
+    }
 }
 
 type resource TextureView implements Copyable<This>(bare: give) {
     UnsafePtr handle;
+    int32 form = 0;                       // webgpu.h's number for the format it reads and writes; 0 when made elsewhere
     StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
     friend Texture::createView[fromDevice];
@@ -1705,13 +1838,15 @@ type resource TextureView implements Copyable<This>(bare: give) {
 
     // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block, int32 format) {
         this.handle = raw;
+        this.form = format;
         this.hold = StateHold.make(block: block);
     }
     public unsafe ctor copy(ref TextureView source) {
         this.handle = source.handle;
         textureViewAddRef(textureView: this.handle);
+        this.form = source.form;
         this.hold = copy source.hold;
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
@@ -3786,6 +3921,7 @@ type resource SurfaceState {
     bool hasConfig = false;
     int32 view = 0;   // WebGPU's number for the view format; Undefined (0) before a configure, which is the texture's own
     StateHold hold = StateHold.empty();   // the state of the device it was last configured with, which its frames hold
+    UnsafePtr device = null;              // a reference on that device, which carries the package's refusals
     // The window, held (@kama/window's WIN-1); an adopted surface holds an adopted handle, which is always open.
     NativeWindow onWindow = NativeWindow.adopt(kind: NativeKind::None, display: null, window: null);
     bool adopted = false;   // made elsewhere: no window here to size it
@@ -3806,13 +3942,20 @@ type resource SurfaceState {
     public const fn bool isConfigured() { return this.hasConfig; }
     public const fn int32 viewFormat() { return this.view; }
     public unsafe const fn UnsafePtr deviceState() { return this.hold.raw(); }
-    public unsafe fn void configured(int32 view, UnsafePtr block) {
+    public unsafe fn void configured(int32 view, UnsafePtr block, UnsafePtr device) {
         this.hasConfig = true;
         this.view = view;
         this.hold = StateHold.make(block: block);
+        deviceAddRef(device: device);
+        if (this.device != null) { deviceRelease(device: this.device); }
+        this.device = device;
     }
+    public unsafe const fn UnsafePtr configuredDevice() { return this.device; }
 
-    unsafe ~SurfaceState() { if (this.handle != null) { surfaceRelease(surface: this.handle); } }
+    unsafe ~SurfaceState() {
+        if (this.handle != null) { surfaceRelease(surface: this.handle); }
+        if (this.device != null) { deviceRelease(device: this.device); }
+    }
 }
 
 // A surface on a window, which WebGPU presents into. It holds the window, so the two drop in either order: once the
@@ -3909,7 +4052,7 @@ type resource Surface implements Copyable<This>(bare: give) {
             string words = textOf(buf: said, length: n);
             return Result::Err(error: ConfigureError::NotOffered(words: give words));
         }
-        this.state.configured(view: config.viewFormat.value(), block: device.stateBlock());
+        this.state.configured(view: config.viewFormat.value(), block: device.stateBlock(), device: device.raw());
         return Result::Ok(value: Unit::Unit);
     }
 
@@ -3926,7 +4069,7 @@ type resource Surface implements Copyable<This>(bare: give) {
         if (s == SURFACE_OK) {
             return Result::Ok(value: SurfaceTexture.make(texture: texture, surface: h, suboptimal: suboptimal != 0,
                                                          view: this.state.viewFormat(), block: this.state.deviceState(),
-                                                         window: this.state.heldWindow()));
+                                                         device: this.state.configuredDevice(), window: this.state.heldWindow()));
         }
         if (s == SURFACE_OCCLUDED) { return Result::Err(error: SurfaceError::Occluded); }
         if (s == SURFACE_OUTDATED) { return Result::Err(error: SurfaceError::Outdated); }
@@ -3944,12 +4087,16 @@ type resource SurfaceTexture {
     bool late;
     int32 viewAs;        // the view format the surface was configured with, or Undefined (0): the texture's own
     StateHold hold = StateHold.empty();   // the state of the device the surface was configured with
+    UnsafePtr device;                     // a reference on that device, for the frame's texture; null when adopted
     NativeWindow onWindow;                // the surface's window, held while the frame holds the surface
 
     friend Surface::acquire[make];
 
-    unsafe ctor make(UnsafePtr texture, UnsafePtr surface, bool suboptimal, int32 view, UnsafePtr block, NativeWindow window) {
+    unsafe ctor make(UnsafePtr texture, UnsafePtr surface, bool suboptimal, int32 view, UnsafePtr block, UnsafePtr device,
+                     NativeWindow window) {
         this.image = texture;
+        this.device = device;
+        if (device != null) { deviceAddRef(device: device); }
         this.surface = surface;
         this.late = suboptimal;
         this.viewAs = view;
@@ -3963,13 +4110,15 @@ type resource SurfaceTexture {
 
     // A view to render into, in the view format the surface was configured with: sRGB-encoding by default.
     public unsafe fn TextureView view() {
-        return TextureView.fromDevice(raw: textureViewIn(texture: this.image, format: this.viewAs), block: this.hold.raw());
+        int32 seen = this.viewAs != 0 ? this.viewAs : textureGetFormat(texture: this.image);
+        return TextureView.fromDevice(raw: textureViewIn(texture: this.image, format: this.viewAs), block: this.hold.raw(),
+                                      format: seen);
     }
 
     // The frame's texture itself, to copy from when the configured usage allows it.
     public unsafe fn Texture texture() {
         textureAddRef(texture: this.image);
-        return Texture.fromDevice(raw: this.image, block: this.hold.raw());
+        return Texture.fromDevice(raw: this.image, block: this.hold.raw(), device: this.device);
     }
 
     // Show the frame; it is spent, and its texture released after the present. Once the window is closed it is dropped
@@ -3981,5 +4130,6 @@ type resource SurfaceTexture {
     unsafe ~SurfaceTexture() {
         if (this.image != null) { textureRelease(texture: this.image); }
         surfaceRelease(surface: this.surface);
+        if (this.device != null) { deviceRelease(device: this.device); }
     }
 }

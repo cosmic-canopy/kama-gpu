@@ -44,8 +44,8 @@ errors reach its own holders (GPU-1), a surface holds its window (GPU-2), an acq
 (GPU-13), an adapter gives one device and a surface is configured at its window's size (GPU-3), and Firefox's
 differences from Dawn are handled (GPU-14). GPU-4, the render pipeline set, is decided (item 12) and under way: parts 1
 to 3 are built (shader modules; layouts, bind groups, samplers and `writeBuffer`; render pipelines both ways, with
-`printErrors`). Part 4 is decided (decisions 11 to 14) and under way: textures by description are built, and the pass
-and views by description come next, then part 5. `tools/test.sh` passes before every commit.
+`printErrors`). Part 4 is decided (decisions 11 to 14) and under way: textures and views by description are built,
+and the pass by description, its depth-stencil attachment and its commands come next, then part 5. `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
 
@@ -1191,6 +1191,57 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       - in Edge, the substitute keeping its view formats: the browser threw for ETC2, which ended the program.
     - **Results:** `tests/` is 228 cases natively, debug and release, and 205 in Edge, in Firefox and in Chrome for
       Testing. COVERAGE.md: 87 of 206.
+
+    **Built on 2026-11-13 (kyoten's twentieth session), part 4's second step: views by description** (decision 12, with
+    decisions 9 and 10), test-first. Red against a stub that made the whole view and refused nothing: 12 of the 15 new
+    cases failed.
+    - **Measured first** (kyoten's `.scratch/gpu4-part4/web/views.html`):
+      - a browser **throws** in `createView` for a format whose feature the device lacks, as in `createTexture`;
+      - emdawnwebgpu reads a view's numbers as unsigned 32-bit, so a large first level or count reaches the browser
+        as a validation error, not a throw.
+    - **The API:**
+      - `TextureViewDescriptor.make()` with `format`, `dimension`, `mips(first:, count:)`, `layers(first:, count:)`,
+        `aspect` (a new `TextureAspect`), `usage` and `label`;
+      - `texture.createView(descriptor:)` replaces `createView()`.
+    - **The refusals,** each in the package's words, with the view handed back invalid (the texture's from one past its
+      last mip level, under a quiet section):
+      - a count of 0, which natively ends the process;
+      - a format whose feature the device lacks, where a browser throws;
+      - a usage the texture was not made with, which wgpu-native takes (decision 10).
+
+      A count of 2^32 - 1, webgpu.h's "the rest", is clamped to 2^32 - 2.
+    - **A texture holds a reference on its device,** as a `Queue` does, so a view's refusal reaches the device's channel.
+      A surface keeps the device it was configured with, and its frame's texture holds it. An adopted texture has no
+      device, and refuses unreported.
+    - **A view keeps the format it was made in,** for the depth-stencil attachment's aspect check in the next step.
+    - **Decided in the building, for the owner to object to:** kama reserves `base`, so decision 12's `mips(base:,
+      count:)` is `mips(first:, count:)`, as a draw's `firstVertex`, and so is `layers`.
+    - **Found in the building:** wgpu-native v29's errors for a view never name the view's label, where Dawn's and
+      Firefox's later wgpu's do. Natively the view cases hold the error, and on the web its label too (`viewLabel`).
+    - **The cases** (`BindingRun`):
+      - eight views WebGPU takes, and the channel empty: whole, one mip level, one layer, a cube, an array, an sRGB
+        twin, the depth of a depth-stencil texture, and some of the texture's usage;
+      - each a validation error: a first mip level or layer past the texture's, a mip or layer count past it, a cube of
+        5, a format that is not a view format, the depth of a colour texture, and 2^32 - 1 levels;
+      - the four refusals;
+      - the refused view's substitute, as a render target, is a validation error;
+      - a view without RenderAttachment as a target is a validation error.
+      - **The surface's device:** the surface run's sRGB frame has a view of its texture refused, and the device's
+        channel holds exactly that refusal, in the package's words.
+    - **Mutations: 21 of 21 caught,** 20 natively and one in Edge. They cover:
+      - each field of the lowering lost (format, dimension, first mip, mip count, first layer, layer count, aspect,
+        usage);
+      - the 2^32 - 1 clamp gone;
+      - each refusal gone (the two counts of 0 ended the native process), the usage check inverted, the refusal not
+        reported, the substitute not quieted or valid;
+      - a texture made by a device holding none, the frame's texture holding none, and the surface not handing its
+        frame the device;
+      - in Edge, the label not handed over.
+
+      The substitute made valid was caught once the refusal's case used a texture whose whole view is a valid
+      target.
+    - **Results:** `tests/` is 243 cases natively, debug and release, and 220 in Edge, in Firefox and in Chrome for
+      Testing. COVERAGE.md is unchanged, at 87 of 206, since `createView` was already called.
 
 ## Where the truth is
 

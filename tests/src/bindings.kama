@@ -13,7 +13,7 @@ import {
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::DeviceOptions, gpu::GpuError,
     gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer,
     gpu::Sampler, gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::CompareFunction,
-    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::Texture, gpu::TextureDescriptor, gpu::TextureDimension, gpu::TextureView, gpu::TextureFormat,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::Texture, gpu::TextureDescriptor, gpu::TextureViewDescriptor, gpu::TextureAspect, gpu::TextureViewDimension, gpu::RenderPass, gpu::Color, gpu::TextureDimension, gpu::TextureView, gpu::TextureFormat,
     gpu::TextureUsage, gpu::ShaderStage, gpu::Feature,
     gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
     gpu::BufferBindingType, gpu::SamplerBindingLayout, gpu::SamplerBindingType, gpu::TextureBindingLayout,
@@ -32,6 +32,13 @@ fn float32 divided(float32 by) {
     float32 one = 1.0;
     return one / by;
 }
+// wgpu-native's errors for a view never name the view's label, where Dawn's do (measured 2026-11-13): natively a view's
+// case holds the error, and on the web its label too.
+@compileFor(ARCH_WASM32)
+fn string viewLabel(const ref string label) { return copy label; }
+@compileFor(!ARCH_WASM32)
+fn string viewLabel(const ref string label) { return ""; }
+
 // What a refusal's substitute texture answers: 0 wide, 2D, in RGBA8Unorm; or why not.
 unsafe fn string attributesOfSubstitute(const ref Texture t) {
     uint32 w = t.width();
@@ -47,6 +54,18 @@ unsafe fn string attributesOfSubstitute(const ref Texture t) {
 fn float32 notANumber() {
     float32 zero = 0.0;
     return zero / zero;
+}
+
+// A texture views are made of: 4x4, three mip levels and six layers, in RGBA8Unorm with its sRGB twin as a view
+// format, for binding and rendering.
+unsafe fn Texture viewedTexture(ref Device d) {
+    TextureDescriptor t = TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::RGBA8Unorm,
+                                                 usage: TextureUsage::TextureBinding | TextureUsage::RenderAttachment);
+    t.mipLevelCount(count: 3);
+    t.depthOrArrayLayers(count: 6);
+    t.viewFormat(format: TextureFormat::RGBA8UnormSrgb);
+    t.label(text: "viewed");
+    return d.createTexture(descriptor: give t);
 }
 
 // One texture made from `descriptor` on `d`, held in `held`, and its attributes held to what was described.
@@ -94,6 +113,8 @@ type resource BindingRun {
     bool givenBC = false;   // the device was given TextureCompressionBC, which its adapter offered
     Optional<BindGroupLayout> refusedLayout = Optional::None;   // a layout refused for its storage format
     Optional<Texture> refusedTexture = Optional::None;   // a texture refused for its format, for a view
+    Optional<TextureView> heldView = Optional::None;   // the last view a case made, for a render pass into it
+    DynamicArray<TextureView> heldViews = DynamicArray.empty();   // the views WebGPU takes, until the channel is seen empty
     DynamicArray<Texture> heldTextures = DynamicArray.empty();   // the textures WebGPU takes, until the channel is seen empty
 
     public ctor make(bool adapterOptional) {
@@ -195,7 +216,38 @@ type resource BindingRun {
         else if (this.stage == 371) { this.awaitOne(name: "a view format whose feature the device lacks is a validation error in the package's words, not the end of the program", label: "gated view", says: "a view format of the texture 'gated view' uses the texture format ETC2RGB8Unorm", next: 372); }
         else if (this.stage == 372) { this.refusedAttributes(); }
         else if (this.stage == 380) { this.bcVolume(); }
-        else if (this.stage == 381) { this.awaitOne(name: "a 3D BC texture on a device without TextureCompressionBCSliced3D is a validation error naming its label", label: "bc volume", says: "", next: 240); }
+        else if (this.stage == 381) { this.awaitOne(name: "a 3D BC texture on a device without TextureCompressionBCSliced3D is a validation error naming its label", label: "bc volume", says: "", next: 390); }
+        else if (this.stage == 390) { this.goodViews(); }
+        else if (this.stage == 391) { this.awaitNone(name: "views WebGPU takes are made from their descriptions with no error: whole, one mip level, one layer, a cube, an array, an sRGB twin, the depth of a depth-stencil texture, and some of the texture's usage", next: 400); }
+        else if (this.stage == 400) { this.badView(kind: 1, label: "mip past"); }
+        else if (this.stage == 401) { this.awaitOne(name: "a view from one past the texture's last mip level is a validation error naming its label", label: viewLabel(label: "mip past"), says: "", next: 410); }
+        else if (this.stage == 410) { this.badView(kind: 2, label: "mips past"); }
+        else if (this.stage == 411) { this.awaitOne(name: "a view of more mip levels than the texture has from its first is a validation error naming its label", label: viewLabel(label: "mips past"), says: "", next: 420); }
+        else if (this.stage == 420) { this.badView(kind: 3, label: "layer past"); }
+        else if (this.stage == 421) { this.awaitOne(name: "a view from one past the texture's last layer is a validation error naming its label", label: viewLabel(label: "layer past"), says: "", next: 430); }
+        else if (this.stage == 430) { this.badView(kind: 4, label: "layers past"); }
+        else if (this.stage == 431) { this.awaitOne(name: "a view of more layers than the texture has is a validation error naming its label", label: viewLabel(label: "layers past"), says: "", next: 440); }
+        else if (this.stage == 440) { this.badView(kind: 5, label: "cube of five"); }
+        else if (this.stage == 441) { this.awaitOne(name: "a cube view of 5 layers is a validation error naming its label", label: viewLabel(label: "cube of five"), says: "", next: 450); }
+        else if (this.stage == 450) { this.badView(kind: 6, label: "no such view format"); }
+        else if (this.stage == 451) { this.awaitOne(name: "a view in a format the texture was not given as a view format is a validation error naming its label", label: viewLabel(label: "no such view format"), says: "", next: 460); }
+        else if (this.stage == 460) { this.badView(kind: 7, label: "depth of colour"); }
+        else if (this.stage == 461) { this.awaitOne(name: "a view of the depth aspect of a colour texture is a validation error naming its label", label: viewLabel(label: "depth of colour"), says: "", next: 470); }
+        else if (this.stage == 470) { this.badView(kind: 8, label: "all but one"); }
+        else if (this.stage == 471) { this.awaitOne(name: "a view of 2^32 - 1 mip levels is a validation error naming its label, not webgpu.h's \"the rest\"", label: viewLabel(label: "all but one"), says: "", next: 480); }
+        else if (this.stage == 480) { this.badView(kind: 9, label: "no mips"); }
+        else if (this.stage == 481) { this.awaitOne(name: "a view of 0 mip levels is a validation error in the package's words, not the end of a native program", label: "no mips", says: "has a mip level count of 0", next: 490); }
+        else if (this.stage == 490) { this.badView(kind: 10, label: "no layers"); }
+        else if (this.stage == 491) { this.awaitOne(name: "a view of 0 array layers is a validation error in the package's words, not the end of a native program", label: "no layers", says: "has an array layer count of 0", next: 500); }
+        else if (this.stage == 500) { this.badView(kind: 11, label: "usage beyond"); }
+        else if (this.stage == 501) { this.awaitOne(name: "a view asking for a usage its texture was not made with is a validation error in the package's words, which wgpu-native would take", label: "usage beyond", says: "asks for a usage its texture was not made with", next: 510); }
+        else if (this.stage == 510) { this.badView(kind: 12, label: "gated view"); }
+        else if (this.stage == 511) { this.awaitOne(name: "a view in a format whose feature the device lacks is a validation error in the package's words, not the end of a web program", label: "gated view", says: "uses the texture format ETC2RGB8Unorm", next: 512); }
+        else if (this.stage == 512) { this.targetOf(label: "refused view target", next: 513); }
+        else if (this.stage == 513) { this.awaitOne(name: "the view a refusal hands back is invalid: a render pass into it is a validation error", label: "", says: "", next: 520); }
+        else if (this.stage == 520) { this.badView(kind: 13, label: "binding only"); }
+        else if (this.stage == 521) { this.targetOf(label: "binding only target", next: 522); }
+        else if (this.stage == 522) { this.awaitOne(name: "a view whose usage leaves out RenderAttachment, as a render target, is a validation error", label: "", says: "", next: 240); }
         return this.stage >= 999;
     }
 
@@ -383,7 +435,7 @@ type resource BindingRun {
                 BindGroupLayout textureLayout = d.createBindGroupLayout(descriptor: give tl);
                 Texture image = d.createTexture(descriptor: TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding));
                 BindGroupDescriptor textured = BindGroupDescriptor.make(layout: give textureLayout);
-                textured.entry(binding: 0, resource: BindingResource::Texture(view: image.createView()));
+                textured.entry(binding: 0, resource: BindingResource::Texture(view: image.createView(descriptor: TextureViewDescriptor.make())));
                 textured.label(text: "textured");
                 BindGroup e = d.createBindGroup(descriptor: give textured);
             }
@@ -522,7 +574,7 @@ type resource BindingRun {
     unsafe fn void viewOfRefused() {
         Optional<Texture> held = replace(place: this.refusedTexture, with: Optional::None);
         match (give held) {
-            case Some(value: image): { TextureView view = image.createView(); }
+            case Some(value: image): { TextureView view = image.createView(descriptor: TextureViewDescriptor.make()); }
             case None: { }
         };
         this.flush();
@@ -631,7 +683,7 @@ type resource BindingRun {
     unsafe fn void bcVolume() {
         if (!this.givenBC) {
             println(s: "skip a 3D BC texture: this adapter does not offer TextureCompressionBC");
-            this.next(to: 240);
+            this.next(to: 390);
             return;
         }
         TextureDescriptor t = TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::BC1RGBAUnorm, usage: TextureUsage::TextureBinding);
@@ -643,6 +695,106 @@ type resource BindingRun {
         };
         this.flush();
         this.next(to: 381);
+    }
+
+    // Views WebGPU takes, held until the channel is seen empty.
+    unsafe fn void goodViews() {
+        DynamicArray<TextureView> made = DynamicArray.empty();
+        match (this.device) {
+            case Some(value: d): {
+                Texture image = viewedTexture(d: d);
+                made.add(item: image.createView(descriptor: TextureViewDescriptor.make()));
+                TextureViewDescriptor level = TextureViewDescriptor.make();
+                level.mips(first: 1, count: 1);
+                made.add(item: image.createView(descriptor: give level));
+                TextureViewDescriptor layer = TextureViewDescriptor.make();
+                layer.dimension(kind: TextureViewDimension::D2);
+                layer.layers(first: 2, count: 1);
+                made.add(item: image.createView(descriptor: give layer));
+                TextureViewDescriptor cube = TextureViewDescriptor.make();
+                cube.dimension(kind: TextureViewDimension::Cube);
+                made.add(item: image.createView(descriptor: give cube));
+                TextureViewDescriptor array = TextureViewDescriptor.make();
+                array.dimension(kind: TextureViewDimension::D2Array);
+                made.add(item: image.createView(descriptor: give array));
+                TextureViewDescriptor twin = TextureViewDescriptor.make();
+                twin.format(format: TextureFormat::RGBA8UnormSrgb);
+                made.add(item: image.createView(descriptor: give twin));
+                TextureViewDescriptor some = TextureViewDescriptor.make();
+                some.usage(flags: TextureUsage::TextureBinding);
+                made.add(item: image.createView(descriptor: give some));
+                Texture both = d.createTexture(descriptor: TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::Depth24PlusStencil8,
+                                                                                 usage: TextureUsage::TextureBinding | TextureUsage::RenderAttachment));
+                TextureViewDescriptor depth = TextureViewDescriptor.make();
+                depth.aspect(kind: TextureAspect::DepthOnly);
+                made.add(item: both.createView(descriptor: give depth));
+            }
+            case None: { }
+        };
+        this.heldViews = give made;
+        this.flush();
+        this.next(to: 391);
+    }
+
+    // A view of `viewed()` (or, for kind 6, of a texture with no view formats) described wrong in one way, named `label`;
+    // kept for a render pass into it.
+    unsafe fn void badView(int32 kind, string label) {
+        this.heldViews = DynamicArray.empty();
+        TextureViewDescriptor v = TextureViewDescriptor.make();
+        if (kind == 1) { v.mips(first: 3, count: 1); }
+        else if (kind == 2) { v.mips(first: 1, count: 3); }
+        else if (kind == 3) { v.dimension(kind: TextureViewDimension::D2); v.layers(first: 6, count: 1); }
+        else if (kind == 4) { v.dimension(kind: TextureViewDimension::D2Array); v.layers(first: 0, count: 7); }
+        else if (kind == 5) { v.dimension(kind: TextureViewDimension::Cube); v.layers(first: 0, count: 5); }
+        else if (kind == 6) { v.format(format: TextureFormat::RGBA8UnormSrgb); }
+        else if (kind == 7) { v.aspect(kind: TextureAspect::DepthOnly); }
+        else if (kind == 8) { v.mips(first: 0, count: 4294967295); }
+        else if (kind == 9) { v.mips(first: 0, count: 0); }
+        else if (kind == 10) { v.dimension(kind: TextureViewDimension::D2Array); v.layers(first: 0, count: 0); }
+        else if (kind == 11) { v.usage(flags: TextureUsage::StorageBinding); }
+        else if (kind == 12) { v.format(format: TextureFormat::ETC2RGB8Unorm); }
+        else if (kind == 13) { v.mips(first: 0, count: 1); v.dimension(kind: TextureViewDimension::D2); v.layers(first: 0, count: 1); v.usage(flags: TextureUsage::TextureBinding); }
+        v.label(text: give label);
+        Optional<TextureView> made = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                if (kind == 6 || kind == 12) {
+                    // one level and one layer, with no view formats: its whole view is a valid render target, so a
+                    // refusal's substitute that WebGPU took would show as one (kind 12)
+                    Texture plain = d.createTexture(descriptor: TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::RGBA8Unorm,
+                                                                                      usage: TextureUsage::TextureBinding | TextureUsage::RenderAttachment));
+                    made = Optional::Some(value: plain.createView(descriptor: give v));
+                } else {
+                    Texture image = viewedTexture(d: d);
+                    made = Optional::Some(value: image.createView(descriptor: give v));
+                }
+            }
+            case None: { TextureViewDescriptor unused = give v; }
+        };
+        this.heldView = give made;
+        this.flush();
+        this.next(to: this.stage + 1);
+    }
+
+    // A render pass into the last view a case made, cleared and ended: WebGPU's error, if any, comes at the finish.
+    unsafe fn void targetOf(const ref string label, int32 next) {
+        Optional<TextureView> held = replace(place: this.heldView, with: Optional::None);
+        match (this.device) {
+            case Some(value: d): {
+                match (give held) {
+                    case Some(value: view): {
+                        CommandEncoder enc = d.createCommandEncoder();
+                        RenderPass pass = enc.beginRenderPass(target: view, clear: Color.of(r: 0.0, g: 0.0, b: 0.0, a: 1.0));
+                        give pass.end();
+                        CommandBuffer cb = give enc.finish();
+                    }
+                    case None: { }
+                };
+            }
+            case None: { Optional<TextureView> unused = give held; }
+        };
+        this.flush();
+        this.next(to: next);
     }
 
     // A storage texture layout in RGBA16Snorm, whose feature the device was not given; the layout kept for a pipeline layout.

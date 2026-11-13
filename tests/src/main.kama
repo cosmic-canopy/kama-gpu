@@ -24,7 +24,7 @@ import {
     gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::AdapterInfo,
     gpu::Backend, gpu::Limits, gpu::Feature, gpu::FeatureSet, gpu::DeviceOptions,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError,
-    gpu::PowerPreference, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::Texture, gpu::TextureDescriptor,
+    gpu::PowerPreference, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::Texture, gpu::TextureDescriptor, gpu::TextureViewDescriptor,
     gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass,
     gpu::CommandBuffer, gpu::Color,
     gpu::DeviceErrors, gpu::GpuErrorReport, gpu::GpuErrorKind, gpu::DeviceLoss, gpu::LossReason,
@@ -1005,7 +1005,7 @@ type resource Check implements App {
     unsafe fn void render(ref Device device, ref Queue queue) {
         Texture target = device.createTexture(descriptor: TextureDescriptor.make(width: SIDE, height: SIDE, format: TextureFormat::RGBA8Unorm,
                                               usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc));
-        TextureView view = target.createView();
+        TextureView view = target.createView(descriptor: TextureViewDescriptor.make());
         uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
         Buffer copy = device.createBuffer(descriptor: BufferDescriptor.make(size: bytes,
                                                                             usage: BufferUsage::MapRead | BufferUsage::CopyDst));
@@ -1260,6 +1260,7 @@ type resource SurfaceRun {
     Optional<Device> device = Optional::None;
     Optional<Queue> queue = Optional::None;
     Optional<GreyRead> grey = Optional::None;
+    bool viewRefused = false;   // the sRGB frame's texture had a view refused, which its device's channel must hold
     Optional<SurfaceConfig> linear = Optional::None;   // the configure the second readback is drawn through
 
     public ctor make() { }
@@ -1388,18 +1389,18 @@ type resource SurfaceRun {
                 SurfaceConfig plain = srgb;
                 plain.viewFormat = f;
                 this.linear = Optional::Some(value: plain);
-                this.startGrey(t: t, through: e, name: "a frame drawn through the sRGB view, by a copy made before the configure");
+                this.startGrey(t: t, through: e, name: "a frame drawn through the sRGB view, by a copy made before the configure", refuseAView: true);
                 this.stage = 3;
             }
         };
     }
 
-    unsafe fn void startGrey(ref Check t, ref Surface through, const ref string name) {
+    unsafe fn void startGrey(ref Check t, ref Surface through, const ref string name, bool refuseAView) {
         Device d = match (this.device) { case Some(value: x): copy x; case None: { return; } };
         Queue q = match (this.queue) { case Some(value: x): copy x; case None: { return; } };
-        Result<GreyRead, GpuError> started = startGreyRead(surface: through, device: d, queue: q);
+        Result<GreyRead, GpuError> started = startGreyRead(surface: through, device: d, queue: q, refuseAView: refuseAView);
         match (give started) {
-            case Ok(value: g): { this.grey = Optional::Some(value: give g); }
+            case Ok(value: g): { this.grey = Optional::Some(value: give g); if (refuseAView) { this.viewRefused = true; } }
             case Err(error: e): { string why = e.message(); t.verdict(name: name, why: why); }
         };
     }
@@ -1432,7 +1433,7 @@ type resource SurfaceRun {
             case Some(value: c): {
                 Result<Unit, ConfigureError> s2 = s.configure(device: d, config: c);
                 t.verdict(name: "a linear format through itself is taken", why: expectRefusal(got: s2, want: "ok"));
-                this.startGrey(t: t, through: s, name: "a frame drawn through the linear view reads 0.5 grey as 128");
+                this.startGrey(t: t, through: s, name: "a frame drawn through the linear view reads 0.5 grey as 128", refuseAView: false);
                 this.stage = 4;
             }
         };
@@ -1443,7 +1444,12 @@ type resource SurfaceRun {
         match (this.device) {
             case Some(value: d): {
                 DeviceErrors errs = d.takeErrors();
-                t.verdict(name: "no uncaptured WebGPU error on the surface's device", why: errorsSaid(errs: errs));
+                if (this.viewRefused) {
+                    t.verdict(name: "the surface's device holds one error, a frame texture's view of 0 mip levels refused in the package's words, and no uncaptured WebGPU error",
+                              why: onlyTheRefusal(errs: errs, says: "the view 'a frame's empty view' has a mip level count of 0"));
+                } else {
+                    t.verdict(name: "no uncaptured WebGPU error on the surface's device", why: errorsSaid(errs: errs));
+                }
             }
             case None: { }
         };
@@ -1504,7 +1510,7 @@ type resource GreyRead {
 
 // Acquire a frame, clear it to 0.5 grey through `frame.view()`, copy its top-left PATCH × PATCH texels out, and present
 // it, the copy's map started.
-unsafe fn Result<GreyRead, GpuError> startGreyRead(ref Surface surface, ref Device device, ref Queue queue) {
+unsafe fn Result<GreyRead, GpuError> startGreyRead(ref Surface surface, ref Device device, ref Queue queue, bool refuseAView) {
     Result<SurfaceTexture, SurfaceError> acquired = surface.acquire();
     SurfaceTexture frame = match (give acquired) {
         case Ok(value: f): give f;
@@ -1512,6 +1518,13 @@ unsafe fn Result<GreyRead, GpuError> startGreyRead(ref Surface surface, ref Devi
     };
     TextureView view = frame.view();
     Texture texture = frame.texture();
+    if (refuseAView) {
+        // refused in the package's words, through the device the surface was configured with
+        TextureViewDescriptor empty = TextureViewDescriptor.make();
+        empty.mips(first: 0, count: 0);
+        empty.label(text: "a frame's empty view");
+        TextureView emptyView = texture.createView(descriptor: give empty);
+    }
     uint64 bytes = cast<uint64>(ROW) * cast<uint64>(PATCH);
     Buffer buffer = device.createBuffer(descriptor: BufferDescriptor.make(size: bytes,
                                                                         usage: BufferUsage::MapRead | BufferUsage::CopyDst));
@@ -2385,6 +2398,17 @@ fn string kindName(GpuErrorKind k) {
 }
 
 // A drain, for a verdict on a device that must have none: "" when it is empty.
+// "" when `errs` holds exactly one report, a validation error saying `says`, and dropped none.
+fn string onlyTheRefusal(const ref DeviceErrors errs, const ref string says) {
+    isize n = errs.reports().length();
+    int64 dropped = errs.dropped();
+    if (n != 1 || dropped != 0) { return "want one report; " + errorsSaid(errs: errs); }
+    bool validation = match (errs.reports()[0].kind()) { case Validation: true; case _: false; };
+    string words = errs.reports()[0].message();
+    if (!validation || !words.contains(substring: says)) { return "want a validation error saying `${says}`: ${words}"; }
+    return "";
+}
+
 fn string errorsSaid(const ref DeviceErrors errs) {
     if (errs.isEmpty()) { return ""; }
     isize n = errs.reports().length();
