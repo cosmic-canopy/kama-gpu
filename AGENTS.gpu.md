@@ -38,13 +38,13 @@ in; *as an engine renderer* they stay out.
 ## Where things stand
 
 **[SPEC.md](SPEC.md) is what the package is, [ROADMAP.md](ROADMAP.md) what comes next, and [COVERAGE.md](COVERAGE.md)
-which of webgpu.h it calls.** In short (2026-11-12, kama 0.9.928): offscreen work and a surface on a window run natively
-on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 59 of webgpu.h's 206 functions, a device's
+which of webgpu.h it calls.** In short (2026-11-13, kama 0.9.938): offscreen work and a surface on a window run natively
+on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 79 of webgpu.h's 206 functions, a device's
 errors reach its own holders (GPU-1), a surface holds its window (GPU-2), an acquire before a configure is refused
 (GPU-13), an adapter gives one device and a surface is configured at its window's size (GPU-3), and Firefox's
-differences from Dawn are handled (GPU-14). GPU-4, the render pipeline set, is decided (item 12) and under way: shader
-modules and their compilation messages are built, and parts 2 to 5 are next. `tools/test.sh` passes before every
-commit.
+differences from Dawn are handled (GPU-14). GPU-4, the render pipeline set, is decided (item 12) and under way: parts 1
+to 3 are built (shader modules; layouts, bind groups, samplers and `writeBuffer`; render pipelines both ways, with
+`printErrors`), and parts 4 and 5 are next. `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
 
@@ -951,6 +951,77 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       device, not handed over, or off by default; a popped scope's error printed too; each of the three paths not
       printing (the channel's natively and in Edge, the orphan's natively and in Edge); the kind's words wrong; the
       words cut; and the tests' own devices printing.
+
+    **Built on 2026-11-13 (kyoten's nineteenth session), part 3's fourth step: `createRenderPipelineAsync`** (decisions 2
+    and 3, item 1), test-first, the design reviewed against the seam before it was written:
+    - **One request on both legs.** `gpuseam_pipeline_start` takes the lowered description and the package's refusal.
+      A refusal fails the slot at once, in the package's words. On the web, emdawnwebgpu's asynchronous call answers it
+      (status 3 Validation, else Internal). Natively it hands back a job.
+      - `PipelineRequest.poll` (a `const fn`, as every poll is) answers `Pending`, `Ready(pipeline)` (as often as asked,
+        each a new reference) or `Failed(PipelineError)`.
+      - `PipelineError` is an `Error` with `reason()`, `message()`, and `vertexMessages()` and `fragmentMessages()`,
+        each a `CompilationInfo` (empty where there is no stage). On the web a failure answers once the stages'
+        messages are in.
+    - **The native compile pool** (`CompilePool`, gated off the web, whose build stays single-threaded: no
+      `SharedArrayBuffer` and no isolate in its JavaScript):
+      - `DeviceOptions.compileWorkers` kama isolates (half the cores, at least 1), started by the device's first
+        asynchronous request.
+      - A job is a deep copy of the description in one allocation, with an `AddRef` on its device, modules and layout,
+        and `_Static_assert`s on the descriptor structs' sizes so a header that grows a field fails the build.
+      - A worker pushes a scope of its own thread that catches any kind (the seam's `GPUSEAM_FILTER_ANY`), makes the
+        pipeline, and moves what the scope caught into the slot, so nothing reaches the channel or `printErrors`.
+      - Every copy of the device holds the pool through a `Shared`, and so does every pending request. Its last
+        holder's drop closes the channel and joins the isolates once they have run what is queued; an abandoned
+        request's job is freed without compiling.
+    - **Decided in the building, within decision 2:**
+      - **Asking never waits, and nothing compiles on the device's thread,** where the design review had proposed an
+        overflow pumped by each poll. That would have made a poll mutating, against item 5's rule that polls are
+        `const fn`. So the overflow is the seam's: a job past the channel's 256 waits in the device's state block, and a
+        worker takes from it before it waits on the channel again.
+      - `Ready` answers again rather than `Taken`, keeping decision 2's three cases.
+    - **Fact 29:** wgpu-native's `wgpuDeviceCreateRenderPipelineAsync` aborts ("not implemented"), so a wgpu-native that
+      implements it fails the facts.
+    - **The cases** (`tests/src/pipelines.kama`, on a device given two isolates; the hooks `compileWorkersAlive`,
+      `pipelinesAlive` and `compilePause`):
+      - no isolate before the first asynchronous request, and two after it, none on the web;
+      - Ready, Ready again, and drawn and read back;
+      - a pipeline WebGPU refuses fails its request alone, as a validation error with words, while a scope open around
+        the request catches nothing and the channel stays empty;
+      - a broken shader's request carries its message at line 2, column 10, and the channel holds only the module's own
+        error;
+      - a refusal in the package's words;
+      - a pending request dropped is freed with its job;
+      - every good description, asked for while the isolates are held and its description dropped at once, comes Ready;
+      - 300 requests, past the channel, each Ready;
+      - a pending request keeps the isolates once the device's last copy is gone, is answered, and its drop joins them.
+    - **Found in the building:**
+      - **natively a tick of the tests takes no time,** so 240 ticks passed within a millisecond and the isolates
+        looked dead: the asynchronous cases wait by the clock (`patient()`, 20 s);
+      - **C will not convert kama's `void **` out-pointer to a typed one,** so the seam takes `void **job`;
+      - **the browsers' words for a failed asynchronous pipeline differ:** wgpu-native names the pipeline's label and
+        the entry point, Dawn the entry point and its module, and Firefox only that the stage did not match (it drops
+        the cause). The case holds the kind and that there are words.
+    - `tests/` is 208 cases natively, 185 in Edge and Chrome for Testing, and 185 in Firefox with WebGPU (by hand,
+      through `ffrun.sh`). COVERAGE.md: 79 of 206.
+    - **Mutations: 22 of 24 caught.**
+      - Caught: the job never submitted; the pool never started; one isolate or `compileWorkers` not handed over; the
+        overflow never run; every job sent into a full channel (the send waits: a hang); the request holding no pool
+        and the sender declared before the isolates (each a join that never returns); the worker's scope catching only
+        its filter; its error not moved; a failure published Ready; an abandoned slot or a run job never freed; Ready's
+        second answer without its `AddRef`; the job's device or modules not referenced; a buffer's attributes, the
+        fragment constants or a blend left the caller's; a refusal handed on to WebGPU, natively and in Edge; the web
+        leg asking nothing.
+      - **Not caught: the vertex entry point left the caller's.** A short kama `string` keeps its bytes inside the
+        description, on the caller's stack, and the next request's description lands on the same slot with the same
+        name, so a dangling pointer reads a valid one. Filling the heap with junk while the isolates were held did not
+        change it. Only a memory checker catches this, and kama gives a program none. The deep copy that holds it is
+        shown by the attributes', constants' and blend's mutations.
+      - **Not caught, equivalent on the measured legs: a web failure answered before its stages' messages.** Dawn answers
+        a module's compilation info before a pipeline of it fails, so the wait never waits. It stays, as decision 3
+        says.
+
+    **Part 3 is done.** Part 4 is next: the render pass and textures by description. It takes over three mutations part
+    3 could not catch (the depth bias slope, the stencil faces, the step mode), and question 10 is open with the owner.
 
 ## Where the truth is
 

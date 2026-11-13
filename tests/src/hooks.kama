@@ -4,7 +4,8 @@
 // its live window records the same way, so a test can see a surface hold its window. Adopting a surface the package
 // also holds needs an `AddRef` the same way.
 
-export { addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, heapInUse };
+export { addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, heapInUse, compileWorkersAlive,
+          pipelinesAlive, compilePause };
 
 extern "gpuseam.h";
 extern "winseam.h";
@@ -16,6 +17,9 @@ extern fn int64 gputests_heap_in_use();
 extern fn void wgpuDeviceAddRef(UnsafePtr device);
 extern fn void wgpuSurfaceAddRef(UnsafePtr surface);
 extern fn int64 gpuseam_states_alive();
+extern fn int64 gpuseam_compile_workers_alive();
+extern fn int64 gpuseam_pipelines_alive();
+extern fn void gpuseam_compile_pause(int32 paused);
 
 unsafe fn void addDeviceRef(UnsafePtr device) { wgpuDeviceAddRef(device: device); }
 unsafe fn void addSurfaceRef(UnsafePtr surface) { wgpuSurfaceAddRef(surface: surface); }
@@ -26,3 +30,9 @@ unsafe fn int32 windowRecords() { return winseam_live_records(); }
 unsafe fn int32 minimise(UnsafePtr hwnd, int32 minimised) { return gputests_minimise(hwnd: hwnd, minimised: minimised); }
 // The bytes the C heap holds in use on the web (-1 natively).
 unsafe fn int64 heapInUse() { return gputests_heap_in_use(); }
+// The compile isolates alive natively, across every device (0 on the web, where the browser compiles).
+unsafe fn int64 compileWorkersAlive() { return gpuseam_compile_workers_alive(); }
+// The asynchronous pipeline requests' slots and jobs alive.
+unsafe fn int64 pipelinesAlive() { return gpuseam_pipelines_alive(); }
+// While paused, every compile isolate waits before it compiles, so a test can drop what is queued.
+unsafe fn void compilePause(bool paused) { gpuseam_compile_pause(paused: paused ? 1 : 0); }

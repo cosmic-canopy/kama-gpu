@@ -93,5 +93,6 @@ aborts abort-emptypop "popping an error scope with none pushed aborts" 'called `
 aborts abort-waitany "waiting through wgpuInstanceWaitAny aborts" "not implemented"
 aborts abort-submit "submitting a command buffer whose finish failed aborts" "Error in wgpuQueueSubmit"
 aborts abort-compilationinfo "asking a shader module for its compilation info aborts" "not implemented"
+aborts abort-pipelineasync "creating a render pipeline asynchronously aborts" "not implemented"
 
 exit "$failed"

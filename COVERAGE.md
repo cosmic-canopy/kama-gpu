@@ -13,7 +13,7 @@ From three headers, each by the sha256 of its text with LF line endings:
 - wgpu-native's wgpu.h `7bd23656d394f620a804b1f174444ea17082b6d330a2fca0c0e6b1121ec4b284`
 - emdawnwebgpu's webgpu.h `40e7ecd9647dc922e69d17d888d7038fbd5eb10277621eb414c8ffc278e353be`
 
-**webgpu.h: 78 of 206 called.** On both legs, 78 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
+**webgpu.h: 79 of 206 called.** On both legs, 79 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
 
 **wgpu.h, wgpu-native's own extensions, apart: 1 of 22 called.**
 
@@ -143,7 +143,7 @@ From three headers, each by the sha256 of its text with LF line endings:
 | `wgpuShaderModuleAddRef` | both | yes |
 | `wgpuShaderModuleRelease` | both | yes |
 
-### Pipelines, 4 of 12
+### Pipelines, 5 of 12
 
 | Function | Legs | Called |
 |---|---|---|
@@ -154,7 +154,7 @@ From three headers, each by the sha256 of its text with LF line endings:
 | `wgpuDeviceCreateComputePipeline` | both | no |
 | `wgpuDeviceCreateComputePipelineAsync` | both | no |
 | `wgpuDeviceCreateRenderPipeline` | both | yes |
-| `wgpuDeviceCreateRenderPipelineAsync` | both | no |
+| `wgpuDeviceCreateRenderPipelineAsync` | both | yes |
 | `wgpuRenderPipelineGetBindGroupLayout` | both | yes |
 | `wgpuRenderPipelineSetLabel` | both | no |
 | `wgpuRenderPipelineAddRef` | both | yes |

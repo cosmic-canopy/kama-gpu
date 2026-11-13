@@ -361,6 +361,45 @@ static void abort_compilation_info(void) {
     did_not_abort("asking a shader module for its compilation info aborts");
 }
 
+static void on_pipeline_async(WGPUCreatePipelineAsyncStatus s, WGPURenderPipeline p, WGPUStringView m, void *u1, void *u2) {
+    (void)s; (void)p; (void)m; (void)u1; (void)u2;
+}
+
+// Not implemented in v29.0.1.1: the package compiles on isolates of its own (GPU-4 part 3). The day this holds no more,
+// the package can hand wgpu-native the request, as it hands the browser it.
+static void abort_render_pipeline_async(void) {
+    WGPUDevice d = device_for(&g_a, 1);
+    WGPUShaderModule m = wgsl_module(d,
+        "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n"
+        "@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }\n", "facts");
+    WGPUColorTargetState target;
+    memset(&target, 0, sizeof target);
+    target.format = WGPUTextureFormat_RGBA8Unorm;
+    target.writeMask = WGPUColorWriteMask_All;
+    WGPUFragmentState fs;
+    memset(&fs, 0, sizeof fs);
+    fs.module = m;
+    fs.entryPoint.data = "fs";
+    fs.entryPoint.length = 2;
+    fs.targetCount = 1;
+    fs.targets = &target;
+    WGPURenderPipelineDescriptor pd;
+    memset(&pd, 0, sizeof pd);
+    pd.vertex.module = m;
+    pd.vertex.entryPoint.data = "vs";
+    pd.vertex.entryPoint.length = 2;
+    pd.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+    pd.multisample.count = 1;
+    pd.multisample.mask = 0xFFFFFFFF;
+    pd.fragment = &fs;
+    WGPUCreateRenderPipelineAsyncCallbackInfo ci;
+    memset(&ci, 0, sizeof ci);
+    ci.mode = WGPUCallbackMode_AllowSpontaneous;
+    ci.callback = on_pipeline_async;
+    wgpuDeviceCreateRenderPipelineAsync(d, &pd, ci);
+    did_not_abort("creating a render pipeline asynchronously aborts");
+}
+
 // ---- the program ---------------------------------------------------------------------------------------------------
 
 typedef struct { const char *name; void (*run)(void); } entry;
@@ -378,6 +417,7 @@ static const entry CASES[] = {
     { "abort-waitany", abort_wait_any },
     { "abort-submit", abort_submit_failed },
     { "abort-compilationinfo", abort_compilation_info },
+    { "abort-pipelineasync", abort_render_pipeline_async },
 };
 
 int main(int argc, char **argv) {

@@ -31,6 +31,8 @@ import {
     TextureFormat, VertexFormat,
     std::collections::DynamicArray, std::collections::ConstView,
     std::memory::Shared,
+    std::concurrent::Isolate, std::concurrent::Channel, std::concurrent::Sender, std::concurrent::Receiver,
+    std::concurrent::Undelivered, std::concurrent::cpuCount, std::time::sleep, std::time::Duration,
     std::encoding::utf8::decode, std::encoding::utf8::Utf8Error, std::num::float32Max,
     gpu::native::createInstance, gpu::native::instanceAddRef, gpu::native::instanceRelease,
     gpu::native::adapterAddRef, gpu::native::adapterRelease, gpu::native::adapterGetLimits,
@@ -51,7 +53,7 @@ import {
     gpu::native::WGPUTextureDimension, gpu::native::WGPULoadOp,
     gpu::native::WGPUStoreOp, gpu::native::WGPUTextureAspect, gpu::native::WGPUPowerPreference,
     gpu::native::WGPULimits, gpu::native::WGPUFeatureName, gpu::native::WGPUBackendType, gpu::native::WGPUAdapterType,
-    gpu::native::SEAM_PENDING, gpu::native::SEAM_FAILED, gpu::native::SEAM_UNAVAILABLE,
+    gpu::native::SEAM_PENDING, gpu::native::SEAM_READY, gpu::native::SEAM_FAILED, gpu::native::SEAM_UNAVAILABLE,
     gpu::native::requestAdapter, gpu::native::adapterRequestPoll, gpu::native::adapterRequestTake,
     gpu::native::adapterRequestMessage, gpu::native::adapterRequestDrop,
     gpu::native::adapterInfoText, gpu::native::adapterInfoNumbers, gpu::native::adapterFeatureNames,
@@ -93,6 +95,11 @@ import {
     gpu::native::deviceCreateRenderPipeline, gpu::native::renderPipelineAddRef, gpu::native::renderPipelineRelease,
     gpu::native::renderPipelineGetBindGroupLayout, gpu::native::renderPassEncoderSetPipeline,
     gpu::native::renderPassEncoderDraw,
+    gpu::native::pipelineStart, gpu::native::pipelinePoll, gpu::native::pipelineHandle, gpu::native::pipelineErrorKind,
+    gpu::native::pipelineErrorLength, gpu::native::pipelineErrorMessage, gpu::native::pipelineDrop,
+    gpu::native::pipelineJobRun, gpu::native::pipelineJobCancel, gpu::native::compileEnqueue, gpu::native::compileReceived,
+    gpu::native::compileOverflowTake, gpu::native::compileWorkerStarted, gpu::native::compileWorkerEnded,
+    gpu::native::compilePaused,
     gpu::native::WGPURenderPipelineDescriptor, gpu::native::WGPUVertexBufferLayout, gpu::native::WGPUVertexAttribute,
     gpu::native::WGPUConstantEntry, gpu::native::WGPUColorTargetState, gpu::native::WGPUBlendState,
     gpu::native::WGPUBlendComponent, gpu::native::WGPUDepthStencilState, gpu::native::WGPUStencilFaceState,
@@ -122,10 +129,11 @@ export {
     ColorWriteMask, VertexFormat, PrimitiveTopology, IndexFormat, FrontFace, CullMode, StencilOperation, BlendOperation,
     BlendFactor, VertexStepMode, PrimitiveState, MultisampleState, StencilFaceState, DepthStencilState, BlendComponent,
     BlendState, ColorTargetState, VertexBufferLayout, VertexState, FragmentState, Layout, RenderPipelineDescriptor,
-    RenderPipeline,
+    RenderPipeline, PipelineRequest, PipelineStatus, PipelineError, PipelineErrorReason,
 };
 
 comptime int32 MESSAGE_BYTES = 512;
+comptime int32 SEAM_KIND_VALIDATION = 0;   // GPUSEAM_KIND_VALIDATION
 // webgpu.h's WGPU_WHOLE_SIZE, a #define the bindings never see: a buffer binding to the end of its buffer.
 comptime uint64 WHOLE_SIZE = 0xFFFFFFFFFFFFFFFF;
 // webgpu.h's WGPU_DEPTH_SLICE_UNDEFINED, a #define the bindings never see; csrc/gpuseam.c asserts it is this.
@@ -686,6 +694,9 @@ type value DeviceOptions {
     // asynchronous pipeline's, which its request carries, are not printed. A program that reads the channel itself
     // turns it off.
     public bool printErrors = true;
+    // The isolates that compile this device's asynchronous pipelines natively (decision 2), started by its first
+    // `createRenderPipelineAsync`: half the cores by default, at least 1. On the web the browser compiles them.
+    public int32 compileWorkers = halfTheCores();
 
     public ctor defaults() { }
 }
@@ -980,12 +991,14 @@ type enum DeviceStatus { Pending, Ready(Device device, Queue queue), Failed(GpuE
 type resource DeviceRequest {
     UnsafePtr slot;
     UnsafePtr adapter;   // the adapter it was asked of, on which it holds a reference, handed to the device it gives
+    int32 workers = 1;   // DeviceOptions.compileWorkers, for the device it gives
 
     friend Adapter::requestDevice[start];
 
     unsafe ctor start(UnsafePtr instance, UnsafePtr adapter, UnsafePtr mark, const ref DeviceOptions options) {
         this.adapter = adapter;
         if (adapter != null) { adapterAddRef(adapter: adapter); }
+        this.workers = options.compileWorkers;
         WGPULimits limits = required(want: options.limits);
         InlineArray<int32>#(64) names = [0; 64];
         int32 count = 0;
@@ -1016,7 +1029,8 @@ type resource DeviceRequest {
         UnsafePtr state = deviceRequestTakeState(request: this.slot);
         UnsafePtr queue = deviceGetQueue(device: device);
         stateKeepQueue(state: state, queue: queue);
-        return DeviceStatus::Ready(device: Device.fromRequest(raw: device, adapter: this.adapter, block: state),
+        return DeviceStatus::Ready(device: Device.fromRequest(raw: device, adapter: this.adapter, block: state,
+                                                              workers: this.workers),
                                    queue: Queue.fromDevice(raw: queue, block: state, device: device));
     }
 
@@ -1032,6 +1046,7 @@ type resource Device implements Copyable<This>(bare: give) {
     UnsafePtr handle;
     UnsafePtr adapter;
     StateHold hold = StateHold.empty();   // its errors and its loss, shared with every handle made from it
+    Shared<CompilePool> pool;             // natively, the isolates its asynchronous pipelines compile on
 
     friend DeviceRequest::poll[fromRequest];
     friend Surface::configure[adapterHandle, stateBlock];
@@ -1044,12 +1059,16 @@ type resource Device implements Copyable<This>(bare: give) {
         this.adapter = adapter.raw();
         if (this.adapter != null) { adapterAddRef(adapter: this.adapter); }
         this.hold = StateHold.fromSeam(block: stateUnwatched());
+        Shared<CompilePool> p = new CompilePool.make(block: this.hold.raw(), size: halfTheCores());
+        this.pool = give p;
     }
-    unsafe ctor fromRequest(UnsafePtr raw, UnsafePtr adapter, UnsafePtr block) {
+    unsafe ctor fromRequest(UnsafePtr raw, UnsafePtr adapter, UnsafePtr block, int32 workers) {
         this.handle = raw;
         this.adapter = adapter;
         if (adapter != null) { adapterAddRef(adapter: adapter); }
         this.hold = StateHold.fromSeam(block: block);
+        Shared<CompilePool> p = new CompilePool.make(block: block, size: workers);
+        this.pool = give p;
     }
     public unsafe ctor copy(ref Device source) {
         this.handle = source.handle;
@@ -1057,6 +1076,7 @@ type resource Device implements Copyable<This>(bare: give) {
         deviceAddRef(device: this.handle);
         if (this.adapter != null) { adapterAddRef(adapter: this.adapter); }
         this.hold = copy source.hold;
+        this.pool = copy source.pool;
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
     unsafe const fn UnsafePtr adapterHandle() { return this.adapter; }
@@ -1210,6 +1230,29 @@ type resource Device implements Copyable<This>(bare: give) {
         UnsafePtr substitute = deviceCreateRenderPipeline(device: this.handle, descriptor: lowered.substitutePointer());
         quietEnd(device: this.handle);
         return RenderPipeline.fromDevice(raw: substitute, block: this.hold.raw());
+    }
+
+    // A render pipeline made asynchronously (WebGPU's `createRenderPipelineAsync`; AGENTS.gpu.md item 12, decision 2),
+    // polled to `Ready` or `Failed`. Its failure lands in the request alone, never in the device's channel, as the
+    // browser's does, and carries each stage's compilation messages (decision 3, item 1). Natively it compiles on the
+    // device's own isolates (`DeviceOptions.compileWorkers`), since wgpu-native's asynchronous call ends the process; a
+    // pending request keeps them, and its device's state, alive. What the package refuses fails the request at once, in
+    // its words (decision 9).
+    public unsafe fn PipelineRequest createRenderPipelineAsync(RenderPipelineDescriptor descriptor) {
+        string refused = this.pipelineRefusal(descriptor: descriptor);
+        LoweredPipeline lowered = LoweredPipeline.fromDescription(descriptor: descriptor);
+        UnsafePtr job = null;
+        UnsafePtr slot = pipelineStart(device: this.handle, state: this.hold.raw(), descriptor: lowered.pointer(),
+                                       refusal: cast<UnsafeConstPtr<uint8>>(refused.cstr()),
+                                       refusalLength: cast<int32>(refused.length()), job: addr(of: job));
+        if (job != null) { this.pool.derefMut().submit(job: CompileJob.make(job: job)); }
+        Optional<CompilationRequest> fragmentStage = match (descriptor.fragmentState) {
+            case Some(value: f): Optional::Some(value: f.shader.compilationInfo());
+            case None: Optional::None;
+        };
+        return PipelineRequest.start(slot: slot, block: this.hold.raw(),
+                                     vertexStage: descriptor.vertexState.shader.compilationInfo(),
+                                     fragmentStage: give fragmentStage, pool: copy this.pool);
     }
 
     // Why the package refuses `descriptor` on this device, or "" (decision 9): a pipeline constant or a depth bias that
@@ -2607,6 +2650,7 @@ type resource VertexState {
 
     friend LoweredPipeline::fromDescription[...];
     friend Device::pipelineRefusal[...];
+    friend Device::createRenderPipelineAsync[...];
 
     public ctor make(ShaderModule module, string entryPoint) {
         this.shader = give module;
@@ -2636,6 +2680,7 @@ type resource FragmentState {
 
     friend LoweredPipeline::fromDescription[...];
     friend Device::pipelineRefusal[...];
+    friend Device::createRenderPipelineAsync[...];
 
     public ctor make(ShaderModule module, string entryPoint) {
         this.shader = give module;
@@ -2674,6 +2719,7 @@ type resource RenderPipelineDescriptor {
 
     friend LoweredPipeline::fromDescription[...];
     friend Device::pipelineRefusal[...];
+    friend Device::createRenderPipelineAsync[...];
 
     public ctor make(Layout layout, VertexState vertex) {
         this.layoutChoice = give layout;
@@ -2795,6 +2841,7 @@ type resource LoweredPipeline {
     WGPURenderPipelineDescriptor described;
 
     friend Device::createRenderPipeline[pointer, substitutePointer];
+    friend Device::createRenderPipelineAsync[pointer];
 
     public unsafe ctor fromDescription(const ref RenderPipelineDescriptor descriptor) {
         this.attributeLists = DynamicArray.empty();
@@ -2937,6 +2984,7 @@ type resource RenderPipeline implements Copyable<This>(bare: give) {
     StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
     friend Device::createRenderPipeline[fromDevice];
+    friend PipelineRequest::poll[fromDevice];
 
     // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
@@ -2959,6 +3007,225 @@ type resource RenderPipeline implements Copyable<This>(bare: give) {
     }
 
     unsafe ~RenderPipeline() { if (this.handle != null) { renderPipelineRelease(renderPipeline: this.handle); } }
+}
+
+// ---- render pipelines made asynchronously (GPU-4 part 3, step 4; AGENTS.gpu.md item 12, decisions 2 and 3) ----------
+
+// The jobs a compile pool's channel holds; any more wait in the device's overflow, which a worker takes from before it
+// waits on the channel again, so asking never waits and nothing is compiled on the device's thread.
+comptime int32 COMPILE_CHANNEL = 256;
+
+// Half the cores, at least one: `DeviceOptions.compileWorkers`' default.
+fn int32 halfTheCores() {
+    int32 n = cpuCount() / 2;
+    return n < 1 ? 1 : n;
+}
+
+// One native compile, sent to a pool's isolate: the seam's job, a deep copy of a pipeline's description holding a
+// reference on each handle it names. Run, it is freed; dropped unrun, its request fails.
+type resource CompileJob implements Sendable {
+    UnsafePtr job;
+
+    public unsafe ctor make(UnsafePtr job) { this.job = job; }
+    public unsafe const fn UnsafePtr raw() { return this.job; }
+    public unsafe fn void run() {
+        UnsafePtr j = this.job;
+        this.job = null;
+        pipelineJobRun(job: j);
+    }
+    // The job, given up: the device's overflow keeps it.
+    public unsafe fn UnsafePtr release() {
+        UnsafePtr j = this.job;
+        this.job = null;
+        return j;
+    }
+
+    unsafe ~CompileJob() { if (this.job != null) { pipelineJobCancel(job: this.job); } }
+}
+
+// Natively, while the tests hold the pool (tests/src/hooks.kama), a worker waits before it compiles.
+unsafe fn void waitWhilePaused() {
+    while (compilePaused() != 0) { sleep(d: Duration.fromMillis(ms: 1)); }
+}
+
+// The jobs waiting in the device's overflow, each run in turn.
+unsafe fn void runOverflow(UnsafePtr state) {
+    UnsafePtr j = compileOverflowTake(state: state);
+    while (j != null) {
+        waitWhilePaused();
+        pipelineJobRun(job: j);
+        j = compileOverflowTake(state: state);
+    }
+}
+
+// A pool's isolate: the device's overflow first, then the next job from the channel, until the channel closes.
+@compileFor(!ARCH_WASM32)
+unsafe fn void compileLoop(Receiver<CompileJob> jobs, UnsafePtr state) {
+    compileWorkerStarted();
+    bool open = true;
+    while (open) {
+        runOverflow(state: state);
+        Optional<CompileJob> next = jobs.recv();
+        match (give next) {
+            case Some(value: j): {
+                compileReceived(state: state);
+                waitWhilePaused();
+                j.run();
+            }
+            case None: { open = false; }
+        };
+    }
+    runOverflow(state: state);
+    compileWorkerEnded();
+}
+
+// A device's compile pool, natively (decision 2): `compileWorkers` isolates, started by its first asynchronous request,
+// fed through a channel and the device's overflow. Every copy of the device holds it, and so does every pending request,
+// so a request is answered after the device's last copy is gone, as WebGPU's promise keeps its device. Its last holder's
+// drop closes the channel and joins the isolates once they have run what is queued.
+@compileFor(!ARCH_WASM32)
+type resource CompilePool {
+    StateHold hold;                                       // the device's state: its overflow, and its jobs' scopes
+    DynamicArray<Isolate> workers;                        // declared before the sender: fields drop in reverse, so
+    Optional<Sender<CompileJob>> jobs = Optional::None;   // the channel closes before the isolates are joined
+    int32 size;
+
+    public unsafe ctor make(UnsafePtr block, int32 size) {
+        this.hold = StateHold.make(block: block);
+        this.workers = DynamicArray.empty();
+        this.size = size < 1 ? 1 : size;
+    }
+
+    // `job` to a worker, the workers started by the first; a full channel leaves it in the device's overflow.
+    public unsafe fn void submit(CompileJob job) {
+        if (this.jobs.isNone()) { this.start(); }
+        if (compileEnqueue(state: this.hold.raw(), job: job.raw(), capacity: COMPILE_CHANNEL) == 0) {
+            UnsafePtr kept = job.release();
+            return;
+        }
+        match (this.jobs) {
+            case Some(value: s): {
+                Result<Unit, Undelivered<CompileJob>> sent = s.send(item: give job);
+            }
+            case None: { CompileJob unsent = give job; }
+        };
+    }
+
+    unsafe fn void start() {
+        Channel<CompileJob> ch = Channel.bounded(capacity: cast<usize>(COMPILE_CHANNEL));
+        UnsafePtr block = this.hold.raw();
+        int32 i = 0;
+        while (i < this.size) {
+            Receiver<CompileJob> r = ch.receiver();
+            Isolate h = spawn compileLoop(jobs: give r, state: block);
+            this.workers.add(item: give h);
+            i = i + 1;
+        }
+        this.jobs = Optional::Some(value: ch.sender());
+    }
+}
+
+// On the web the browser compiles a pipeline asynchronously itself, and no isolate is started, so the web build stays
+// single-threaded.
+@compileFor(ARCH_WASM32)
+type resource CompilePool {
+    int32 size;
+
+    public unsafe ctor make(UnsafePtr block, int32 size) { this.size = size; }
+    public unsafe fn void submit(CompileJob job) { }
+}
+
+// Why an asynchronous pipeline failed (WebGPU's `GPUPipelineErrorReason`).
+type enum PipelineErrorReason { Validation, Internal }
+
+// What a failed asynchronous pipeline's request answers (AGENTS.gpu.md item 12, decision 3, item 1): WebGPU's reason,
+// its words, and each stage module's compilation messages, placed in UTF-8 bytes of its WGSL, so a program sees where
+// its shader went wrong without asking again.
+type resource PipelineError implements Error {
+    PipelineErrorReason why;
+    string words;
+    CompilationInfo vertexInfo;
+    CompilationInfo fragmentInfo;
+
+    friend PipelineRequest::poll[make];
+
+    unsafe ctor make(PipelineErrorReason why, string words, CompilationInfo vertexInfo, CompilationInfo fragmentInfo) {
+        this.why = why;
+        this.words = give words;
+        this.vertexInfo = give vertexInfo;
+        this.fragmentInfo = give fragmentInfo;
+    }
+    public const fn string message() { return copy this.words; }
+    public const fn PipelineErrorReason reason() { return this.why; }
+    // The vertex stage module's messages.
+    public const fn const ref CompilationInfo vertexMessages() { return this.vertexInfo; }
+    // The fragment stage module's messages: none for a pipeline with no fragment stage.
+    public const fn const ref CompilationInfo fragmentMessages() { return this.fragmentInfo; }
+}
+
+type enum PipelineStatus { Pending, Ready(RenderPipeline pipeline), Failed(PipelineError error) }
+
+// A render pipeline asked for asynchronously (`device.createRenderPipelineAsync`), polled until it settles.
+type resource PipelineRequest {
+    UnsafePtr slot;
+    StateHold hold;                                // its device's state, for the pipeline it hands out
+    CompilationRequest vertexStage;
+    Optional<CompilationRequest> fragmentStage;
+    Shared<CompilePool> pool;                      // natively, the isolates compiling it, held while it is pending
+
+    friend Device::createRenderPipelineAsync[start];
+
+    unsafe ctor start(UnsafePtr slot, UnsafePtr block, CompilationRequest vertexStage,
+                      Optional<CompilationRequest> fragmentStage, Shared<CompilePool> pool) {
+        this.slot = slot;
+        this.hold = StateHold.make(block: block);
+        this.vertexStage = give vertexStage;
+        this.fragmentStage = give fragmentStage;
+        this.pool = give pool;
+    }
+
+    // Pending until the pipeline is made; then Ready with it, each poll a new reference, or Failed with WebGPU's reason,
+    // its words and each stage's messages. On the web a failure answers once the stages' messages are in.
+    public unsafe const fn PipelineStatus poll() {
+        int32 s = pipelinePoll(slot: this.slot);
+        if (s == SEAM_PENDING) { return PipelineStatus::Pending; }
+        if (s == SEAM_READY) {
+            return PipelineStatus::Ready(pipeline: RenderPipeline.fromDevice(raw: pipelineHandle(slot: this.slot),
+                                                                         block: this.hold.raw()));
+        }
+        CompilationStatus v = this.vertexStage.poll();
+        bool vertexPending = match (v) { case Pending: true; case _: false; };
+        Optional<CompilationStatus> f = match (this.fragmentStage) {
+            case Some(value: r): Optional::Some(value: r.poll());
+            case None: Optional::None;
+        };
+        bool fragmentPending = match (f) {
+            case Some(value: fs): match (fs) { case Pending: true; case _: false; };
+            case None: false;
+        };
+        if (vertexPending || fragmentPending) { return PipelineStatus::Pending; }
+        PipelineErrorReason why = pipelineErrorKind(slot: this.slot) == SEAM_KIND_VALIDATION
+            ? PipelineErrorReason::Validation : PipelineErrorReason::Internal;
+        string words = this.slot == null ? "out of memory for the request"
+            : textFrom(p: pipelineErrorMessage(slot: this.slot), length: pipelineErrorLength(slot: this.slot));
+        CompilationInfo vertexInfo = infoOf(status: give v);
+        CompilationInfo fragmentInfo = match (give f) {
+            case Some(value: fs): infoOf(status: give fs);
+            case None: CompilationInfo.make(messages: DynamicArray.empty());
+        };
+        return PipelineStatus::Failed(error: PipelineError.make(why: why, words: give words, vertexInfo: give vertexInfo,
+                                                                fragmentInfo: give fragmentInfo));
+    }
+
+    unsafe ~PipelineRequest() { pipelineDrop(slot: this.slot); }
+}
+
+// A stage's messages, once its module answered; none when it could not answer.
+fn CompilationInfo infoOf(CompilationStatus status) {
+    return match (give status) {
+        case Ready(info: i): give i;
+        case _: CompilationInfo.make(messages: DynamicArray.empty());
+    };
 }
 
 // ---- recording -------------------------------------------------------------------------------------------------------

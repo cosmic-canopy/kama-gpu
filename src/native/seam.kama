@@ -17,6 +17,9 @@ export {
     createSurface, acquireSurface, presentSurface, textureViewIn, configureSurface, surfaceFormatTaken,
     createShaderModuleOf, freeBytes, compilationRequest, compilationPoll, compilationCount, compilationPlace,
     compilationTextLength, compilationText, compilationMessage, compilationDrop,
+    pipelineStart, pipelinePoll, pipelineHandle, pipelineErrorKind, pipelineErrorLength, pipelineErrorMessage, pipelineDrop,
+    pipelineJobRun, pipelineJobCancel, compileEnqueue, compileReceived, compileOverflowTake, compileWorkerStarted,
+    compileWorkerEnded, compilePaused,
 };
 
 extern "gpuseam.h";
@@ -231,3 +234,44 @@ unsafe fn int32 compilationMessage(UnsafePtr c, UnsafePtr<uint8> dst, int32 capa
     return gpuseam_compilation_message(c: c, dst: dst, capacity: capacity);
 }
 unsafe fn void compilationDrop(UnsafePtr c) { gpuseam_compilation_drop(c: c); }
+
+// ---- render pipelines made asynchronously (GPU-4 part 3, step 4) ----------------------------------------------------
+
+extern fn UnsafePtr gpuseam_pipeline_start(UnsafePtr device, UnsafePtr state, UnsafePtr d, UnsafeConstPtr<uint8> refusal,
+                                           int32 refusal_length, UnsafePtr<UnsafePtr> job);
+extern fn int32 gpuseam_pipeline_poll(UnsafePtr p);
+extern fn UnsafePtr gpuseam_pipeline_handle(UnsafePtr p);
+extern fn int32 gpuseam_pipeline_error_kind(UnsafePtr p);
+extern fn int32 gpuseam_pipeline_error_length(UnsafePtr p);
+extern fn UnsafeConstPtr<uint8> gpuseam_pipeline_error_message(UnsafePtr p);
+extern fn void gpuseam_pipeline_drop(UnsafePtr p);
+extern fn void gpuseam_pipeline_job_run(UnsafePtr job);
+extern fn void gpuseam_pipeline_job_cancel(UnsafePtr job);
+extern fn int32 gpuseam_compile_enqueue(UnsafePtr s, UnsafePtr job, int32 capacity);
+extern fn void gpuseam_compile_received(UnsafePtr s);
+extern fn UnsafePtr gpuseam_compile_overflow_take(UnsafePtr s);
+extern fn void gpuseam_compile_worker_started();
+extern fn void gpuseam_compile_worker_ended();
+extern fn int32 gpuseam_compile_paused();
+
+unsafe fn UnsafePtr pipelineStart(UnsafePtr device, UnsafePtr state, UnsafePtr descriptor, UnsafeConstPtr<uint8> refusal,
+                                  int32 refusalLength, UnsafePtr<UnsafePtr> job) {
+    return gpuseam_pipeline_start(device: device, state: state, d: descriptor, refusal: refusal,
+                                  refusal_length: refusalLength, job: job);
+}
+unsafe fn int32 pipelinePoll(UnsafePtr slot) { return gpuseam_pipeline_poll(p: slot); }
+unsafe fn UnsafePtr pipelineHandle(UnsafePtr slot) { return gpuseam_pipeline_handle(p: slot); }
+unsafe fn int32 pipelineErrorKind(UnsafePtr slot) { return gpuseam_pipeline_error_kind(p: slot); }
+unsafe fn int32 pipelineErrorLength(UnsafePtr slot) { return gpuseam_pipeline_error_length(p: slot); }
+unsafe fn UnsafeConstPtr<uint8> pipelineErrorMessage(UnsafePtr slot) { return gpuseam_pipeline_error_message(p: slot); }
+unsafe fn void pipelineDrop(UnsafePtr slot) { gpuseam_pipeline_drop(p: slot); }
+unsafe fn void pipelineJobRun(UnsafePtr job) { gpuseam_pipeline_job_run(job: job); }
+unsafe fn void pipelineJobCancel(UnsafePtr job) { gpuseam_pipeline_job_cancel(job: job); }
+unsafe fn int32 compileEnqueue(UnsafePtr state, UnsafePtr job, int32 capacity) {
+    return gpuseam_compile_enqueue(s: state, job: job, capacity: capacity);
+}
+unsafe fn void compileReceived(UnsafePtr state) { gpuseam_compile_received(s: state); }
+unsafe fn UnsafePtr compileOverflowTake(UnsafePtr state) { return gpuseam_compile_overflow_take(s: state); }
+unsafe fn void compileWorkerStarted() { gpuseam_compile_worker_started(); }
+unsafe fn void compileWorkerEnded() { gpuseam_compile_worker_ended(); }
+unsafe fn int32 compilePaused() { return gpuseam_compile_paused(); }

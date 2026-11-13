@@ -7,7 +7,7 @@ is the git log and [CHANGELOG.md](CHANGELOG.md).
 
 **Where it stands** (2026-11-13, kama 0.9.938): offscreen work and a surface on an `@kama/window` window, natively on
 Windows over Vulkan, on wgpu-native v29.0.1.1, and on the web (emdawnwebgpu, Dawn v20260423.175430) in headless Edge
-157, Chrome for Testing 157 and Firefox 160 on a canvas. It calls 78 of webgpu.h's 206 functions. Not published.
+157, Chrome for Testing 157 and Firefox 160 on a canvas. It calls 79 of webgpu.h's 206 functions. Not published.
 
 ## Using it
 
@@ -331,6 +331,26 @@ Dawn's is. Firefox reports places in UTF-16 units as Dawn does, the first error 
   - So a target or a constant cannot be written for a stage that is not there, and a part with no kind cannot be
     written either. webgpu.h's bindings start zero-filled, where a sample mask of 0 draws nothing, silently, on both
     legs. The package hands over every default itself.
+- **`device.createRenderPipelineAsync(descriptor:) -> PipelineRequest`,** polled to a `PipelineStatus`: `Pending`,
+  `Ready(pipeline)` (as often as asked, each a new reference) or `Failed(error)`.
+  - **Its failure lands in the request alone,** never in the device's channel or a scope, as the browser's does, and
+    is never printed. A `PipelineError` (an `Error`) has `reason()` (`PipelineErrorReason`: `Validation` or
+    `Internal`), `message()`, and each stage module's compilation messages, `vertexMessages()` and
+    `fragmentMessages()`, placed in UTF-8 bytes of its WGSL. On the web a failure answers once those are in.
+  - **Natively the package compiles on isolates of its own,** since wgpu-native's asynchronous call ends the process
+    (a fact, below): `DeviceOptions.compileWorkers` of them (half the cores, at least 1), started by the device's first
+    asynchronous request. A job is a deep copy of the description, holding a reference on each handle it names, so the
+    description may be dropped at once. A worker makes the pipeline under a scope of its own thread, which catches any
+    error for the request.
+    - Asking never waits: a pool's channel holds 256 jobs, and the rest wait beside it in the device's overflow, which
+      a worker takes from first.
+    - Every copy of the device holds the pool, and so does every pending request, so a request is answered after its
+      device's last copy is gone, as WebGPU's promise keeps its device. The last holder's drop joins the isolates once
+      they have run what is queued; a request dropped while pending is freed without being compiled.
+    - On the web the browser compiles, and the web build stays single-threaded.
+  - What the package refuses fails the request at once, in its words (decision 9).
+  - An adopted device's errors reach its maker's callback, so natively a failed asynchronous pipeline of it answers
+    `Ready` with an invalid pipeline, as its scopes already catch nothing.
 - **`pipeline.getBindGroupLayout(index:) -> BindGroupLayout`:** group `index`'s layout, read from the shaders of a
   pipeline made with `Layout::Auto`.
 - `RenderPipeline` is a copy-is-`AddRef` resource with `adopt` and `raw`.
@@ -464,9 +484,11 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 `tools/test.sh` is the gate. It runs:
 - `tools/check-bindings.sh`: the bindings, `TextureFormat` and `COVERAGE.md` against what the headers and the safe API
   make, the coverage rules on their fixture, and the constants;
-- `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 28 facts, natively;
+- `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 29 facts, natively, its asynchronous
+  pipeline call's abort among them;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 193 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 208 cases natively with a display, debug and release.
+  Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
 - `printErrors`, held from outside the program: each run's output holds the printing device's two errors, printed
@@ -475,7 +497,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
-- the web leg, headless, on the page's canvases: `tests/` (170 cases) and `examples/clear` (60 frames on `#canvas`)
+- the web leg, headless, on the page's canvases: `tests/` (185 cases) and `examples/clear` (60 frames on `#canvas`)
   under `kama run --target WASM --headless` in Edge and Chrome as installed; `tests/` in the pinned Firefox 160, which
   gives WebGPU no adapter under `kama run` until its runner sets one pref (kyoten's KY-54), so it reports that and skips
   the cases that need one (`--adapter-optional`), holds `maxImmediateSize` to 0 (`--no-immediates`), a WGSL

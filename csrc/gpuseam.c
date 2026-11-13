@@ -14,6 +14,8 @@
 #endif
 
 #define GPUSEAM_ABANDONED 3
+// A scope of the seam's own that catches every kind: a compile worker's, natively.
+#define GPUSEAM_FILTER_ANY (-1)
 #define GPUSEAM_MESSAGE_BYTES 512
 
 // A message's bytes into a slot's buffer, cut at its size. WGPU_STRLEN means NUL-terminated.
@@ -68,6 +70,9 @@ struct gpuseam_state {
     gpuseam_scope *top;                 // its error scopes, the innermost first, of every thread (each holds the block)
     WGPUQueue queue;                    // natively, a reference on the device's queue, which a map flushes first
     int32_t print;                      // DeviceOptions.printErrors: each report the channel takes is printed to stderr
+    int32_t compile_in_channel;         // natively, the jobs sent into its compile pool's channel and not yet taken
+    struct gpuseam_pipeline_job *compile_overflow;        // and those waiting beside it, the oldest first
+    struct gpuseam_pipeline_job *compile_overflow_tail;
 };
 
 struct gpuseam_scope {
@@ -266,7 +271,7 @@ static void on_uncaptured_error(WGPUDevice const *device, WGPUErrorType type, WG
     state_lock(s);
 #ifndef __EMSCRIPTEN__
     for (gpuseam_scope *sc = s->top; sc != NULL; sc = sc->below) {
-        if (sc->thread != THIS_THREAD || sc->filter != r.kind) continue;
+        if (sc->thread != THIS_THREAD || (sc->filter != GPUSEAM_FILTER_ANY && sc->filter != r.kind)) continue;
         if (!sc->caught) {
             sc->error = r;
             sc->caught = 1;
@@ -1273,3 +1278,363 @@ WGPUTextureView gpuseam_texture_view_in(WGPUTexture texture, int32_t format) {
     d.format = (WGPUTextureFormat)format;
     return wgpuTextureCreateView(texture, &d);
 }
+
+// ---- render pipelines made asynchronously (GPU-4 part 3, step 4; AGENTS.gpu.md item 12, decisions 2 and 3) ----------
+//
+// One request slot on both legs. On the web, emdawnwebgpu's createRenderPipelineAsync answers it through on_pipeline.
+// Natively, wgpu-native's asynchronous call ends the process (tests/facts), so the package compiles on isolates of its
+// own: the request hands back a job, a deep copy of the description, which the kama side sends to its compile pool, and
+// a worker makes the pipeline under a scope of its own thread that catches any error, then publishes the slot. Either
+// way the failure lands in the slot alone, never in the device's channel, as the browser's does.
+
+struct gpuseam_pipeline {
+    atomic_int state;               // PENDING, READY, FAILED or ABANDONED
+    WGPURenderPipeline pipeline;    // READY: the slot's reference
+    gpuseam_report error;           // FAILED: its kind and words, whole
+};
+
+static atomic_llong g_pipelines_alive;   // slots and jobs, for the tests (tests/src/hooks.kama)
+
+static gpuseam_pipeline *pipeline_new(void) {
+    gpuseam_pipeline *p = (gpuseam_pipeline *)calloc(1, sizeof *p);
+    if (p == NULL) return NULL;
+    atomic_init(&p->state, GPUSEAM_PENDING);
+    atomic_fetch_add_explicit(&g_pipelines_alive, 1, memory_order_relaxed);
+    return p;
+}
+
+static void pipeline_free(gpuseam_pipeline *p) {
+    if (p->pipeline != NULL) wgpuRenderPipelineRelease(p->pipeline);
+    free(p->error.message);
+    free(p);
+    atomic_fetch_sub_explicit(&g_pipelines_alive, 1, memory_order_relaxed);
+}
+
+// READY or FAILED, published once what it carries is written; a slot its request abandoned is freed instead.
+static void pipeline_publish(gpuseam_pipeline *p, int outcome) {
+    int expected = GPUSEAM_PENDING;
+    if (!atomic_compare_exchange_strong_explicit(&p->state, &expected, outcome, memory_order_acq_rel, memory_order_acquire)) {
+        pipeline_free(p);
+    }
+}
+
+static void pipeline_fail(gpuseam_pipeline *p, int32_t kind, const char *words, size_t length) {
+    p->error.kind = kind;
+    p->error.message = length > 0 ? (char *)malloc(length) : NULL;
+    if (p->error.message != NULL) {
+        memcpy(p->error.message, words, length);
+        p->error.length = (int32_t)length;
+    }
+}
+
+#ifdef __EMSCRIPTEN__
+static void on_pipeline(WGPUCreatePipelineAsyncStatus status, WGPURenderPipeline pipeline, WGPUStringView message,
+                        void *u1, void *u2) {
+    (void)u2;
+    gpuseam_pipeline *p = (gpuseam_pipeline *)u1;
+    if (status == WGPUCreatePipelineAsyncStatus_Success && pipeline != NULL) {
+        p->pipeline = pipeline;
+        pipeline_publish(p, GPUSEAM_READY);
+        return;
+    }
+    if (pipeline != NULL) wgpuRenderPipelineRelease(pipeline);
+    p->error = report_of(status == WGPUCreatePipelineAsyncStatus_ValidationError ? GPUSEAM_KIND_VALIDATION
+                                                                                : GPUSEAM_KIND_INTERNAL, message);
+    pipeline_publish(p, GPUSEAM_FAILED);
+}
+#else
+// A job: the description, deep-copied into one allocation with every array and string it points to, and a reference on
+// each handle it names, so the worker's copy outlives the caller's.
+struct gpuseam_pipeline_job {
+    gpuseam_pipeline *slot;
+    gpuseam_state *state;               // a hold: the worker's scope is pushed on it
+    WGPUDevice device;                  // a reference
+    WGPUShaderModule modules[2];        // references, or NULL
+    WGPUPipelineLayout layout;          // a reference, or NULL for "auto"
+    WGPURenderPipelineDescriptor d;     // pointing into `bytes`
+    gpuseam_pipeline_job *next;         // in the device's overflow, once its channel was full
+    _Alignas(16) unsigned char bytes[];
+};
+
+// A deep copy past what webgpu.h holds today would copy a new pointer shallowly, and the worker would read freed memory:
+// a header that grows a field of the description fails the build here (wgpu-native v29.0.1.1, 64-bit).
+_Static_assert(sizeof(WGPURenderPipelineDescriptor) == 168, "WGPURenderPipelineDescriptor changed: update copy_description");
+_Static_assert(sizeof(WGPUFragmentState) == 64, "WGPUFragmentState changed: update copy_description");
+_Static_assert(sizeof(WGPUColorTargetState) == 32, "WGPUColorTargetState changed: update copy_description");
+_Static_assert(sizeof(WGPUVertexBufferLayout) == 40, "WGPUVertexBufferLayout changed: update copy_description");
+_Static_assert(sizeof(WGPUVertexState) == 64, "WGPUVertexState changed: update copy_description");
+_Static_assert(sizeof(WGPUDepthStencilState) == 72, "WGPUDepthStencilState changed: update copy_description");
+_Static_assert(sizeof(WGPUVertexAttribute) == 32, "WGPUVertexAttribute changed: update copy_description");
+_Static_assert(sizeof(WGPUConstantEntry) == 32, "WGPUConstantEntry changed: update copy_description");
+
+// A bump allocator over one block; with no block it only measures.
+typedef struct { unsigned char *at; size_t used; } bump;
+
+static void *bump_take(bump *b, size_t n) {
+    size_t start = (b->used + 15) & ~(size_t)15;
+    b->used = start + n;
+    return b->at == NULL ? NULL : b->at + start;
+}
+
+static WGPUStringView copy_view(bump *b, WGPUStringView v) {
+    if (v.data == NULL) return v;   // a null view keeps its meaning
+    size_t n = v.length == WGPU_STRLEN ? strlen(v.data) : v.length;
+    char *dst = (char *)bump_take(b, n + 1);
+    if (dst != NULL) {
+        memcpy(dst, v.data, n);
+        dst[n] = 0;
+    }
+    WGPUStringView out = { dst, n };
+    return out;
+}
+
+static const WGPUConstantEntry *copy_constants(bump *b, const WGPUConstantEntry *src, size_t n) {
+    if (n == 0) return NULL;
+    WGPUConstantEntry *dst = (WGPUConstantEntry *)bump_take(b, n * sizeof *dst);
+    for (size_t i = 0; i < n; i++) {
+        WGPUConstantEntry e = src[i];
+        e.key = copy_view(b, src[i].key);
+        if (dst != NULL) dst[i] = e;
+    }
+    return dst;
+}
+
+// `src` into `dst`, its arrays and strings taken from `b`: the same description, owning nothing it points to.
+static void copy_description(bump *b, const WGPURenderPipelineDescriptor *src, WGPURenderPipelineDescriptor *dst) {
+    *dst = *src;
+    dst->nextInChain = NULL;
+    dst->label = copy_view(b, src->label);
+    dst->vertex.entryPoint = copy_view(b, src->vertex.entryPoint);
+    dst->vertex.constants = copy_constants(b, src->vertex.constants, src->vertex.constantCount);
+    WGPUVertexBufferLayout *buffers = NULL;
+    if (src->vertex.bufferCount > 0) {
+        buffers = (WGPUVertexBufferLayout *)bump_take(b, src->vertex.bufferCount * sizeof *buffers);
+    }
+    for (size_t i = 0; i < src->vertex.bufferCount; i++) {
+        WGPUVertexBufferLayout l = src->vertex.buffers[i];
+        WGPUVertexAttribute *attributes = NULL;
+        if (l.attributeCount > 0) {
+            attributes = (WGPUVertexAttribute *)bump_take(b, l.attributeCount * sizeof *attributes);
+            if (attributes != NULL) memcpy(attributes, l.attributes, l.attributeCount * sizeof *attributes);
+        }
+        l.attributes = attributes;
+        if (buffers != NULL) buffers[i] = l;
+    }
+    dst->vertex.buffers = buffers;
+    if (src->depthStencil != NULL) {
+        WGPUDepthStencilState *ds = (WGPUDepthStencilState *)bump_take(b, sizeof *ds);
+        if (ds != NULL) *ds = *src->depthStencil;
+        dst->depthStencil = ds;
+    }
+    if (src->fragment != NULL) {
+        WGPUFragmentState f = *src->fragment;
+        WGPUFragmentState *fs = (WGPUFragmentState *)bump_take(b, sizeof *fs);
+        f.entryPoint = copy_view(b, src->fragment->entryPoint);
+        f.constants = copy_constants(b, src->fragment->constants, src->fragment->constantCount);
+        WGPUColorTargetState *targets = NULL;
+        if (f.targetCount > 0) targets = (WGPUColorTargetState *)bump_take(b, f.targetCount * sizeof *targets);
+        for (size_t i = 0; i < f.targetCount; i++) {
+            WGPUColorTargetState t = src->fragment->targets[i];
+            if (t.blend != NULL) {
+                WGPUBlendState *blend = (WGPUBlendState *)bump_take(b, sizeof *blend);
+                if (blend != NULL) *blend = *t.blend;
+                t.blend = blend;
+            }
+            if (targets != NULL) targets[i] = t;
+        }
+        f.targets = targets;
+        if (fs != NULL) *fs = f;
+        dst->fragment = fs;
+    }
+}
+
+static void job_free(gpuseam_pipeline_job *j) {
+    for (int i = 0; i < 2; i++) {
+        if (j->modules[i] != NULL) wgpuShaderModuleRelease(j->modules[i]);
+    }
+    if (j->layout != NULL) wgpuPipelineLayoutRelease(j->layout);
+    wgpuDeviceRelease(j->device);
+    gpuseam_state_release(j->state);
+    free(j);
+    atomic_fetch_sub_explicit(&g_pipelines_alive, 1, memory_order_relaxed);
+}
+#endif
+
+gpuseam_pipeline *gpuseam_pipeline_start(WGPUDevice device, gpuseam_state *state, const WGPURenderPipelineDescriptor *d,
+                                         const uint8_t *refusal, int32_t refusal_length, void **job) {
+    *job = NULL;
+    gpuseam_pipeline *p = pipeline_new();
+    if (p == NULL) return NULL;
+    if (refusal_length > 0) {   // refused before WebGPU is asked: failed at once, in the package's words
+        pipeline_fail(p, GPUSEAM_KIND_VALIDATION, (const char *)refusal, (size_t)refusal_length);
+        atomic_store_explicit(&p->state, GPUSEAM_FAILED, memory_order_release);
+        return p;
+    }
+#ifdef __EMSCRIPTEN__
+    (void)state;
+    WGPUCreateRenderPipelineAsyncCallbackInfo ci;
+    memset(&ci, 0, sizeof ci);
+    ci.mode = WGPUCallbackMode_AllowSpontaneous;
+    ci.callback = on_pipeline;
+    ci.userdata1 = p;
+    wgpuDeviceCreateRenderPipelineAsync(device, d, ci);
+#else
+    bump measure = { NULL, 0 };
+    WGPURenderPipelineDescriptor scratch;
+    copy_description(&measure, d, &scratch);
+    gpuseam_pipeline_job *j = (gpuseam_pipeline_job *)calloc(1, sizeof *j + measure.used);
+    if (j == NULL) {
+        static const char words[] = "out of memory for the pipeline's description";
+        pipeline_fail(p, GPUSEAM_KIND_OUT_OF_MEMORY, words, sizeof words - 1);
+        atomic_store_explicit(&p->state, GPUSEAM_FAILED, memory_order_release);
+        return p;
+    }
+    bump fill = { j->bytes, 0 };
+    copy_description(&fill, d, &j->d);
+    j->slot = p;
+    gpuseam_state_hold(state);
+    j->state = state;
+    wgpuDeviceAddRef(device);
+    j->device = device;
+    j->modules[0] = d->vertex.module;
+    j->modules[1] = d->fragment != NULL ? d->fragment->module : NULL;
+    for (int i = 0; i < 2; i++) {
+        if (j->modules[i] != NULL) wgpuShaderModuleAddRef(j->modules[i]);
+    }
+    j->layout = d->layout;
+    if (j->layout != NULL) wgpuPipelineLayoutAddRef(j->layout);
+    atomic_fetch_add_explicit(&g_pipelines_alive, 1, memory_order_relaxed);
+    *job = j;
+#endif
+    return p;
+}
+
+int32_t gpuseam_pipeline_poll(gpuseam_pipeline *p) {
+    return p == NULL ? GPUSEAM_FAILED : (int32_t)atomic_load_explicit(&p->state, memory_order_acquire);
+}
+
+WGPURenderPipeline gpuseam_pipeline_handle(gpuseam_pipeline *p) {
+    if (gpuseam_pipeline_poll(p) != GPUSEAM_READY || p->pipeline == NULL) return NULL;
+    wgpuRenderPipelineAddRef(p->pipeline);
+    return p->pipeline;
+}
+
+int32_t gpuseam_pipeline_error_kind(gpuseam_pipeline *p) {
+    return gpuseam_pipeline_poll(p) == GPUSEAM_FAILED && p != NULL ? p->error.kind : GPUSEAM_KIND_UNKNOWN;
+}
+int32_t gpuseam_pipeline_error_length(gpuseam_pipeline *p) {
+    return gpuseam_pipeline_poll(p) == GPUSEAM_FAILED && p != NULL ? p->error.length : 0;
+}
+const uint8_t *gpuseam_pipeline_error_message(gpuseam_pipeline *p) {
+    return gpuseam_pipeline_poll(p) == GPUSEAM_FAILED && p != NULL ? (const uint8_t *)p->error.message : NULL;
+}
+
+void gpuseam_pipeline_drop(gpuseam_pipeline *p) {
+    if (p == NULL) return;
+    int expected = GPUSEAM_PENDING;
+    if (atomic_compare_exchange_strong_explicit(&p->state, &expected, GPUSEAM_ABANDONED, memory_order_acq_rel,
+                                                memory_order_acquire)) {
+        return;   // a worker or the browser still owes its answer, and frees it then
+    }
+    pipeline_free(p);
+}
+
+int64_t gpuseam_pipelines_alive(void) { return (int64_t)atomic_load_explicit(&g_pipelines_alive, memory_order_relaxed); }
+
+// ---- the native compile pool's seam: the jobs it runs, the overflow beside its channel, and the tests' hooks -------
+
+static atomic_llong g_compile_workers;
+static atomic_int g_compile_paused;
+
+int64_t gpuseam_compile_workers_alive(void) { return (int64_t)atomic_load_explicit(&g_compile_workers, memory_order_relaxed); }
+void gpuseam_compile_worker_started(void) { atomic_fetch_add_explicit(&g_compile_workers, 1, memory_order_relaxed); }
+void gpuseam_compile_worker_ended(void) { atomic_fetch_sub_explicit(&g_compile_workers, 1, memory_order_relaxed); }
+void gpuseam_compile_pause(int32_t paused) { atomic_store_explicit(&g_compile_paused, paused != 0, memory_order_release); }
+int32_t gpuseam_compile_paused(void) { return atomic_load_explicit(&g_compile_paused, memory_order_acquire); }
+
+#ifndef __EMSCRIPTEN__
+// On a worker: the pipeline made under a scope of this thread that catches any error, and the slot published. A slot
+// its request abandoned is freed without compiling.
+void gpuseam_pipeline_job_run(gpuseam_pipeline_job *j) {
+    if (j == NULL) return;
+    gpuseam_pipeline *p = j->slot;
+    if (atomic_load_explicit(&p->state, memory_order_acquire) == GPUSEAM_ABANDONED) {
+        pipeline_free(p);
+    } else {
+        gpuseam_scope *sc = gpuseam_scope_push(j->state, j->device, GPUSEAM_FILTER_ANY);
+        WGPURenderPipeline made = wgpuDeviceCreateRenderPipeline(j->device, &j->d);
+        int caught = 0;
+        if (sc != NULL) {
+            gpuseam_scope_pop(sc);
+            if (sc->caught) {
+                p->error = sc->error;
+                sc->error.message = NULL;
+                sc->error.length = 0;
+                caught = 1;
+            }
+            gpuseam_scope_drop_popped(sc);
+        }
+        if (caught) {
+            if (made != NULL) wgpuRenderPipelineRelease(made);
+            pipeline_publish(p, GPUSEAM_FAILED);
+        } else {
+            p->pipeline = made;
+            pipeline_publish(p, GPUSEAM_READY);
+        }
+    }
+    job_free(j);
+}
+
+// A job never run, its pool gone: failed, in the package's words.
+void gpuseam_pipeline_job_cancel(gpuseam_pipeline_job *j) {
+    if (j == NULL) return;
+    static const char words[] = "the pipeline's compile pool closed before it was compiled";
+    pipeline_fail(j->slot, GPUSEAM_KIND_INTERNAL, words, sizeof words - 1);
+    pipeline_publish(j->slot, GPUSEAM_FAILED);
+    job_free(j);
+}
+
+// Whether `job` goes into the pool's channel (1, counted), or waits in the device's overflow, the channel being full (0).
+// The device's thread is the only sender, so a count below the channel's capacity means its send never waits.
+int32_t gpuseam_compile_enqueue(gpuseam_state *s, gpuseam_pipeline_job *job, int32_t capacity) {
+    state_lock(s);
+    int32_t into_channel = s->compile_in_channel < capacity && s->compile_overflow == NULL;
+    if (into_channel) {
+        s->compile_in_channel += 1;
+    } else {
+        job->next = NULL;
+        if (s->compile_overflow == NULL) s->compile_overflow = job; else s->compile_overflow_tail->next = job;
+        s->compile_overflow_tail = job;
+    }
+    state_unlock(s);
+    return into_channel;
+}
+
+// A worker took a job out of the channel.
+void gpuseam_compile_received(gpuseam_state *s) {
+    state_lock(s);
+    s->compile_in_channel -= 1;
+    state_unlock(s);
+}
+
+// The oldest job waiting in the overflow, or NULL. A worker takes these before it waits on the channel again.
+gpuseam_pipeline_job *gpuseam_compile_overflow_take(gpuseam_state *s) {
+    state_lock(s);
+    gpuseam_pipeline_job *j = s->compile_overflow;
+    if (j != NULL) {
+        s->compile_overflow = j->next;
+        if (s->compile_overflow == NULL) s->compile_overflow_tail = NULL;
+    }
+    state_unlock(s);
+    return j;
+}
+#else
+void gpuseam_pipeline_job_run(gpuseam_pipeline_job *j) { (void)j; }
+void gpuseam_pipeline_job_cancel(gpuseam_pipeline_job *j) { (void)j; }
+int32_t gpuseam_compile_enqueue(gpuseam_state *s, gpuseam_pipeline_job *job, int32_t capacity) {
+    (void)s; (void)job; (void)capacity;
+    return 1;
+}
+void gpuseam_compile_received(gpuseam_state *s) { (void)s; }
+gpuseam_pipeline_job *gpuseam_compile_overflow_take(gpuseam_state *s) { (void)s; return NULL; }
+#endif

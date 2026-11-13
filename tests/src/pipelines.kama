@@ -7,7 +7,7 @@
 import {
     core::println,
     std::memory::replace,
-    std::collections::DynamicArray,
+    std::collections::DynamicArray, std::time::Instant, std::time::monotonicNow,
     gpu::Instance, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::PowerPreference,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::DeviceOptions, gpu::GpuError,
     gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::Color,
@@ -23,7 +23,9 @@ import {
     gpu::ColorTargetState, gpu::VertexBufferLayout, gpu::VertexState, gpu::FragmentState, gpu::Layout,
     gpu::RenderPipelineDescriptor, gpu::RenderPipeline,
     gpu::ErrorScope, gpu::ErrorFilter, gpu::ScopePop, gpu::PopStatus, gpu::SamplerDescriptor, gpu::Sampler,
-    Verdicts, readOptions,
+    gpu::PipelineRequest, gpu::PipelineStatus, gpu::PipelineError, gpu::PipelineErrorReason, gpu::CompilationInfo,
+    gpu::CompilationMessage, gpu::CompilationMessageKind,
+    Verdicts, readOptions, compileWorkersAlive, pipelinesAlive, compilePause,
 };
 export { PipelineRun };
 
@@ -81,11 +83,20 @@ type resource PipelineRun {
     Optional<Queue> printingQueue = Optional::None;
     Optional<ScopePop> printingPop = Optional::None;
     DynamicArray<string> printedWords;   // what the printing device's channel has held, across ticks
+    // the asynchronous cases
+    Optional<PipelineRequest> asyncRequest = Optional::None;
+    Optional<RenderPipeline> asyncPipeline = Optional::None;
+    Optional<ScopePop> around = Optional::None;        // a scope open around an asynchronous request
+    DynamicArray<PipelineRequest> many;                 // more requests than a pool's channel holds
+    int64 aliveBefore = 0;
+    Instant since = monotonicNow();   // when the stage began: natively a tick is no time at all, so the GPU's work is
+                                      // waited for by the clock
 
     public ctor make(bool adapterOptional) {
         this.optional = adapterOptional;
         this.found = Verdicts.make();
         this.printedWords = DynamicArray.empty();
+        this.many = DynamicArray.empty();
     }
 
     public fn ref Verdicts verdicts() { return this.found; }
@@ -171,7 +182,25 @@ type resource PipelineRun {
         else if (this.stage == 410) { this.fromCopiedModule(); }
         else if (this.stage == 411) { this.awaitNone(name: "a pipeline made from a module's copy, once the module it was copied from is gone, is made with no error", next: 420); }
         else if (this.stage == 420) { this.compressedTexture(); }
-        else if (this.stage == 421) { this.awaitOne(name: "a BC texture on a device without TextureCompressionBC is a validation error in the package's words, not the end of the program", label: "BC1RGBAUnorm", says: "TextureCompressionBC", next: 430); }
+        else if (this.stage == 421) { this.awaitOne(name: "a BC texture on a device without TextureCompressionBC is a validation error in the package's words, not the end of the program", label: "BC1RGBAUnorm", says: "TextureCompressionBC", next: 500); }
+        else if (this.stage == 500) { this.asyncFirst(); }
+        else if (this.stage == 501) { this.awaitAsyncReady(); }
+        else if (this.stage == 502) { this.drawnAsync(); }
+        else if (this.stage == 503) { this.awaitDrawn(name: "an asynchronous pipeline draws as a synchronous one does", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 510); }
+        else if (this.stage == 510) { this.asyncMisused(kind: 0, next: 511); }
+        else if (this.stage == 511) { this.awaitAsyncFailed(name: "an asynchronous pipeline WebGPU refuses fails its request alone, as a validation error: a scope open around it catches nothing, and the channel holds nothing", label: "", says: "", next: 520); }
+        else if (this.stage == 520) { this.asyncMisused(kind: 1, next: 521); }
+        else if (this.stage == 521) { this.awaitAsyncBroken(); }
+        else if (this.stage == 530) { this.asyncMisused(kind: 2, next: 531); }
+        else if (this.stage == 531) { this.awaitAsyncFailed(name: "an asynchronous pipeline the package refuses fails its request in the package's words, and the channel holds nothing", label: "nan slope", says: "not a finite number", next: 540); }
+        else if (this.stage == 540) { this.droppedPending(); }
+        else if (this.stage == 541) { this.awaitAliveBack(); }
+        else if (this.stage == 545) { this.everyGoodAsync(); }
+        else if (this.stage == 546) { this.awaitMany(name: "every pipeline WebGPU takes, asked for asynchronously and its description dropped before it is compiled, comes Ready: vertex buffers, constants, depth, stencil, blends and an empty target, deep-copied", count: GOOD_KINDS, next: 550); }
+        else if (this.stage == 550) { this.manyRequests(); }
+        else if (this.stage == 551) { this.awaitMany(name: "more asynchronous requests than a compile pool's channel holds are each answered Ready", count: MANY_REQUESTS, next: 560); }
+        else if (this.stage == 560) { this.pendingPastTheDevice(); }
+        else if (this.stage == 561) { this.awaitPastTheDevice(); }
         else if (this.stage == 430) { this.askPrinting(); }
         else if (this.stage == 431) { this.awaitPrintingAdapter(); }
         else if (this.stage == 432) { this.awaitPrinting(); }
@@ -180,7 +209,10 @@ type resource PipelineRun {
         return this.stage >= 999;
     }
 
-    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
+    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; this.since = monotonicNow(); }
+
+    // Whether a stage may still wait for the GPU: ASYNC_WAIT_MS since it began, and SETTLE ticks on the web.
+    unsafe fn bool patient() { return this.waited < SETTLE || this.since.elapsed().asMillis() < ASYNC_WAIT_MS; }
 
     // The parts' defaults and ColorWriteMask's numbers, which need no GPU.
     unsafe fn void plainCases() {
@@ -227,7 +259,9 @@ type resource PipelineRun {
         match (give s) {
             case Pending: { }
             case Ready(adapter: a): {
-                this.deviceRequest = Optional::Some(value: a.requestDevice(options: readOptions()));
+                DeviceOptions two = readOptions();
+                two.compileWorkers = ASYNC_WORKERS;
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: two));
                 this.next(to: 2);
             }
             case Failed(error: e): {
@@ -493,6 +527,325 @@ type resource PipelineRun {
         this.next(to: 411);
     }
 
+    // No compile isolate runs before a device's first asynchronous request; then a drawn pipeline asked for.
+    unsafe fn void asyncFirst() {
+        int64 before = compileWorkersAlive();
+        this.found.add(name: "no compile isolate runs before a device's first asynchronous request", why: before == 0 ? "" : "${before} run");
+        Optional<PipelineRequest> asked = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): { asked = Optional::Some(value: d.createRenderPipelineAsync(descriptor: drawnDescriptor(shaders: m, kind: 0))); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.asyncRequest = give asked;
+        this.next(to: 501);
+    }
+
+    // Ready, with the device's isolates started by it, and Ready again when asked again.
+    unsafe fn void awaitAsyncReady() {
+        PipelineStatus s = match (this.asyncRequest) {
+            case Some(value: r): r.poll();
+            case None: PipelineStatus::Pending;
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.patient()) { return; }
+        string why = "";
+        match (give s) {
+            case Pending: { why = "not answered within ${this.waited} ticks"; }
+            case Ready(pipeline: p): { this.asyncPipeline = Optional::Some(value: give p); }
+            case Failed(error: e): { why = e.message(); }
+        };
+        this.found.add(name: "an asynchronous pipeline WebGPU takes comes Ready", why: give why);
+        int64 workers = compileWorkersAlive();
+        int64 want = expectedWorkers(started: ASYNC_WORKERS);
+        this.found.add(name: "the first asynchronous request starts the device's compile isolates natively, compileWorkers of them, and none on the web",
+                       why: workers == want ? "" : "${workers} run, not ${want}");
+        PipelineStatus again = match (this.asyncRequest) {
+            case Some(value: r): r.poll();
+            case None: PipelineStatus::Pending;
+        };
+        bool ready = match (again) { case Ready(pipeline: q): true; case _: false; };
+        this.found.add(name: "a request answers Ready again once its pipeline is made", why: ready ? "" : "the second poll was not Ready");
+        this.asyncRequest = Optional::None;
+        this.next(to: 502);
+    }
+
+    // The asynchronous pipeline drawn, as the synchronous ones are.
+    unsafe fn void drawnAsync() {
+        Optional<RenderPipeline> held = replace(place: this.asyncPipeline, with: Optional::None);
+        Optional<Buffer> copied = Optional::None;
+        Optional<BufferRead> started = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                match (give held) {
+                    case Some(value: p): {
+                        Texture target = d.createTexture(width: SIDE, height: SIDE, format: TextureFormat::RGBA8Unorm,
+                                                         usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc);
+                        TextureView view = target.createView();
+                        uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
+                        Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
+                        CommandEncoder encoder = d.createCommandEncoder();
+                        RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0));
+                        pass.setPipeline(pipeline: p);
+                        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+                        give pass.end();
+                        encoder.copyTextureToBuffer(texture: target, buffer: b, width: SIDE, height: SIDE, bytesPerRow: ROW);
+                        CommandBuffer commands = give encoder.finish();
+                        match (this.queue) {
+                            case Some(value: q): { q.submit(commands: give commands); }
+                            case None: { CommandBuffer unsent = give commands; }
+                        };
+                        started = Optional::Some(value: b.mapRead(offset: 0, size: bytes));
+                        copied = Optional::Some(value: give b);
+                    }
+                    case None: { }
+                };
+            }
+            case None: { Optional<RenderPipeline> unused = give held; }
+        };
+        this.readback = give copied;
+        this.reading = give started;
+        this.next(to: 503);
+    }
+
+    // An asynchronous request of `asyncDescriptor`'s `kind`, the first with a scope open around it. The first's words
+    // differ by leg: wgpu-native names the pipeline's label and the entry point, Dawn the entry point and its module, and
+    // Firefox only that the stage did not match (it drops the cause), so its case holds the kind alone.
+    unsafe fn void asyncMisused(int32 kind, int32 next) {
+        Optional<PipelineRequest> asked = Optional::None;
+        Optional<ScopePop> popped = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): {
+                        if (kind == 0) {
+                            ErrorScope catching = d.pushErrorScope(filter: ErrorFilter::Validation);
+                            asked = Optional::Some(value: d.createRenderPipelineAsync(descriptor: plainDescriptor(shaders: m, entry: "nosuch", label: "async missing entry")));
+                            Result<ScopePop, GpuError> ended = give catching.pop();
+                            match (give ended) { case Ok(value: p): { popped = Optional::Some(value: give p); } case Err(error: e): { } };
+                        } else if (kind == 1) {
+                            ShaderModuleDescriptor bd = ShaderModuleDescriptor.make(wgsl: brokenWgsl());
+                            bd.label(text: "broken stages");
+                            ShaderModule broken = d.createShaderModule(descriptor: give bd);
+                            asked = Optional::Some(value: d.createRenderPipelineAsync(descriptor: brokenDescriptor(broken: broken, shaders: m)));
+                        } else {
+                            asked = Optional::Some(value: d.createRenderPipelineAsync(descriptor: misusedDescriptor(d: d, shaders: m, kind: 20)));
+                        }
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.asyncRequest = give asked;
+        this.around = give popped;
+        this.flush();
+        this.next(to: next);
+    }
+
+    // The request Failed with a validation error naming `label` (and saying `says`); any scope around it caught nothing;
+    // the channel holds nothing.
+    unsafe fn void awaitAsyncFailed(const ref string name, const ref string label, const ref string says, int32 next) {
+        PipelineStatus s = match (this.asyncRequest) { case Some(value: r): r.poll(); case None: PipelineStatus::Pending; };
+        PopStatus scoped = PopStatus::Ready(caught: Optional::None);
+        match (this.around) { case Some(value: p): { scoped = p.poll(); } case None: { } };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        bool scopePending = match (scoped) { case Pending: true; case _: false; };
+        if ((pending || scopePending || this.waited < QUIET) && this.patient()) { return; }
+        string why = match (give s) {
+            case Pending: "not answered";
+            case Ready(pipeline: p): "it came Ready";
+            case Failed(error: e): failedNaming(e: e, label: label, says: says);
+        };
+        string scopeWhy = match (give scoped) {
+            case Ready(caught: c): match (c) { case Some(value: r): "the scope around it caught: " + r.message(); case None: ""; };
+            case Pending: "the scope's pop was not answered";
+            case Failed(error: e): e.message();
+        };
+        if (why.isEmpty()) { why = copy scopeWhy; }
+        if (why.isEmpty()) {
+            Optional<DeviceErrors> got = this.drain();
+            why = match (got) {
+                case Some(value: errs): errs.isEmpty() ? "" : "the channel holds " + described(errs: errs);
+                case None: "no device";
+            };
+        }
+        this.found.add(name: copy name, why: give why);
+        this.asyncRequest = Optional::None;
+        this.around = Optional::None;
+        this.next(to: next);
+    }
+
+    // A pipeline of a module with a WGSL error: the request carries the module's message, placed; the channel holds the
+    // module's own error, which its creation reported.
+    unsafe fn void awaitAsyncBroken() {
+        PipelineStatus s = match (this.asyncRequest) { case Some(value: r): r.poll(); case None: PipelineStatus::Pending; };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if ((pending || this.waited < QUIET) && this.patient()) { return; }
+        string why = match (give s) {
+            case Pending: "not answered";
+            case Ready(pipeline: p): "it came Ready";
+            case Failed(error: e): placedAt(info: e.vertexMessages(), line: 2, column: 10);
+        };
+        this.found.add(name: "a failed asynchronous pipeline carries its stage's compilation message, placed at the WGSL's line and column", why: give why);
+        Optional<DeviceErrors> got = this.drain();
+        string heard = match (got) {
+            case Some(value: errs): oneNaming(errs: errs, label: "broken stages", says: "");
+            case None: "no device";
+        };
+        this.found.add(name: "and the channel holds only the module's own error, reported when it was made", why: give heard);
+        this.asyncRequest = Optional::None;
+        this.next(to: 530);
+    }
+
+    // A request dropped while its job waits: its slot and its job are freed, and nothing reaches the channel.
+    unsafe fn void droppedPending() {
+        this.aliveBefore = pipelinesAlive();
+        compilePause(paused: true);
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): { PipelineRequest dropped = d.createRenderPipelineAsync(descriptor: drawnDescriptor(shaders: m, kind: 0)); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        compilePause(paused: false);
+        this.flush();
+        this.next(to: 541);
+    }
+
+    unsafe fn void awaitAliveBack() {
+        int64 now = pipelinesAlive();
+        if (now != this.aliveBefore && this.patient()) { return; }
+        int64 before = this.aliveBefore;
+        string why = now == before ? "" : "${now} slots and jobs alive, not ${before}";
+        if (why.isEmpty()) {
+            Optional<DeviceErrors> got = this.drain();
+            why = match (got) {
+                case Some(value: errs): errs.isEmpty() ? "" : "the channel holds " + described(errs: errs);
+                case None: "no device";
+            };
+        }
+        this.found.add(name: "a pending request dropped is freed with its job, and nothing reaches the channel", why: give why);
+        this.next(to: 545);
+    }
+
+    // More requests than a pool's channel holds, asked while the isolates wait: the rest wait in the device's overflow.
+    unsafe fn void manyRequests() {
+        compilePause(paused: true);
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): {
+                        int32 i = 0;
+                        while (i < MANY_REQUESTS) {
+                            this.many.add(item: d.createRenderPipelineAsync(descriptor: drawnDescriptor(shaders: m, kind: 0)));
+                            i = i + 1;
+                        }
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        compilePause(paused: false);
+        this.next(to: 551);
+    }
+
+    // Each good description asked for asynchronously while the isolates wait, the descriptions dropped at once.
+    unsafe fn void everyGoodAsync() {
+        compilePause(paused: true);
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): {
+                        int32 kind = 0;
+                        while (kind < GOOD_KINDS) {
+                            this.many.add(item: d.createRenderPipelineAsync(descriptor: goodDescriptor(d: d, shaders: m, kind: kind)));
+                            kind = kind + 1;
+                        }
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        compilePause(paused: false);
+        this.flush();
+        this.next(to: 546);
+    }
+
+    unsafe fn void awaitMany(const ref string name, int32 count, int32 next) {
+        int32 ready = 0;
+        int32 failed = 0;
+        foreach (const ref PipelineRequest r in this.many.iterConst()) {
+            PipelineStatus s = r.poll();
+            match (s) {
+                case Ready(pipeline: p): { ready = ready + 1; }
+                case Failed(error: e): { failed = failed + 1; }
+                case Pending: { }
+            };
+        }
+        if (ready + failed < count && this.patient()) { return; }
+        string why = ready == count ? "" : "${ready} Ready and ${failed} Failed of ${count}";
+        if (why.isEmpty()) {
+            Optional<DeviceErrors> got = this.drain();
+            why = match (got) {
+                case Some(value: errs): errs.isEmpty() ? "" : "the channel holds " + described(errs: errs);
+                case None: "no device";
+            };
+        }
+        this.found.add(name: copy name, why: give why);
+        this.many = DynamicArray.empty();
+        this.next(to: next);
+    }
+
+    // A request held while the device's last copy goes: natively its isolates stay for it.
+    unsafe fn void pendingPastTheDevice() {
+        compilePause(paused: true);
+        Optional<PipelineRequest> asked = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): { asked = Optional::Some(value: d.createRenderPipelineAsync(descriptor: drawnDescriptor(shaders: m, kind: 0))); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.asyncRequest = give asked;
+        this.device = Optional::None;
+        this.queue = Optional::None;
+        int64 workers = compileWorkersAlive();
+        int64 want = expectedWorkers(started: ASYNC_WORKERS);
+        this.found.add(name: "a pending request keeps its device's compile isolates once the device's last copy is gone",
+                       why: workers == want ? "" : "${workers} run, not ${want}");
+        compilePause(paused: false);
+        this.next(to: 561);
+    }
+
+    unsafe fn void awaitPastTheDevice() {
+        PipelineStatus s = match (this.asyncRequest) { case Some(value: r): r.poll(); case None: PipelineStatus::Pending; };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.patient()) { return; }
+        string why = match (give s) {
+            case Pending: "not answered";
+            case Ready(pipeline: p): "";
+            case Failed(error: e): e.message();
+        };
+        this.found.add(name: "and is answered Ready", why: give why);
+        this.asyncRequest = Optional::None;
+        int64 workers = compileWorkersAlive();
+        this.found.add(name: "and once it is gone, the device's compile isolates are joined", why: workers == 0 ? "" : "${workers} still run");
+        this.next(to: 430);
+    }
+
     // A second adapter, for a device at the default options, which prints its errors.
     unsafe fn void askPrinting() {
         match (this.instance) {
@@ -616,6 +969,61 @@ type resource PipelineRun {
 }
 
 comptime int32 GOOD_KINDS = 14;
+comptime int32 ASYNC_WORKERS = 2;    // the pipeline run's device's compile isolates
+comptime int64 ASYNC_WAIT_MS = 20000; // the longest an asynchronous case waits
+comptime int32 MANY_REQUESTS = 300;  // past a compile pool's channel, which holds 256
+
+// The compile isolates `started` leaves running: natively that many, and none on the web, where the browser compiles.
+@compileFor(ARCH_WASM32)
+fn int64 expectedWorkers(int32 started) { return 0; }
+@compileFor(!ARCH_WASM32)
+fn int64 expectedWorkers(int32 started) { return cast<int64>(started); }
+
+// A vertex stage with a WGSL error at line 2, column 10 (`nosuch`).
+fn string brokenWgsl() {
+    return "@vertex fn vs() -> @builtin(position) vec4f {\n"
+        + "  return nosuch; }\n";
+}
+
+// A pipeline whose vertex stage is `broken`'s, its fragment stage the good one's.
+unsafe fn RenderPipelineDescriptor brokenDescriptor(ref ShaderModule broken, ref ShaderModule shaders) {
+    VertexState v = VertexState.make(module: copy broken, entryPoint: "vs");
+    FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs");
+    f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+    RenderPipelineDescriptor d = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+    d.fragment(state: give f);
+    d.label(text: "of broken stages");
+    return d;
+}
+
+// "" when `e` is a validation error whose words name `label` (and say `says`).
+fn string failedNaming(const ref PipelineError e, const ref string label, const ref string says) {
+    bool validation = match (e.reason()) { case Validation: true; case _: false; };
+    string words = e.message();
+    if (!validation) { return "not a validation error: ${words}"; }
+    if (words.isEmpty()) { return "it has no words"; }
+    if (!words.contains(substring: label)) { return "its words do not name `${label}`: ${words}"; }
+    if (!says.isEmpty() && !words.contains(substring: says)) { return "its words do not say `${says}`: ${words}"; }
+    return "";
+}
+
+// "" when `info` holds an error placed at `line` and `column`.
+fn string placedAt(const ref CompilationInfo info, isize line, isize column) {
+    isize n = info.messages().length();
+    if (n == 0) { return "no message"; }
+    isize i = 0;
+    while (i < n) {
+        bool error = match (info.messages()[i].kind()) { case Error: true; case _: false; };
+        isize l = info.messages()[i].line();
+        isize c = info.messages()[i].column();
+        if (error && l == line && c == column) { return ""; }
+        i = i + 1;
+    }
+    isize l0 = info.messages()[0].line();
+    isize c0 = info.messages()[0].column();
+    string w0 = info.messages()[0].message();
+    return "${n} message(s), the first at ${l0}:${c0}: ${w0}";
+}
 
 // A pipeline of `descriptor`, handed back as a copy once the pipeline it was copied from is gone.
 unsafe fn RenderPipeline copiedPipeline(ref Device d, RenderPipelineDescriptor descriptor) {

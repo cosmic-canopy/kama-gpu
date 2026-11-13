@@ -281,4 +281,37 @@ void gpuseam_compilation_drop(gpuseam_compilation *c);
 // tries the three on a canvas of its own, once, when the page's first device is granted. Until then, and natively, 1.
 int32_t gpuseam_surface_format_taken(int32_t format);
 
+// ---- render pipelines made asynchronously (GPU-4 part 3, step 4) -----------------------------------------------------
+
+typedef struct gpuseam_pipeline gpuseam_pipeline;
+typedef struct gpuseam_pipeline_job gpuseam_pipeline_job;
+
+// A render pipeline asked for asynchronously: one slot on both legs, polled to GPUSEAM_READY or _FAILED. A refusal (its
+// words, `refusal_length` > 0) fails it at once. On the web the browser makes it; natively `*job` is set, a deep copy of
+// `d` holding a reference on each handle it names, for the package's compile pool. NULL only when the slot cannot be
+// allocated.
+gpuseam_pipeline *gpuseam_pipeline_start(WGPUDevice device, gpuseam_state *state, const WGPURenderPipelineDescriptor *d,
+                                         const uint8_t *refusal, int32_t refusal_length, void **job);
+int32_t gpuseam_pipeline_poll(gpuseam_pipeline *p);
+// READY: a new reference on the pipeline, for each call.
+WGPURenderPipeline gpuseam_pipeline_handle(gpuseam_pipeline *p);
+int32_t gpuseam_pipeline_error_kind(gpuseam_pipeline *p);
+int32_t gpuseam_pipeline_error_length(gpuseam_pipeline *p);
+const uint8_t *gpuseam_pipeline_error_message(gpuseam_pipeline *p);
+void gpuseam_pipeline_drop(gpuseam_pipeline *p);
+// Natively, on a worker: make the job's pipeline and publish its slot, or fail it unrun; both free the job.
+void gpuseam_pipeline_job_run(gpuseam_pipeline_job *job);
+void gpuseam_pipeline_job_cancel(gpuseam_pipeline_job *job);
+// The pool's channel or the device's overflow (1 into the channel); a worker's receipt; the overflow's oldest, or NULL.
+int32_t gpuseam_compile_enqueue(gpuseam_state *s, gpuseam_pipeline_job *job, int32_t capacity);
+void gpuseam_compile_received(gpuseam_state *s);
+gpuseam_pipeline_job *gpuseam_compile_overflow_take(gpuseam_state *s);
+// The workers alive, and the slots and jobs alive, for the tests; a pause that holds every worker before it compiles.
+int64_t gpuseam_compile_workers_alive(void);
+int64_t gpuseam_pipelines_alive(void);
+void gpuseam_compile_worker_started(void);
+void gpuseam_compile_worker_ended(void);
+void gpuseam_compile_pause(int32_t paused);
+int32_t gpuseam_compile_paused(void);
+
 #endif
