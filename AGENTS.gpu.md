@@ -668,6 +668,29 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
        - The alternative refused: a `type value` of the parts with the label given apart, which would be two ways to
          label a handle.
        - Not closed by a type: anisotropy above 1 with a nearest filter stays WebGPU's validation error.
+    9. **Nothing a program passes ends it: every misuse is a validation error, on both legs** (decided after the probe
+       below, asked in the chat; the owner: "yes to A"). webgpu.h has no exceptions, so a C program's misuse can only be
+       a reported error. As read from memory of Dawn's source (not checked here), that is how Dawn's native build
+       reports each of these. The error is reported where WebGPU reports one: the innermost validation scope on the
+       thread, else the device's channel, and printed by default once `printErrors` lands (decision 3, item 2). What the
+       call made is invalid, so a later use is another error, never an abort; a refused write writes nothing.
+       - **Sizes and offsets above 2^53 − 1 are clamped to 2^53 − 256.** No device reaches it, it is a multiple of every
+         WebGPU alignment, and both legs refuse it cleanly (measured). The only trace is that number in the error's words.
+       - **What a backend would end the program on is refused first, in the package's words:** a `writeBuffer` of a
+         byte count not a multiple of 4, a non-finite LOD clamp (a +inf `lodMaxClamp` is taken as the largest float,
+         which means the same), a NaN clear colour (part 4), and natively a buffer binding of size 0, which the web
+         reports itself.
+         - Natively the seam routes the report itself, as it routes every error.
+         - On the web it rides a carrier call: a 4-byte buffer with no usage, whose label names the report, so it lands
+           in the same scope and order a browser error would. The seam puts the package's words in place of the
+           browser's.
+         - Where a handle must come back, it is made from the same call with the bad value replaced by one the backend
+           refuses, under an internal scope whose error is dropped.
+       - The other choice, ending the program on what WebGPU's JavaScript API throws on (a trap, kama's way for a
+         programmer's error), was simpler. It was refused because it splits misuses into two behaviours a program must
+         tell apart, and ends a shipped game on one computed NaN.
+       - Part of the same parity, decided by "native at parity", not asked: natively a map sees every write made before
+         it, as WebGPU defines, where wgpu-native shows it only after the next submit.
 
     **Measured before part 2 was built** (kyoten's `.scratch/gpu4-part2/FINDINGS.md`): wgpu-native v29.0.1.1 natively,
     one process per case, and plain WebGPU in headless Edge 157, with emdawnwebgpu read. It catches no JavaScript
