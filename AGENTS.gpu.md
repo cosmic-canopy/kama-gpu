@@ -757,6 +757,29 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
         - the substitute not quieted, and the quiet section not dropping (two reports);
         - the carrier's words kept (the label missing), and a carrier with a usage (no report);
         - anisotropy, the mag filter, the clamps' order and the label each not handed over.
+    - **Bind group layouts, pipeline layouts and bind groups (decision 1), with decision 9's clamps and refusal:**
+      - `BindGroupLayoutDescriptor.entry(binding:, visibility:, layout:)` over the `BindingLayout` enum, whose four
+        sub-layouts are `type value`s at WebGPU's defaults (`BufferBindingLayout.make()` is a uniform, by decision 1's
+        rule, though the chat's example had shown `make(kind:)`).
+      - `PipelineLayoutDescriptor.group(layout:)`.
+      - `BindGroupDescriptor.make(layout:)` with `entry(binding:, resource:)` over `BindingResource` and
+        `BufferBinding` (`whole`, `range`, `rest`).
+      - Offsets, sizes and `minBindingSize` are clamped. An empty range is refused, its substitute a range past any
+        buffer under a quiet section.
+      - 14 cases, on both legs:
+        - the layouts and groups WebGPU takes leave the channel empty;
+        - each of these is one validation error naming its label: a duplicate binding, a missing binding, the wrong
+          kind, a writable storage buffer seen by the vertex stage, a plain sampler in a comparison slot, a group
+          holding a refused sampler (so the refusal's handle is invalid), and five groups;
+        - an empty range is one in the package's words;
+        - an offset, a size and a `minBindingSize` of 2^60 are each a validation error, where the browser threw.
+      - `tests/` is 134 cases natively, 111 in Edge and Chrome for Testing, and 21 in Firefox. COVERAGE.md: 71 of 206.
+      - **Mutations: 17 of 17 caught:**
+        - the refusal never made, its substitute not made, and not quieted;
+        - each clamp removed (Edge alone);
+        - whole sizes clamped;
+        - visibility, the buffer kind, the comparison kind, the view dimension, the sample type, the groups, a texture
+          view, both labels and a binding's number each lost.
 
 ## Where the truth is
 

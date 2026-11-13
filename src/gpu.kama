@@ -64,6 +64,13 @@ import {
     gpu::native::samplerAddRef, gpu::native::samplerRelease, gpu::native::deviceCreateSampler,
     gpu::native::WGPUSamplerDescriptor, gpu::native::WGPUAddressMode, gpu::native::WGPUFilterMode,
     gpu::native::WGPUMipmapFilterMode, gpu::native::WGPUCompareFunction,
+    gpu::native::bindGroupLayoutAddRef, gpu::native::bindGroupLayoutRelease, gpu::native::deviceCreateBindGroupLayout,
+    gpu::native::pipelineLayoutAddRef, gpu::native::pipelineLayoutRelease, gpu::native::deviceCreatePipelineLayout,
+    gpu::native::bindGroupAddRef, gpu::native::bindGroupRelease, gpu::native::deviceCreateBindGroup,
+    gpu::native::WGPUBindGroupLayoutDescriptor, gpu::native::WGPUBindGroupLayoutEntry,
+    gpu::native::WGPUPipelineLayoutDescriptor, gpu::native::WGPUBindGroupDescriptor, gpu::native::WGPUBindGroupEntry,
+    gpu::native::WGPUBufferBindingType, gpu::native::WGPUSamplerBindingType, gpu::native::WGPUTextureSampleType,
+    gpu::native::WGPUTextureViewDimension, gpu::native::WGPUStorageTextureAccess,
     gpu::native::pollDevice, gpu::native::deviceRequestTakeState, gpu::native::LOSS_DESTROYED,
     gpu::native::stateUnwatched, gpu::native::stateHold, gpu::native::stateRelease, gpu::native::stateWatched,
     gpu::native::stateTakeErrors, gpu::native::errorsCount, gpu::native::errorsDropped, gpu::native::errorsKind,
@@ -96,11 +103,17 @@ export {
     Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
     GpuErrorKind, GpuErrorReport, DeviceErrors, DeviceLoss, LossReason, ErrorFilter, ErrorScope, ScopePop, PopStatus,
     Sampler, SamplerDescriptor, AddressMode, FilterMode, MipmapFilterMode, CompareFunction,
+    BindGroupLayout, BindGroupLayoutDescriptor, BindingLayout, BufferBindingLayout, BufferBindingType,
+    SamplerBindingLayout, SamplerBindingType, TextureBindingLayout, TextureSampleType, TextureViewDimension,
+    StorageTextureBindingLayout, StorageTextureAccess, PipelineLayout, PipelineLayoutDescriptor,
+    BindGroup, BindGroupDescriptor, BindingResource, BufferBinding,
     ShaderModuleDescriptor, ShaderModule, CompilationRequest, CompilationStatus, CompilationInfo, CompilationMessage,
     CompilationMessageKind,
 };
 
 comptime int32 MESSAGE_BYTES = 512;
+// webgpu.h's WGPU_WHOLE_SIZE, a #define the bindings never see: a buffer binding to the end of its buffer.
+comptime uint64 WHOLE_SIZE = 0xFFFFFFFFFFFFFFFF;
 // webgpu.h's WGPU_DEPTH_SLICE_UNDEFINED, a #define the bindings never see; csrc/gpuseam.c asserts it is this.
 comptime uint32 DEPTH_SLICE_UNDEFINED = 0xFFFFFFFF;
 // webgpu.h's WGPU_LIMIT_U32_UNDEFINED and _U64_UNDEFINED: a limit a request leaves to WebGPU's default. Asserted likewise.
@@ -1093,6 +1106,57 @@ type resource Device implements Copyable<This>(bare: give) {
         refuseOn(device: this.handle, message: cast<UnsafeConstPtr<uint8>>(words.cstr()), length: cast<int32>(words.length()));
     }
 
+    // A bind group layout as `descriptor` describes it (WebGPU's `createBindGroupLayout`; AGENTS.gpu.md item 12,
+    // decision 1). A `minBindingSize` past 2^53 - 1 is clamped (decision 9).
+    public unsafe fn BindGroupLayout createBindGroupLayout(BindGroupLayoutDescriptor descriptor) {
+        DynamicArray<WGPUBindGroupLayoutEntry> entries = descriptor.raw();
+        WGPUBindGroupLayoutDescriptor d = WGPUBindGroupLayoutDescriptor.zero();
+        d.label = labelOf(text: descriptor.labelText());
+        d.entryCount = cast<usize>(entries.length());
+        d.entries = cast<UnsafePtr>(entries.dataPtrMut());
+        UnsafePtr raw = deviceCreateBindGroupLayout(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d)));
+        return BindGroupLayout.fromDevice(raw: raw, block: this.hold.raw());
+    }
+
+    // A pipeline layout of `descriptor`'s groups, in order (WebGPU's `createPipelineLayout`).
+    public unsafe fn PipelineLayout createPipelineLayout(PipelineLayoutDescriptor descriptor) {
+        DynamicArray<UnsafePtr> groups = descriptor.raw();
+        WGPUPipelineLayoutDescriptor d = WGPUPipelineLayoutDescriptor.zero();
+        d.label = labelOf(text: descriptor.labelText());
+        d.bindGroupLayoutCount = cast<usize>(groups.length());
+        d.bindGroupLayouts = cast<UnsafePtr>(groups.dataPtrMut());
+        UnsafePtr raw = deviceCreatePipelineLayout(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d)));
+        return PipelineLayout.fromDevice(raw: raw, block: this.hold.raw());
+    }
+
+    // A bind group as `descriptor` describes it (WebGPU's `createBindGroup`). A buffer binding's offset and size past
+    // 2^53 - 1 are clamped, and an empty one (a size of 0) is refused in the package's words, since wgpu-native ends
+    // the process on it; the group handed back is invalid, as a refused one is (decision 9).
+    public unsafe fn BindGroup createBindGroup(BindGroupDescriptor descriptor) {
+        DynamicArray<WGPUBindGroupEntry> entries = descriptor.raw();
+        WGPUBindGroupDescriptor d = WGPUBindGroupDescriptor.zero();
+        d.label = labelOf(text: descriptor.labelText());
+        d.layout = descriptor.layoutHandle();
+        d.entryCount = cast<usize>(entries.length());
+        d.entries = cast<UnsafePtr>(entries.dataPtrMut());
+        string refused = descriptor.refusal();
+        if (refused.isEmpty()) {
+            return BindGroup.fromDevice(raw: deviceCreateBindGroup(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))),
+                                        block: this.hold.raw());
+        }
+        this.refuse(words: refused);
+        // a group the device refuses: each empty binding as one past the end of any buffer
+        isize i = 0;
+        while (i < entries.length()) {
+            if (entries[i].buffer != null && entries[i].size == 0) { entries[i].size = SIZE_LIMIT; }
+            i = i + 1;
+        }
+        quietBegin(device: this.handle);
+        UnsafePtr raw = deviceCreateBindGroup(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d)));
+        quietEnd(device: this.handle);
+        return BindGroup.fromDevice(raw: raw, block: this.hold.raw());
+    }
+
     public unsafe fn CommandEncoder createCommandEncoder() {
         return CommandEncoder.fromDevice(raw: deviceCreateCommandEncoder(device: this.handle, descriptor: null),
                                          block: this.hold.raw());
@@ -1439,6 +1503,331 @@ type resource Sampler implements Copyable<This>(bare: give) {
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
     unsafe ~Sampler() { if (this.handle != null) { samplerRelease(sampler: this.handle); } }
+}
+
+// ---- bind group layouts, pipeline layouts and bind groups (GPU-4; AGENTS.gpu.md item 12, decision 1) ----------------
+
+// What a buffer binding is read as (WebGPU's `GPUBufferBindingType`).
+type enum BufferBindingType { Uniform, Storage, ReadOnlyStorage }
+// What a sampler binding takes (WebGPU's `GPUSamplerBindingType`).
+type enum SamplerBindingType { Filtering, NonFiltering, Comparison }
+// What a texture binding's texels are read as (WebGPU's `GPUTextureSampleType`).
+type enum TextureSampleType { Float, UnfilterableFloat, Depth, Sint, Uint }
+// The shape of a texture view a binding takes (WebGPU's `GPUTextureViewDimension`).
+type enum TextureViewDimension { D1, D2, D2Array, Cube, CubeArray, D3 }
+// What a storage texture binding may do (WebGPU's `GPUStorageTextureAccess`).
+type enum StorageTextureAccess { WriteOnly, ReadOnly, ReadWrite }
+
+fn int32 viewDimensionValue(TextureViewDimension v) {
+    return match (v) {
+        case D1: WGPUTextureViewDimension::N1D;
+        case D2: WGPUTextureViewDimension::N2D;
+        case D2Array: WGPUTextureViewDimension::N2DArray;
+        case Cube: WGPUTextureViewDimension::Cube;
+        case CubeArray: WGPUTextureViewDimension::CubeArray;
+        case D3: WGPUTextureViewDimension::N3D;
+    };
+}
+
+// WebGPU's `GPUBufferBindingLayout`: a uniform buffer unless `kind` says otherwise.
+type value BufferBindingLayout {
+    public BufferBindingType kind = BufferBindingType::Uniform;
+    public bool hasDynamicOffset = false;
+    public uint64 minBindingSize = 0;
+
+    public ctor make() { }
+}
+
+// WebGPU's `GPUSamplerBindingLayout`: a filtering sampler unless `kind` says otherwise.
+type value SamplerBindingLayout {
+    public SamplerBindingType kind = SamplerBindingType::Filtering;
+
+    public ctor make() { }
+}
+
+// WebGPU's `GPUTextureBindingLayout`: a 2D float texture, one sample, unless its fields say otherwise.
+type value TextureBindingLayout {
+    public TextureSampleType sampleType = TextureSampleType::Float;
+    public TextureViewDimension viewDimension = TextureViewDimension::D2;
+    public bool multisampled = false;
+
+    public ctor make() { }
+}
+
+// WebGPU's `GPUStorageTextureBindingLayout`: its format, which WebGPU requires; written, 2D, unless its fields say
+// otherwise.
+type value StorageTextureBindingLayout {
+    public TextureFormat format;
+    public StorageTextureAccess access = StorageTextureAccess::WriteOnly;
+    public TextureViewDimension viewDimension = TextureViewDimension::D2;
+
+    public ctor make(TextureFormat format) { this.format = format; }
+}
+
+// What a layout's binding holds: WebGPU's "exactly one of" a buffer, a sampler, a texture or a storage texture.
+type enum BindingLayout {
+    Buffer(BufferBindingLayout layout),
+    Sampler(SamplerBindingLayout layout),
+    Texture(TextureBindingLayout layout),
+    StorageTexture(StorageTextureBindingLayout layout),
+}
+
+// webgpu.h's entry for one binding: the kind the enum names, every other kind left BindingNotUsed (zero).
+fn WGPUBindGroupLayoutEntry layoutEntryOf(uint32 binding, ShaderStage visibility, const ref BindingLayout layout) {
+    WGPUBindGroupLayoutEntry e = WGPUBindGroupLayoutEntry.zero();
+    e.binding = binding;
+    e.visibility = visibility.bits();
+    match (layout) {
+        case Buffer(layout: b): {
+            int32 bufferKind = match (b.kind) {
+                case Uniform: WGPUBufferBindingType::Uniform;
+                case Storage: WGPUBufferBindingType::Storage;
+                case ReadOnlyStorage: WGPUBufferBindingType::ReadOnlyStorage;
+            };
+            e.buffer.type = bufferKind;
+            e.buffer.hasDynamicOffset = b.hasDynamicOffset ? 1 : 0;
+            e.buffer.minBindingSize = inRange(v: b.minBindingSize);
+        }
+        case Sampler(layout: s): {
+            int32 samplerKind = match (s.kind) {
+                case Filtering: WGPUSamplerBindingType::Filtering;
+                case NonFiltering: WGPUSamplerBindingType::NonFiltering;
+                case Comparison: WGPUSamplerBindingType::Comparison;
+            };
+            e.sampler.type = samplerKind;
+        }
+        case Texture(layout: x): {
+            int32 sampled = match (x.sampleType) {
+                case Float: WGPUTextureSampleType::Float;
+                case UnfilterableFloat: WGPUTextureSampleType::UnfilterableFloat;
+                case Depth: WGPUTextureSampleType::Depth;
+                case Sint: WGPUTextureSampleType::Sint;
+                case Uint: WGPUTextureSampleType::Uint;
+            };
+            e.texture.sampleType = sampled;
+            e.texture.viewDimension = viewDimensionValue(v: x.viewDimension);
+            e.texture.multisampled = x.multisampled ? 1 : 0;
+        }
+        case StorageTexture(layout: st): {
+            int32 access = match (st.access) {
+                case WriteOnly: WGPUStorageTextureAccess::WriteOnly;
+                case ReadOnly: WGPUStorageTextureAccess::ReadOnly;
+                case ReadWrite: WGPUStorageTextureAccess::ReadWrite;
+            };
+            e.storageTexture.access = access;
+            e.storageTexture.format = st.format.value();
+            e.storageTexture.viewDimension = viewDimensionValue(v: st.viewDimension);
+        }
+    };
+    return e;
+}
+
+// WebGPU's `GPUBindGroupLayoutDescriptor`: its entries, each a binding number, the stages that see it and what it holds,
+// and a label.
+type resource BindGroupLayoutDescriptor {
+    DynamicArray<WGPUBindGroupLayoutEntry> entryList;
+    string labelled = "";
+
+    friend Device::createBindGroupLayout[raw];
+
+    public ctor make() { this.entryList = DynamicArray.empty(); }
+    public fn void entry(uint32 binding, ShaderStage visibility, BindingLayout layout) {
+        this.entryList.add(item: layoutEntryOf(binding: binding, visibility: visibility, layout: layout));
+    }
+    public fn void label(string text) { this.labelled = give text; }
+    public const fn const ref string labelText() { return this.labelled; }
+
+    unsafe const fn DynamicArray<WGPUBindGroupLayoutEntry> raw() { return copy this.entryList; }
+}
+
+type resource BindGroupLayout implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
+
+    friend Device::createBindGroupLayout[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
+    public unsafe ctor copy(ref BindGroupLayout source) {
+        this.handle = source.handle;
+        bindGroupLayoutAddRef(bindGroupLayout: this.handle);
+        this.hold = copy source.hold;
+    }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    unsafe ~BindGroupLayout() { if (this.handle != null) { bindGroupLayoutRelease(bindGroupLayout: this.handle); } }
+}
+
+// WebGPU's `GPUPipelineLayoutDescriptor`: its bind group layouts, group 0 first, and a label.
+type resource PipelineLayoutDescriptor {
+    DynamicArray<BindGroupLayout> groups;
+    string labelled = "";
+
+    friend Device::createPipelineLayout[raw];
+
+    public ctor make() { this.groups = DynamicArray.empty(); }
+    // The next group's layout.
+    public fn void group(BindGroupLayout layout) { this.groups.add(item: give layout); }
+    public fn void label(string text) { this.labelled = give text; }
+    public const fn const ref string labelText() { return this.labelled; }
+
+    unsafe const fn DynamicArray<UnsafePtr> raw() {
+        DynamicArray<UnsafePtr> handles = DynamicArray.empty();
+        isize i = 0;
+        while (i < this.groups.length()) { handles.add(item: this.groups[i].raw()); i = i + 1; }
+        return handles;
+    }
+}
+
+type resource PipelineLayout implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
+
+    friend Device::createPipelineLayout[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
+    public unsafe ctor copy(ref PipelineLayout source) {
+        this.handle = source.handle;
+        pipelineLayoutAddRef(pipelineLayout: this.handle);
+        this.hold = copy source.hold;
+    }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    unsafe ~PipelineLayout() { if (this.handle != null) { pipelineLayoutRelease(pipelineLayout: this.handle); } }
+}
+
+// WebGPU's `GPUBufferBinding`: a buffer, and the range of it a binding sees.
+type resource BufferBinding {
+    Buffer target;
+    uint64 start;
+    uint64 bytes;   // WHOLE_SIZE: to the end of the buffer
+
+    friend BindGroupDescriptor::raw[buffer, offset, size];
+    friend BindGroupDescriptor::refusal[size];
+
+    // The whole buffer.
+    public ctor whole(Buffer buffer) {
+        this.target = give buffer;
+        this.start = 0;
+        this.bytes = WHOLE_SIZE;
+    }
+    // `size` bytes from `offset`.
+    public ctor range(Buffer buffer, uint64 offset, uint64 size) {
+        this.target = give buffer;
+        this.start = offset;
+        this.bytes = size;
+    }
+    // From `offset` to the end of the buffer.
+    public ctor rest(Buffer buffer, uint64 offset) {
+        this.target = give buffer;
+        this.start = offset;
+        this.bytes = WHOLE_SIZE;
+    }
+
+    unsafe const fn UnsafePtr buffer() { return this.target.raw(); }
+    const fn uint64 offset() { return inRange(v: this.start); }
+    const fn uint64 size() { return this.bytes == WHOLE_SIZE ? WHOLE_SIZE : inRange(v: this.bytes); }
+}
+
+// What a bind group's binding holds: WebGPU's `GPUBindingResource`, exactly one of a buffer's range, a sampler or a
+// texture view.
+type enum BindingResource {
+    Buffer(BufferBinding binding),
+    Sampler(Sampler sampler),
+    Texture(TextureView view),
+}
+
+// WebGPU's `GPUBindGroupDescriptor`: the layout it follows, which WebGPU requires, its entries, each a binding number
+// and what it holds, and a label.
+type resource BindGroupDescriptor {
+    BindGroupLayout layout;
+    DynamicArray<uint32> bindings;
+    DynamicArray<BindingResource> resources;
+    string labelled = "";
+
+    friend Device::createBindGroup[raw, refusal, layoutHandle];
+
+    public ctor make(BindGroupLayout layout) {
+        this.layout = give layout;
+        this.bindings = DynamicArray.empty();
+        this.resources = DynamicArray.empty();
+    }
+    public fn void entry(uint32 binding, BindingResource resource) {
+        this.bindings.add(item: binding);
+        this.resources.add(item: give resource);
+    }
+    public fn void label(string text) { this.labelled = give text; }
+    public const fn const ref string labelText() { return this.labelled; }
+
+    unsafe const fn UnsafePtr layoutHandle() { return this.layout.raw(); }
+
+    // webgpu.h's entries, their handles borrowed from this description, which must outlive the call it is handed to.
+    unsafe const fn DynamicArray<WGPUBindGroupEntry> raw() {
+        DynamicArray<WGPUBindGroupEntry> list = DynamicArray.empty();
+        isize i = 0;
+        while (i < this.resources.length()) {
+            WGPUBindGroupEntry e = WGPUBindGroupEntry.zero();
+            e.binding = this.bindings[i];
+            match (this.resources[i]) {
+                case Buffer(binding: b): {
+                    e.buffer = b.buffer();
+                    e.offset = b.offset();
+                    e.size = b.size();
+                }
+                case Sampler(sampler: s): { e.sampler = s.raw(); }
+                case Texture(view: v): { e.textureView = v.raw(); }
+            };
+            list.add(item: e);
+            i = i + 1;
+        }
+        return list;
+    }
+
+    // Why the package refuses this description (an empty buffer binding, which wgpu-native ends the process on), or "".
+    const fn string refusal() {
+        isize i = 0;
+        while (i < this.resources.length()) {
+            uint32 n = this.bindings[i];
+            bool empty = match (this.resources[i]) { case Buffer(binding: b): b.size() == 0; case _: false; };
+            if (empty) {
+                string name = copy this.labelled;
+                return "the bind group '${name}' binds 0 bytes of a buffer at binding ${n}: WebGPU refuses an empty binding";
+            }
+            i = i + 1;
+        }
+        return "";
+    }
+}
+
+type resource BindGroup implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
+
+    friend Device::createBindGroup[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
+    public unsafe ctor copy(ref BindGroup source) {
+        this.handle = source.handle;
+        bindGroupAddRef(bindGroup: this.handle);
+        this.hold = copy source.hold;
+    }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    unsafe ~BindGroup() { if (this.handle != null) { bindGroupRelease(bindGroup: this.handle); } }
 }
 
 // ---- shader modules (GPU-4; AGENTS.gpu.md item 12) -------------------------------------------------------------------

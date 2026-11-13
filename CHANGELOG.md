@@ -5,6 +5,16 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: bind group layouts, pipeline layouts and bind groups** (2026-11-12, kama 0.9.938; GPU-4's second part,
+  AGENTS.gpu.md item 12, decisions 1 and 9):
+  - `BindGroupLayoutDescriptor` with `entry(binding:, visibility:, layout:)`, where `layout` is a `BindingLayout`:
+    buffer, sampler, texture or storage texture, each WebGPU's dictionary as a `type value`.
+  - `PipelineLayoutDescriptor` with `group(layout:)`.
+  - `BindGroupDescriptor.make(layout:)` with `entry(binding:, resource:)`, where `resource` is a `BindingResource`: a
+    `BufferBinding` (`whole`, `range`, `rest`), a sampler or a texture view.
+  - A buffer range of 0 bytes is a validation error in the package's words, where wgpu-native ended the process. Sizes
+    and offsets past 2^53 - 1 are clamped.
+
 - **New: samplers** (2026-11-12, kama 0.9.938; GPU-4's second part, AGENTS.gpu.md item 12, decisions 8 and 9):
   - `SamplerDescriptor.make()` with WebGPU's defaults, and `device.createSampler(descriptor:)`. Its parts are set as
     `addressModes(u:, v:, w:)`, `filters(mag:, min:, mipmap:)`, `lodClamp(min:, max:)`, `compare(function:)`,

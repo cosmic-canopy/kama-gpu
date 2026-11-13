@@ -13,7 +13,7 @@ From three headers, each by the sha256 of its text with LF line endings:
 - wgpu-native's wgpu.h `7bd23656d394f620a804b1f174444ea17082b6d330a2fca0c0e6b1121ec4b284`
 - emdawnwebgpu's webgpu.h `40e7ecd9647dc922e69d17d888d7038fbd5eb10277621eb414c8ffc278e353be`
 
-**webgpu.h: 62 of 206 called.** On both legs, 62 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
+**webgpu.h: 71 of 206 called.** On both legs, 71 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
 
 **wgpu.h, wgpu-native's own extensions, apart: 1 of 22 called.**
 
@@ -116,22 +116,22 @@ From three headers, each by the sha256 of its text with LF line endings:
 | `wgpuSamplerAddRef` | both | yes |
 | `wgpuSamplerRelease` | both | yes |
 
-### Resource binding, 0 of 12
+### Resource binding, 9 of 12
 
 | Function | Legs | Called |
 |---|---|---|
 | `wgpuBindGroupSetLabel` | both | no |
-| `wgpuBindGroupAddRef` | both | no |
-| `wgpuBindGroupRelease` | both | no |
+| `wgpuBindGroupAddRef` | both | yes |
+| `wgpuBindGroupRelease` | both | yes |
 | `wgpuBindGroupLayoutSetLabel` | both | no |
-| `wgpuBindGroupLayoutAddRef` | both | no |
-| `wgpuBindGroupLayoutRelease` | both | no |
-| `wgpuDeviceCreateBindGroup` | both | no |
-| `wgpuDeviceCreateBindGroupLayout` | both | no |
-| `wgpuDeviceCreatePipelineLayout` | both | no |
+| `wgpuBindGroupLayoutAddRef` | both | yes |
+| `wgpuBindGroupLayoutRelease` | both | yes |
+| `wgpuDeviceCreateBindGroup` | both | yes |
+| `wgpuDeviceCreateBindGroupLayout` | both | yes |
+| `wgpuDeviceCreatePipelineLayout` | both | yes |
 | `wgpuPipelineLayoutSetLabel` | both | no |
-| `wgpuPipelineLayoutAddRef` | both | no |
-| `wgpuPipelineLayoutRelease` | both | no |
+| `wgpuPipelineLayoutAddRef` | both | yes |
+| `wgpuPipelineLayoutRelease` | both | yes |
 
 ### Shader modules, 4 of 5
 

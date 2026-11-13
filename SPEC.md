@@ -210,6 +210,41 @@ The sets:
 - **A LOD clamp that is NaN or infinite is refused in the package's words,** where a browser would throw, and where
   wgpu-native takes a NaN silently. A +inf max clamps nothing, and is taken as 10^30.
 
+## Bind group layouts, pipeline layouts and bind groups
+
+- **`device.createBindGroupLayout(descriptor:)`:** a `BindGroupLayoutDescriptor.make()` with
+  `entry(binding:, visibility:, layout:)` per binding, and `label(text:)`.
+  - `visibility` is a `ShaderStage` set.
+  - `layout` is a `BindingLayout`, WebGPU's "exactly one of", so a binding with no kind or two cannot be written:
+    - `Buffer(layout: BufferBindingLayout)`: `kind` (`BufferBindingType`: `Uniform` by default, `Storage`,
+      `ReadOnlyStorage`), `hasDynamicOffset` and `minBindingSize`;
+    - `Sampler(layout: SamplerBindingLayout)`: `kind` (`SamplerBindingType`: `Filtering` by default, `NonFiltering`,
+      `Comparison`);
+    - `Texture(layout: TextureBindingLayout)`: `sampleType` (`TextureSampleType`: `Float` by default,
+      `UnfilterableFloat`, `Depth`, `Sint`, `Uint`), `viewDimension` (`TextureViewDimension`: `D1`, `D2` by default,
+      `D2Array`, `Cube`, `CubeArray`, `D3`) and `multisampled`;
+    - `StorageTexture(layout: StorageTextureBindingLayout.make(format:))`: its format, which WebGPU requires, `access`
+      (`StorageTextureAccess`: `WriteOnly` by default, `ReadOnly`, `ReadWrite`) and `viewDimension`.
+
+    Each is a `type value` whose fields start at WebGPU's defaults.
+  - A `minBindingSize` past 2^53 - 1 is clamped, which keeps its meaning, since no buffer reaches either.
+- **`device.createPipelineLayout(descriptor:)`:** a `PipelineLayoutDescriptor.make()`, `group(layout:)` per bind group
+  layout, group 0 first, and `label(text:)`.
+- **`device.createBindGroup(descriptor:)`:** a `BindGroupDescriptor.make(layout:)`, `entry(binding:, resource:)` per
+  binding, and `label(text:)`.
+  - `resource` is a `BindingResource`, exactly one of:
+    - `Buffer(binding: BufferBinding)`: `whole(buffer:)`, `range(buffer:, offset:, size:)` or `rest(buffer:, offset:)`;
+    - `Sampler(sampler:)`;
+    - `Texture(view:)`.
+  - A binding's offset and size past 2^53 - 1 are clamped.
+  - **A range of 0 bytes is refused in the package's words,** where wgpu-native ends the process. The group handed back
+    is made with that range past the end of any buffer, under a quiet section, so it is invalid.
+- Each handle (`BindGroupLayout`, `PipelineLayout`, `BindGroup`) is a copy-is-`AddRef` resource with `adopt` and `raw`.
+- What WebGPU refuses is a validation error naming the label: a binding number twice, a writable storage buffer seen by
+  the vertex stage, a group missing a binding or holding the wrong kind, a plain sampler where a comparison one is
+  wanted, a range past its buffer, a group under its layout's `minBindingSize`, one holding a refused sampler, and more
+  groups than `maxBindGroups`.
+
 ## Shader modules
 
 - **`ShaderModuleDescriptor.make(wgsl:)`,** WebGPU's `GPUShaderModuleDescriptor`: the WGSL, which WebGPU requires, and

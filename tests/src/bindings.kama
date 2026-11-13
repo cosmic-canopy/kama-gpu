@@ -1,5 +1,6 @@
 // The cases of GPU-4's second part (AGENTS.gpu.md item 12, decisions 6 to 9), a step a tick on every leg: samplers,
-// and what WebGPU refuses of them; and that nothing a program passes ends it (decision 9). Every misuse is one
+// bind group layouts, pipeline layouts and bind groups, and what WebGPU refuses of each; and that nothing a program
+// passes ends it (decision 9). Every misuse is one
 // validation error in the device's channel naming its label, where on the web the browser's own error arrives a tick
 // after the device's queue is next used.
 //
@@ -7,10 +8,17 @@
 
 import {
     core::println,
+    std::memory::replace,
     gpu::Instance, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::PowerPreference,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::DeviceOptions, gpu::GpuError,
     gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer,
     gpu::Sampler, gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::CompareFunction,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::Texture, gpu::TextureView, gpu::TextureFormat,
+    gpu::TextureUsage, gpu::ShaderStage,
+    gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
+    gpu::BufferBindingType, gpu::SamplerBindingLayout, gpu::SamplerBindingType, gpu::TextureBindingLayout,
+    gpu::StorageTextureBindingLayout, gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::BindGroup,
+    gpu::BindGroupDescriptor, gpu::BindingResource, gpu::BufferBinding,
     Verdicts,
 };
 export { BindingRun };
@@ -38,6 +46,7 @@ type resource BindingRun {
     Optional<DeviceRequest> deviceRequest = Optional::None;
     Optional<Device> device = Optional::None;
     Optional<Queue> queue = Optional::None;
+    Optional<Sampler> refused = Optional::None;   // a sampler refused for a NaN clamp, for a bind group
 
     public ctor make(bool adapterOptional) {
         this.optional = adapterOptional;
@@ -61,8 +70,36 @@ type resource BindingRun {
         else if (this.stage == 40) { this.lodNan(); }
         else if (this.stage == 41) { this.awaitOne(name: "a NaN LOD clamp is a validation error in the package's words, not the end of the program", label: "nan clamp", says: "not a finite number", next: 50); }
         else if (this.stage == 50) { this.lodMinusInfinity(); }
-        else if (this.stage == 51) { this.awaitOne(name: "a -inf LOD clamp is a validation error in the package's words, not the end of the program", label: "minus infinity", says: "not a finite number", next: 99); }
-        return this.stage >= 99;
+        else if (this.stage == 51) { this.awaitOne(name: "a -inf LOD clamp is a validation error in the package's words, not the end of the program", label: "minus infinity", says: "not a finite number", next: 60); }
+        else if (this.stage == 60) { this.goodLayouts(); }
+        else if (this.stage == 61) { this.awaitNone(name: "layouts WebGPU takes are made with no error: a uniform, a sampler, a texture and a storage texture, and a pipeline layout of them", next: 70); }
+        else if (this.stage == 70) { this.duplicated(); }
+        else if (this.stage == 71) { this.awaitOne(name: "a layout binding one number twice is a validation error naming its label", label: "duplicated", says: "", next: 80); }
+        else if (this.stage == 80) { this.goodGroups(); }
+        else if (this.stage == 81) { this.awaitNone(name: "bind groups that follow their layouts are made with no error: a buffer whole and in a range, a sampler and a texture", next: 90); }
+        else if (this.stage == 90) { this.group(label: "missing", kind: 1); }
+        else if (this.stage == 91) { this.awaitOne(name: "a bind group missing a binding is a validation error naming its label", label: "missing", says: "", next: 100); }
+        else if (this.stage == 100) { this.group(label: "wrong kind", kind: 2); }
+        else if (this.stage == 101) { this.awaitOne(name: "a bind group with a sampler where its layout has a buffer is a validation error naming its label", label: "wrong kind", says: "", next: 110); }
+        else if (this.stage == 110) { this.group(label: "empty range", kind: 3); }
+        else if (this.stage == 111) { this.awaitOne(name: "a bind group binding 0 bytes of a buffer is a validation error in the package's words, not the end of the program", label: "empty range", says: "binds 0 bytes", next: 120); }
+        else if (this.stage == 120) { this.group(label: "far offset", kind: 4); }
+        else if (this.stage == 121) { this.awaitOne(name: "a bind group binding at an offset of 2^60 is a validation error naming its label, not the end of the program", label: "far offset", says: "", next: 130); }
+        else if (this.stage == 130) { this.group(label: "under a huge minimum", kind: 5); }
+        else if (this.stage == 131) { this.awaitOne(name: "a layout's minBindingSize of 2^60 is taken, and a group under it is a validation error naming its label, not the end of the program", label: "under a huge minimum", says: "", next: 140); }
+        else if (this.stage == 140) { this.refusedSampler(); }
+        else if (this.stage == 141) { this.awaitOne(name: "a refused sampler's error is its own", label: "refused", says: "not a finite number", next: 142); }
+        else if (this.stage == 142) { this.group(label: "with a refused sampler", kind: 6); }
+        else if (this.stage == 143) { this.awaitOne(name: "the sampler a refusal hands back is invalid: a bind group of it is a validation error naming its label", label: "with a refused sampler", says: "", next: 150); }
+        else if (this.stage == 150) { this.fiveGroups(); }
+        else if (this.stage == 151) { this.awaitOne(name: "a pipeline layout past maxBindGroups is a validation error naming its label", label: "five groups", says: "", next: 160); }
+        else if (this.stage == 160) { this.group(label: "far size", kind: 7); }
+        else if (this.stage == 161) { this.awaitOne(name: "a bind group binding 2^60 bytes is a validation error naming its label, not the end of the program", label: "far size", says: "", next: 170); }
+        else if (this.stage == 170) { this.vertexStorage(); }
+        else if (this.stage == 171) { this.awaitOne(name: "a layout with a writable storage buffer seen by the vertex stage is a validation error naming its label", label: "vertex storage", says: "", next: 180); }
+        else if (this.stage == 180) { this.notComparing(); }
+        else if (this.stage == 181) { this.awaitOne(name: "a bind group with a plain sampler where its layout wants a comparison one is a validation error naming its label", label: "not comparing", says: "", next: 999); }
+        return this.stage >= 999;
     }
 
     unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
@@ -75,12 +112,12 @@ type resource BindingRun {
                 this.instance = Optional::Some(value: give inst);
                 this.next(to: 1);
             }
-            case Err(error: e): { string why = e.message(); this.found.add(name: "an instance for the binding cases", why: give why); this.next(to: 99); }
+            case Err(error: e): { string why = e.message(); this.found.add(name: "an instance for the binding cases", why: give why); this.next(to: 999); }
         };
     }
 
     unsafe fn void awaitAdapter() {
-        if (this.adapterRequest.isNone()) { this.next(to: 99); return; }
+        if (this.adapterRequest.isNone()) { this.next(to: 999); return; }
         AdapterStatus s = match (this.adapterRequest) {
             case Some(value: r): r.poll();
             case None: AdapterStatus::Failed(error: GpuError::Taken);
@@ -101,13 +138,13 @@ type resource BindingRun {
                     string why = e.message();
                     this.found.add(name: "an adapter for the binding cases", why: give why);
                 }
-                this.next(to: 99);
+                this.next(to: 999);
             }
         };
     }
 
     unsafe fn void awaitDevice() {
-        if (this.deviceRequest.isNone()) { this.next(to: 99); return; }
+        if (this.deviceRequest.isNone()) { this.next(to: 999); return; }
         DeviceStatus s = match (this.deviceRequest) {
             case Some(value: r): r.poll();
             case None: DeviceStatus::Failed(error: GpuError::Taken);
@@ -121,7 +158,7 @@ type resource BindingRun {
                 this.queue = Optional::Some(value: give q);
                 this.next(to: 10);
             }
-            case Failed(error: e): { string why = e.message(); this.found.add(name: "a device for the binding cases", why: give why); this.next(to: 99); }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a device for the binding cases", why: give why); this.next(to: 999); }
         };
     }
 
@@ -168,6 +205,198 @@ type resource BindingRun {
         };
         this.found.add(name: copy name, why: give why);
         this.next(to: next);
+    }
+
+    // Layouts WebGPU takes, and a pipeline layout of two of them: no error.
+    unsafe fn void goodLayouts() {
+        match (this.device) {
+            case Some(value: d): {
+                BindGroupLayout first = uniformAndSampler(d: d, minimum: 16);
+                BindGroupLayoutDescriptor l = BindGroupLayoutDescriptor.make();
+                l.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: TextureBindingLayout.make()));
+                BufferBindingLayout rows = BufferBindingLayout.make();
+                rows.kind = BufferBindingType::ReadOnlyStorage;
+                l.entry(binding: 1, visibility: ShaderStage::Vertex, layout: BindingLayout::Buffer(layout: rows));
+                l.entry(binding: 2, visibility: ShaderStage::Fragment,
+                        layout: BindingLayout::StorageTexture(layout: StorageTextureBindingLayout.make(format: TextureFormat::RGBA8Unorm)));
+                SamplerBindingLayout comparing = SamplerBindingLayout.make();
+                comparing.kind = SamplerBindingType::Comparison;
+                l.entry(binding: 3, visibility: ShaderStage::Fragment, layout: BindingLayout::Sampler(layout: comparing));
+                l.label(text: "texture, rows, storage and comparison");
+                BindGroupLayout second = d.createBindGroupLayout(descriptor: give l);
+                PipelineLayoutDescriptor p = PipelineLayoutDescriptor.make();
+                p.group(layout: copy first);
+                p.group(layout: copy second);
+                p.label(text: "two groups");
+                PipelineLayout made = d.createPipelineLayout(descriptor: give p);
+                PipelineLayout kept = copy made;
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 61);
+    }
+
+    unsafe fn void duplicated() {
+        match (this.device) {
+            case Some(value: d): {
+                BindGroupLayoutDescriptor l = BindGroupLayoutDescriptor.make();
+                l.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Buffer(layout: BufferBindingLayout.make()));
+                l.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Buffer(layout: BufferBindingLayout.make()));
+                l.label(text: "duplicated");
+                BindGroupLayout made = d.createBindGroupLayout(descriptor: give l);
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 71);
+    }
+
+    // Bind groups WebGPU takes: a buffer whole and a range of one, a sampler, and a texture's view; no error.
+    unsafe fn void goodGroups() {
+        match (this.device) {
+            case Some(value: d): {
+                BindGroupLayout layout = uniformAndSampler(d: d, minimum: 16);
+                Buffer ubo = uniforms(d: d);
+                BindGroupDescriptor whole = BindGroupDescriptor.make(layout: copy layout);
+                whole.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: copy ubo)));
+                whole.entry(binding: 1, resource: BindingResource::Sampler(sampler: plainSampler(d: d)));
+                whole.label(text: "whole");
+                BindGroup a = d.createBindGroup(descriptor: give whole);
+                BindGroupDescriptor ranged = BindGroupDescriptor.make(layout: copy layout);
+                ranged.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.range(buffer: copy ubo, offset: 256, size: 64)));
+                ranged.entry(binding: 1, resource: BindingResource::Sampler(sampler: plainSampler(d: d)));
+                ranged.label(text: "ranged");
+                BindGroup b = d.createBindGroup(descriptor: give ranged);
+                BindGroupDescriptor rest = BindGroupDescriptor.make(layout: copy layout);
+                rest.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.rest(buffer: copy ubo, offset: 256)));
+                rest.entry(binding: 1, resource: BindingResource::Sampler(sampler: plainSampler(d: d)));
+                rest.label(text: "the rest");
+                BindGroup c = d.createBindGroup(descriptor: give rest);
+                BindGroup kept = copy c;
+
+                BindGroupLayoutDescriptor tl = BindGroupLayoutDescriptor.make();
+                tl.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: TextureBindingLayout.make()));
+                tl.label(text: "a texture");
+                BindGroupLayout textureLayout = d.createBindGroupLayout(descriptor: give tl);
+                Texture image = d.createTexture(width: 4, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding);
+                BindGroupDescriptor textured = BindGroupDescriptor.make(layout: give textureLayout);
+                textured.entry(binding: 0, resource: BindingResource::Texture(view: image.createView()));
+                textured.label(text: "textured");
+                BindGroup e = d.createBindGroup(descriptor: give textured);
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 81);
+    }
+
+    // A bind group of the uniform-and-sampler layout that WebGPU refuses: 1 a binding missing, 2 a sampler where the
+    // buffer is, 3 an empty range, 4 a range at 2^60, 5 under a layout's minBindingSize of 2^60, 6 a refused sampler.
+    unsafe fn void group(const ref string label, int32 kind) {
+        Optional<Sampler> refusedOne = replace(place: this.refused, with: Optional::None);
+        match (this.device) {
+            case Some(value: d): {
+                uint64 minimum = kind == 5 ? 1152921504606846976 : 16;
+                BindGroupLayout layout = uniformAndSampler(d: d, minimum: minimum);
+                Buffer ubo = uniforms(d: d);
+                BindGroupDescriptor g = BindGroupDescriptor.make(layout: give layout);
+                Sampler second = match (give refusedOne) { case Some(value: s): give s; case None: plainSampler(d: d); };
+                if (kind == 2) {
+                    Buffer unused = give ubo;
+                    g.entry(binding: 0, resource: BindingResource::Sampler(sampler: plainSampler(d: d)));
+                } else if (kind == 3) {
+                    g.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.range(buffer: give ubo, offset: 0, size: 0)));
+                } else if (kind == 7) {
+                    g.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.range(buffer: give ubo, offset: 0, size: 1152921504606846976)));
+                } else if (kind == 4) {
+                    g.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.range(buffer: give ubo, offset: 1152921504606846976, size: 64)));
+                } else {
+                    g.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: give ubo)));
+                }
+                if (kind == 1) {
+                    Sampler unusedSecond = give second;
+                } else {
+                    g.entry(binding: 1, resource: BindingResource::Sampler(sampler: give second));
+                }
+                g.label(text: copy label);
+                BindGroup made = d.createBindGroup(descriptor: give g);
+            }
+            case None: { Optional<Sampler> unused = give refusedOne; }
+        };
+        this.flush();
+        this.next(to: this.stage + 1);
+    }
+
+    // A read-write storage buffer seen by the vertex stage, which WebGPU refuses.
+    unsafe fn void vertexStorage() {
+        match (this.device) {
+            case Some(value: d): {
+                BindGroupLayoutDescriptor l = BindGroupLayoutDescriptor.make();
+                BufferBindingLayout written = BufferBindingLayout.make();
+                written.kind = BufferBindingType::Storage;
+                l.entry(binding: 0, visibility: ShaderStage::Vertex, layout: BindingLayout::Buffer(layout: written));
+                l.label(text: "vertex storage");
+                BindGroupLayout made = d.createBindGroupLayout(descriptor: give l);
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 171);
+    }
+
+    // A comparison sampler's binding given a plain sampler, which WebGPU refuses.
+    unsafe fn void notComparing() {
+        match (this.device) {
+            case Some(value: d): {
+                BindGroupLayoutDescriptor l = BindGroupLayoutDescriptor.make();
+                SamplerBindingLayout comparing = SamplerBindingLayout.make();
+                comparing.kind = SamplerBindingType::Comparison;
+                l.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Sampler(layout: comparing));
+                l.label(text: "a comparison");
+                BindGroupLayout layout = d.createBindGroupLayout(descriptor: give l);
+                BindGroupDescriptor g = BindGroupDescriptor.make(layout: give layout);
+                g.entry(binding: 0, resource: BindingResource::Sampler(sampler: plainSampler(d: d)));
+                g.label(text: "not comparing");
+                BindGroup made = d.createBindGroup(descriptor: give g);
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 181);
+    }
+
+    // A sampler refused for a NaN clamp, kept for a bind group: its own error first.
+    unsafe fn void refusedSampler() {
+        Optional<Sampler> made = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                SamplerDescriptor s = SamplerDescriptor.make();
+                s.lodClamp(min: notANumber(), max: 32.0);
+                s.label(text: "refused");
+                made = Optional::Some(value: d.createSampler(descriptor: give s));
+            }
+            case None: { }
+        };
+        this.refused = give made;
+        this.flush();
+        this.next(to: 141);
+    }
+
+    unsafe fn void fiveGroups() {
+        match (this.device) {
+            case Some(value: d): {
+                BindGroupLayout one = uniformAndSampler(d: d, minimum: 16);
+                PipelineLayoutDescriptor p = PipelineLayoutDescriptor.make();
+                int32 i = 0;
+                while (i < 5) { p.group(layout: copy one); i = i + 1; }
+                p.label(text: "five groups");
+                PipelineLayout made = d.createPipelineLayout(descriptor: give p);
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 151);
     }
 
     // Samplers WebGPU takes: no error.
@@ -254,6 +483,30 @@ type resource BindingRun {
         this.flush();
         this.next(to: 51);
     }
+}
+
+// A layout of a uniform buffer seen by both stages and a sampler seen by the fragment stage, its uniform at least
+// `minimum` bytes.
+unsafe fn BindGroupLayout uniformAndSampler(ref Device d, uint64 minimum) {
+    BindGroupLayoutDescriptor l = BindGroupLayoutDescriptor.make();
+    BufferBindingLayout uniform = BufferBindingLayout.make();
+    uniform.minBindingSize = minimum;
+    l.entry(binding: 0, visibility: ShaderStage::Vertex | ShaderStage::Fragment, layout: BindingLayout::Buffer(layout: uniform));
+    l.entry(binding: 1, visibility: ShaderStage::Fragment, layout: BindingLayout::Sampler(layout: SamplerBindingLayout.make()));
+    l.label(text: "uniform and sampler");
+    return d.createBindGroupLayout(descriptor: give l);
+}
+
+unsafe fn Buffer uniforms(ref Device d) {
+    BufferDescriptor b = BufferDescriptor.make(size: 512, usage: BufferUsage::Uniform | BufferUsage::CopyDst);
+    b.label(text: "uniforms");
+    return d.createBuffer(descriptor: give b);
+}
+
+unsafe fn Sampler plainSampler(ref Device d) {
+    SamplerDescriptor s = SamplerDescriptor.make();
+    s.label(text: "plain");
+    return d.createSampler(descriptor: give s);
 }
 
 // The channel's reports, for a failure's words.
