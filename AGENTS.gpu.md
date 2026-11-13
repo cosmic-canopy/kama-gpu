@@ -780,6 +780,28 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
         - whole sizes clamped;
         - visibility, the buffer kind, the comparison kind, the view dimension, the sample type, the groups, a texture
           view, both labels and a binding's number each lost.
+    - **`queue.writeBuffer(buffer:, offset:, data:)` (decision 4), with decision 9's refusal and the native flush:**
+      - `data` is a `ConstView<uint8>`. A `Queue` holds a reference on its device, which carries its refusals.
+      - Natively the device's state keeps a reference on its queue, and a map starts with an empty submit, so the map
+        sees every earlier write.
+      - The cases, on both legs:
+        - a write is seen by a map with no submit between, and so is a second write at an offset;
+        - a 6-byte write is one validation error in the package's words, and writes nothing;
+        - a write at an offset of 2^60 is a validation error;
+        - a write into a buffer without CopyDst is one, naming its label;
+        - a map made after the queue's last copy is gone still sees the write made through it.
+      - `tests/` is 141 cases natively, 118 in Edge and Chrome for Testing, and 21 in Firefox. COVERAGE.md: 72 of 206.
+      - **Mutations: 11 of 11 caught:**
+        - the native flush, the queue kept for it, and the map's state each gone (a map read 0 where 1 was written);
+        - the byte count never refused (natively the words were wgpu's; in Edge the program ended);
+        - the refusal not reported;
+        - the offset not clamped (Edge), and ignored;
+        - the size cut;
+        - the queue's device not referenced (the process died);
+        - the kept queue not referenced, caught only once a case mapped after the queue's last copy was dropped.
+
+    **Part 2 is done.** Part 3 is next: render pipelines both ways, with `ColorWriteMask` typed (decision 6), and a
+    pipeline's descriptor held to decision 9.
 
 ## Where the truth is
 

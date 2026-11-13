@@ -29,14 +29,14 @@
 
 import {
     TextureFormat,
-    std::collections::DynamicArray,
+    std::collections::DynamicArray, std::collections::ConstView,
     std::memory::Shared,
     std::encoding::utf8::decode, std::encoding::utf8::Utf8Error, std::num::float32Max,
     gpu::native::createInstance, gpu::native::instanceAddRef, gpu::native::instanceRelease,
     gpu::native::adapterAddRef, gpu::native::adapterRelease, gpu::native::adapterGetLimits,
     gpu::native::deviceAddRef, gpu::native::deviceRelease, gpu::native::deviceGetQueue, gpu::native::deviceGetLimits,
     gpu::native::deviceCreateBuffer, gpu::native::deviceCreateTexture, gpu::native::deviceCreateCommandEncoder,
-    gpu::native::queueAddRef, gpu::native::queueRelease, gpu::native::queueSubmit,
+    gpu::native::queueAddRef, gpu::native::queueRelease, gpu::native::queueSubmit, gpu::native::queueWriteBuffer,
     gpu::native::bufferAddRef, gpu::native::bufferRelease, gpu::native::bufferGetSize,
     gpu::native::textureAddRef, gpu::native::textureRelease, gpu::native::textureCreateView,
     gpu::native::textureViewAddRef, gpu::native::textureViewRelease,
@@ -1204,6 +1204,22 @@ type resource Queue implements Copyable<This>(bare: give) {
     // Hand `commands` to the GPU; the command buffer is spent. Natively a command buffer whose finish reported an error
     // is not submitted, since wgpu-native would end the process (tests/facts, `abort-submit`): its error is in the
     // device's channel or a scope already, and a browser refuses the same submit after reporting it.
+    // `data` written into `buffer` at `offset` (WebGPU's `writeBuffer`; AGENTS.gpu.md item 12, decision 4): before any
+    // later submit's work, and seen by any later map. A byte count not a multiple of 4 is refused in the package's words,
+    // where a browser would throw, and writes nothing; an offset past 2^53 - 1 is clamped (decision 9).
+    public unsafe fn void writeBuffer(const ref Buffer buffer, uint64 offset, ConstView<uint8> data) {
+        isize n = data.length();
+        if (n % 4 != 0) {
+            if (this.device != null) {
+                string words = "writeBuffer: ${n} bytes is not a multiple of 4, as WebGPU requires; nothing was written";
+                refuseOn(device: this.device, message: cast<UnsafeConstPtr<uint8>>(words.cstr()), length: cast<int32>(words.length()));
+            }
+            return;
+        }
+        queueWriteBuffer(queue: this.handle, buffer: buffer.raw(), bufferOffset: inRange(v: offset),
+                         data: cast<UnsafePtr>(data.dataPtr()), size: cast<usize>(n));
+    }
+
     public unsafe fn void submit(CommandBuffer commands) {
         if (commands.spoiled()) { return; }
         UnsafePtr one = commands.raw();

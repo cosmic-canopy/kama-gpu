@@ -13,7 +13,7 @@ From three headers, each by the sha256 of its text with LF line endings:
 - wgpu-native's wgpu.h `7bd23656d394f620a804b1f174444ea17082b6d330a2fca0c0e6b1121ec4b284`
 - emdawnwebgpu's webgpu.h `40e7ecd9647dc922e69d17d888d7038fbd5eb10277621eb414c8ffc278e353be`
 
-**webgpu.h: 71 of 206 called.** On both legs, 71 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
+**webgpu.h: 72 of 206 called.** On both legs, 72 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
 
 **wgpu.h, wgpu-native's own extensions, apart: 1 of 22 called.**
 
@@ -266,14 +266,14 @@ From three headers, each by the sha256 of its text with LF line endings:
 | `wgpuComputePassEncoderWriteTimestamp` | emdawnwebgpu; wgpu.h natively | no |
 | `wgpuRenderPassEncoderWriteTimestamp` | emdawnwebgpu; wgpu.h natively | no |
 
-### The queue, 3 of 7
+### The queue, 4 of 7
 
 | Function | Legs | Called |
 |---|---|---|
 | `wgpuQueueOnSubmittedWorkDone` | both | no |
 | `wgpuQueueSetLabel` | both | no |
 | `wgpuQueueSubmit` | both | yes |
-| `wgpuQueueWriteBuffer` | both | no |
+| `wgpuQueueWriteBuffer` | both | yes |
 | `wgpuQueueWriteTexture` | both | no |
 | `wgpuQueueAddRef` | both | yes |
 | `wgpuQueueRelease` | both | yes |

@@ -5,6 +5,13 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: `queue.writeBuffer(buffer:, offset:, data:)`** (2026-11-12, kama 0.9.938; GPU-4's second part,
+  AGENTS.gpu.md item 12, decisions 4 and 9):
+  - `data` is a `ConstView<uint8>`.
+  - A byte count not a multiple of 4 is a validation error in the package's words, and writes nothing.
+  - **Fixed natively:** a map now sees every write made before it, as WebGPU defines. wgpu-native kept writes until the
+    next submit, so a map with no submit between read the old bytes.
+
 - **New: bind group layouts, pipeline layouts and bind groups** (2026-11-12, kama 0.9.938; GPU-4's second part,
   AGENTS.gpu.md item 12, decisions 1 and 9):
   - `BindGroupLayoutDescriptor` with `entry(binding:, visibility:, layout:)`, where `layout` is a `BindingLayout`:

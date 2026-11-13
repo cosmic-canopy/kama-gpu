@@ -290,6 +290,15 @@ Dawn's is. Firefox reports places in UTF-16 units as Dawn does, the first error 
 - **`queue.submit(commands:)`,** which consumes the command buffer. Natively a command buffer whose `finish` reported
   an error is not submitted, since wgpu-native ends the process on that submit: its error is in the channel or a scope
   already, and a browser refuses the same submit after reporting it.
+- **`queue.writeBuffer(buffer:, offset:, data:)`,** `data` a `ConstView<uint8>`, which kama's byte views give only over a
+  type proved free of padding and pointers (`value.bytes()`, `list.view()`).
+  - The write lands before any later submit's work, and any later map sees it, on both legs. Natively the device's
+    queue is flushed by an empty submit as a map starts, since wgpu-native keeps writes until the next submit.
+  - What WebGPU refuses is a validation error: an offset not a multiple of 4, a range past the buffer, a buffer
+    without `CopyDst`, a mapped one.
+  - **A byte count not a multiple of 4 is refused in the package's words,** where a browser would throw, and nothing is
+    written. An offset past 2^53 - 1 is clamped.
+  - On an adopted queue, which has no device to report through, such a refusal is dropped.
 
 ## Surfaces
 

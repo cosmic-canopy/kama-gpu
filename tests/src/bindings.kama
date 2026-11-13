@@ -18,7 +18,8 @@ import {
     gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
     gpu::BufferBindingType, gpu::SamplerBindingLayout, gpu::SamplerBindingType, gpu::TextureBindingLayout,
     gpu::StorageTextureBindingLayout, gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::BindGroup,
-    gpu::BindGroupDescriptor, gpu::BindingResource, gpu::BufferBinding,
+    gpu::BindGroupDescriptor, gpu::BindingResource, gpu::BufferBinding, gpu::BufferRead, gpu::ReadStatus,
+    std::collections::DynamicArray,
     Verdicts,
 };
 export { BindingRun };
@@ -47,6 +48,8 @@ type resource BindingRun {
     Optional<Device> device = Optional::None;
     Optional<Queue> queue = Optional::None;
     Optional<Sampler> refused = Optional::None;   // a sampler refused for a NaN clamp, for a bind group
+    Optional<Buffer> written = Optional::None;    // the buffer the write cases write and map
+    Optional<BufferRead> reading = Optional::None;
 
     public ctor make(bool adapterOptional) {
         this.optional = adapterOptional;
@@ -98,7 +101,21 @@ type resource BindingRun {
         else if (this.stage == 170) { this.vertexStorage(); }
         else if (this.stage == 171) { this.awaitOne(name: "a layout with a writable storage buffer seen by the vertex stage is a validation error naming its label", label: "vertex storage", says: "", next: 180); }
         else if (this.stage == 180) { this.notComparing(); }
-        else if (this.stage == 181) { this.awaitOne(name: "a bind group with a plain sampler where its layout wants a comparison one is a validation error naming its label", label: "not comparing", says: "", next: 999); }
+        else if (this.stage == 181) { this.awaitOne(name: "a bind group with a plain sampler where its layout wants a comparison one is a validation error naming its label", label: "not comparing", says: "", next: 190); }
+        else if (this.stage == 190) { this.write(bytes: counted(n: 16, first: 1), offset: 0, flushed: false, next: 191); }
+        else if (this.stage == 191) { this.awaitRead(name: "a write is seen by a map made after it, with no submit between, on every leg", want: counted(n: 16, first: 1), next: 200); }
+        else if (this.stage == 200) { this.write(bytes: counted(n: 4, first: 99), offset: 4, flushed: false, next: 201); }
+        else if (this.stage == 201) { this.awaitRead(name: "and a second write, at an offset, is seen by the next map", want: secondWrite(), next: 210); }
+        else if (this.stage == 210) { this.write(bytes: counted(n: 6, first: 7), offset: 0, flushed: true, next: 211); }
+        else if (this.stage == 211) { this.awaitOne(name: "a write of 6 bytes, not a multiple of 4, is a validation error in the package's words, not the end of the program", label: "writeBuffer", says: "not a multiple of 4", next: 212); }
+        else if (this.stage == 212) { this.awaitRead(name: "and it writes nothing", want: secondWrite(), next: 220); }
+        else if (this.stage == 220) { this.write(bytes: counted(n: 4, first: 5), offset: 1152921504606846976, flushed: true, next: 221); }
+        else if (this.stage == 221) { this.awaitOne(name: "a write at an offset of 2^60 is a validation error, not the end of the program", label: "", says: "", next: 230); }
+        else if (this.stage == 230) { this.writeUnwritable(); }
+        else if (this.stage == 231) { this.awaitOne(name: "a write into a buffer without CopyDst is a validation error naming its label", label: "uniform only", says: "", next: 240); }
+        else if (this.stage == 240) { this.write(bytes: counted(n: 16, first: 50), offset: 0, flushed: false, next: 241); }
+        else if (this.stage == 241) { this.queue = Optional::None; this.next(to: 242); }
+        else if (this.stage == 242) { this.awaitRead(name: "a map made after the queue's last copy is gone still sees the write made through it", want: counted(n: 16, first: 50), next: 999); }
         return this.stage >= 999;
     }
 
@@ -328,14 +345,94 @@ type resource BindingRun {
         this.next(to: this.stage + 1);
     }
 
+    // `bytes` written into the write cases' buffer at `offset`, with no submit after: a 16-byte MapRead | CopyDst buffer
+    // labelled "written", made at the first write.
+    unsafe fn void write(DynamicArray<uint8> bytes, uint64 offset, bool flushed, int32 next) {
+        if (this.written.isNone()) {
+            Optional<Buffer> made = Optional::None;
+            match (this.device) {
+                case Some(value: d): {
+                    BufferDescriptor bd = BufferDescriptor.make(size: 16, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
+                    bd.label(text: "written");
+                    made = Optional::Some(value: d.createBuffer(descriptor: give bd));
+                }
+                case None: { }
+            };
+            this.written = give made;
+        }
+        match (this.written) {
+            case Some(value: b): {
+                match (this.queue) {
+                    case Some(value: q): { q.writeBuffer(buffer: b, offset: offset, data: bytes.view()); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        // a refused write is flushed, so its error reaches the channel on the web; a taken one is not, so the map that
+        // follows sees it with no submit between
+        if (flushed) { this.flush(); }
+        this.next(to: next);
+    }
+
+    // The write cases' buffer mapped and read, with no submit since the last write: its bytes are `want`.
+    unsafe fn void awaitRead(const ref string name, DynamicArray<uint8> want, int32 next) {
+        if (this.reading.isNone()) {
+            Optional<BufferRead> started = Optional::None;
+            match (this.written) {
+                case Some(value: b): { started = Optional::Some(value: b.mapRead(offset: 0, size: 16)); }
+                case None: { }
+            };
+            this.reading = give started;
+        }
+        match (this.device) { case Some(value: d): { d.poll(wait: true); } case None: { } };
+        ReadStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: ReadStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.waited < SETTLE) { return; }
+        string why = match (s) {
+            case Pending: "the map did not finish";
+            case Failed(error: e): e.message();
+            case Ready: "";
+        };
+        if (why.isEmpty()) {
+            DynamicArray<uint8> got = match (this.reading) { case Some(value: r): r.bytes(); case None: DynamicArray.empty(); };
+            why = sameBytes(got: got, want: want);
+        }
+        this.reading = Optional::None;   // unmapped, so the next write may land
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // A write into a buffer with no CopyDst, which WebGPU refuses.
+    unsafe fn void writeUnwritable() {
+        match (this.device) {
+            case Some(value: d): {
+                BufferDescriptor bd = BufferDescriptor.make(size: 16, usage: BufferUsage::Uniform);
+                bd.label(text: "uniform only");
+                Buffer b = d.createBuffer(descriptor: give bd);
+                DynamicArray<uint8> bytes = counted(n: 16, first: 0);
+                match (this.queue) {
+                    case Some(value: q): { q.writeBuffer(buffer: b, offset: 0, data: bytes.view()); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 231);
+    }
+
     // A read-write storage buffer seen by the vertex stage, which WebGPU refuses.
     unsafe fn void vertexStorage() {
         match (this.device) {
             case Some(value: d): {
                 BindGroupLayoutDescriptor l = BindGroupLayoutDescriptor.make();
-                BufferBindingLayout written = BufferBindingLayout.make();
-                written.kind = BufferBindingType::Storage;
-                l.entry(binding: 0, visibility: ShaderStage::Vertex, layout: BindingLayout::Buffer(layout: written));
+                BufferBindingLayout writable = BufferBindingLayout.make();
+                writable.kind = BufferBindingType::Storage;
+                l.entry(binding: 0, visibility: ShaderStage::Vertex, layout: BindingLayout::Buffer(layout: writable));
                 l.label(text: "vertex storage");
                 BindGroupLayout made = d.createBindGroupLayout(descriptor: give l);
             }
@@ -507,6 +604,41 @@ unsafe fn Sampler plainSampler(ref Device d) {
     SamplerDescriptor s = SamplerDescriptor.make();
     s.label(text: "plain");
     return d.createSampler(descriptor: give s);
+}
+
+// `n` bytes counting up from `first`.
+fn DynamicArray<uint8> counted(isize n, uint8 first) {
+    DynamicArray<uint8> list = DynamicArray.empty();
+    isize i = 0;
+    while (i < n) { list.add(item: first + truncate<uint8>(i)); i = i + 1; }
+    return list;
+}
+
+// The write cases' buffer after its second write: 1 to 16, with 99 to 102 at bytes 4 to 7.
+fn DynamicArray<uint8> secondWrite() {
+    DynamicArray<uint8> list = counted(n: 16, first: 1);
+    isize i = 0;
+    while (i < 4) { list[4 + i] = 99 + truncate<uint8>(i); i = i + 1; }
+    return list;
+}
+
+// "" when `got` is `want`, byte for byte.
+fn string sameBytes(const ref DynamicArray<uint8> got, const ref DynamicArray<uint8> want) {
+    if (got.length() != want.length()) {
+        isize g = got.length();
+        isize w = want.length();
+        return "${g} bytes, not ${w}";
+    }
+    isize i = 0;
+    while (i < got.length()) {
+        if (got[i] != want[i]) {
+            uint8 a = got[i];
+            uint8 b = want[i];
+            return "byte ${i} is ${a}, not ${b}";
+        }
+        i = i + 1;
+    }
+    return "";
 }
 
 // The channel's reports, for a failure's words.
