@@ -47,7 +47,7 @@ import {
     gpu::native::WGPUBufferDescriptor, gpu::native::WGPUTextureDescriptor, gpu::native::WGPURenderPassDescriptor,
     gpu::native::WGPURenderPassColorAttachment, gpu::native::WGPUTexelCopyTextureInfo,
     gpu::native::WGPUTexelCopyBufferInfo, gpu::native::WGPUExtent3D,
-    gpu::native::WGPUBufferUsage, gpu::native::WGPUTextureUsage, gpu::native::WGPUMapMode,
+    gpu::native::WGPUBufferUsage, gpu::native::WGPUTextureUsage, gpu::native::WGPUShaderStage, gpu::native::WGPUMapMode,
     gpu::native::WGPUTextureDimension, gpu::native::WGPULoadOp,
     gpu::native::WGPUStoreOp, gpu::native::WGPUTextureAspect, gpu::native::WGPUPowerPreference,
     gpu::native::WGPULimits, gpu::native::WGPUFeatureName, gpu::native::WGPUBackendType, gpu::native::WGPUAdapterType,
@@ -87,7 +87,7 @@ export {
     Limits, Feature, FeatureSet, DeviceOptions,
     Device, Queue, DeviceRequest, DeviceStatus, GpuError, PowerPreference,
     Buffer, BufferUsage, BufferRead, ReadStatus,
-    Texture, TextureUsage, TextureView,
+    Texture, TextureUsage, TextureView, ShaderStage,
     CommandEncoder, RenderPass, CommandBuffer, Color,
     Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
     GpuErrorKind, GpuErrorReport, DeviceErrors, DeviceLoss, LossReason, ErrorFilter, ErrorScope, ScopePop, PopStatus,
@@ -608,25 +608,74 @@ type value DeviceOptions {
     public ctor defaults() { }
 }
 
-// Usage flags, OR'd together: `BufferUsage::MapRead | BufferUsage::CopyDst`.
+// WebGPU's flag sets (AGENTS.gpu.md item 12, decision 6). Each is a type of its own, as kama's flag sets are
+// (`std::fs::Permissions`): its members are sets of one, joined with `|` (`BufferUsage::MapRead | BufferUsage::CopyDst`)
+// and read with `has(flags:)`, so one set cannot stand where another is wanted, though webgpu.h gives them the same
+// numbers (TextureUsage CopyDst, BufferUsage MapWrite and ShaderStage Fragment are each 2). There is no empty set:
+// WebGPU refuses a buffer or a texture with no usage. `bits()` is webgpu.h's number, for a program that binds more of
+// webgpu.h with its own externs.
+
+// A buffer's usages (WebGPU's `GPUBufferUsageFlags`).
+@generate(Equatable)
 type value BufferUsage {
-    public comptime uint64 MapRead = WGPUBufferUsage::MapRead;
-    public comptime uint64 MapWrite = WGPUBufferUsage::MapWrite;
-    public comptime uint64 CopySrc = WGPUBufferUsage::CopySrc;
-    public comptime uint64 CopyDst = WGPUBufferUsage::CopyDst;
-    public comptime uint64 Index = WGPUBufferUsage::Index;
-    public comptime uint64 Vertex = WGPUBufferUsage::Vertex;
-    public comptime uint64 Uniform = WGPUBufferUsage::Uniform;
-    public comptime uint64 Storage = WGPUBufferUsage::Storage;
-    public comptime uint64 Indirect = WGPUBufferUsage::Indirect;
+    uint64 mask;
+
+    ctor fromBits(uint64 bits) { this.mask = bits; }
+
+    public comptime BufferUsage MapRead = BufferUsage.fromBits(bits: WGPUBufferUsage::MapRead);
+    public comptime BufferUsage MapWrite = BufferUsage.fromBits(bits: WGPUBufferUsage::MapWrite);
+    public comptime BufferUsage CopySrc = BufferUsage.fromBits(bits: WGPUBufferUsage::CopySrc);
+    public comptime BufferUsage CopyDst = BufferUsage.fromBits(bits: WGPUBufferUsage::CopyDst);
+    public comptime BufferUsage Index = BufferUsage.fromBits(bits: WGPUBufferUsage::Index);
+    public comptime BufferUsage Vertex = BufferUsage.fromBits(bits: WGPUBufferUsage::Vertex);
+    public comptime BufferUsage Uniform = BufferUsage.fromBits(bits: WGPUBufferUsage::Uniform);
+    public comptime BufferUsage Storage = BufferUsage.fromBits(bits: WGPUBufferUsage::Storage);
+    public comptime BufferUsage Indirect = BufferUsage.fromBits(bits: WGPUBufferUsage::Indirect);
+
+    // Every usage either side has.
+    public BufferUsage operator|(BufferUsage rhs) { return BufferUsage.fromBits(bits: this.mask | rhs.mask); }
+    // Does this set hold every usage of `flags`?
+    public const fn bool has(BufferUsage flags) { return (this.mask & flags.mask) == flags.mask; }
+    public const fn uint64 bits() { return this.mask; }
 }
 
+// A texture's usages (WebGPU's `GPUTextureUsageFlags`).
+@generate(Equatable)
 type value TextureUsage {
-    public comptime uint64 CopySrc = WGPUTextureUsage::CopySrc;
-    public comptime uint64 CopyDst = WGPUTextureUsage::CopyDst;
-    public comptime uint64 TextureBinding = WGPUTextureUsage::TextureBinding;
-    public comptime uint64 StorageBinding = WGPUTextureUsage::StorageBinding;
-    public comptime uint64 RenderAttachment = WGPUTextureUsage::RenderAttachment;
+    uint64 mask;
+
+    ctor fromBits(uint64 bits) { this.mask = bits; }
+    friend capabilitiesOf[fromBits];
+
+    public comptime TextureUsage CopySrc = TextureUsage.fromBits(bits: WGPUTextureUsage::CopySrc);
+    public comptime TextureUsage CopyDst = TextureUsage.fromBits(bits: WGPUTextureUsage::CopyDst);
+    public comptime TextureUsage TextureBinding = TextureUsage.fromBits(bits: WGPUTextureUsage::TextureBinding);
+    public comptime TextureUsage StorageBinding = TextureUsage.fromBits(bits: WGPUTextureUsage::StorageBinding);
+    public comptime TextureUsage RenderAttachment = TextureUsage.fromBits(bits: WGPUTextureUsage::RenderAttachment);
+
+    // Every usage either side has.
+    public TextureUsage operator|(TextureUsage rhs) { return TextureUsage.fromBits(bits: this.mask | rhs.mask); }
+    // Does this set hold every usage of `flags`?
+    public const fn bool has(TextureUsage flags) { return (this.mask & flags.mask) == flags.mask; }
+    public const fn uint64 bits() { return this.mask; }
+}
+
+// The shader stages a binding is seen by (WebGPU's `GPUShaderStageFlags`).
+@generate(Equatable)
+type value ShaderStage {
+    uint64 mask;
+
+    ctor fromBits(uint64 bits) { this.mask = bits; }
+
+    public comptime ShaderStage Vertex = ShaderStage.fromBits(bits: WGPUShaderStage::Vertex);
+    public comptime ShaderStage Fragment = ShaderStage.fromBits(bits: WGPUShaderStage::Fragment);
+    public comptime ShaderStage Compute = ShaderStage.fromBits(bits: WGPUShaderStage::Compute);
+
+    // Every stage either side has.
+    public ShaderStage operator|(ShaderStage rhs) { return ShaderStage.fromBits(bits: this.mask | rhs.mask); }
+    // Does this set hold every stage of `flags`?
+    public const fn bool has(ShaderStage flags) { return (this.mask & flags.mask) == flags.mask; }
+    public const fn uint64 bits() { return this.mask; }
 }
 
 // A colour, each channel 0 to 1, made memberwise: `Color.of(r: 0.1, g: 0.2, b: 0.3, a: 1.0)`.
@@ -960,19 +1009,19 @@ type resource Device implements Copyable<This>(bare: give) {
         return featuresFrom(names: names, count: n);
     }
 
-    // A buffer of `size` bytes for `usage` (BufferUsage flags OR'd together).
-    public unsafe fn Buffer createBuffer(uint64 size, uint64 usage) {
+    // A buffer of `size` bytes for `usage`.
+    public unsafe fn Buffer createBuffer(uint64 size, BufferUsage usage) {
         WGPUBufferDescriptor d = WGPUBufferDescriptor.zero();
         d.size = size;
-        d.usage = usage;
+        d.usage = usage.bits();
         return Buffer.fromDevice(raw: deviceCreateBuffer(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))),
                                  block: this.hold.raw());
     }
 
     // A 2D texture, one mip level, one sample.
-    public unsafe fn Texture createTexture(uint32 width, uint32 height, TextureFormat format, uint64 usage) {
+    public unsafe fn Texture createTexture(uint32 width, uint32 height, TextureFormat format, TextureUsage usage) {
         WGPUTextureDescriptor d = WGPUTextureDescriptor.zero();
-        d.usage = usage;
+        d.usage = usage.bits();
         d.dimension = WGPUTextureDimension::N2D;
         d.size.width = width;
         d.size.height = height;
@@ -1774,14 +1823,14 @@ fn string joined(const ref string acc, const ref string next) {
     return "${acc}, ${next}";
 }
 
-// TextureUsage flags by name.
-fn string usageNames(uint64 usage) {
+// A texture's usages by name.
+fn string usageNames(TextureUsage usage) {
     string acc = "";
-    if ((usage & TextureUsage::RenderAttachment) != 0) { acc = joined(acc: acc, next: "RenderAttachment"); }
-    if ((usage & TextureUsage::TextureBinding) != 0) { acc = joined(acc: acc, next: "TextureBinding"); }
-    if ((usage & TextureUsage::StorageBinding) != 0) { acc = joined(acc: acc, next: "StorageBinding"); }
-    if ((usage & TextureUsage::CopySrc) != 0) { acc = joined(acc: acc, next: "CopySrc"); }
-    if ((usage & TextureUsage::CopyDst) != 0) { acc = joined(acc: acc, next: "CopyDst"); }
+    if (usage.has(flags: TextureUsage::RenderAttachment)) { acc = joined(acc: acc, next: "RenderAttachment"); }
+    if (usage.has(flags: TextureUsage::TextureBinding)) { acc = joined(acc: acc, next: "TextureBinding"); }
+    if (usage.has(flags: TextureUsage::StorageBinding)) { acc = joined(acc: acc, next: "StorageBinding"); }
+    if (usage.has(flags: TextureUsage::CopySrc)) { acc = joined(acc: acc, next: "CopySrc"); }
+    if (usage.has(flags: TextureUsage::CopyDst)) { acc = joined(acc: acc, next: "CopyDst"); }
     if (acc.isEmpty()) { return "none"; }
     return acc;
 }
@@ -1793,11 +1842,11 @@ type value SurfaceConfig {
     public TextureFormat viewFormat;   // the format frames are drawn through: `format`, or its sRGB or linear form
     public PresentMode present;
     public AlphaMode alpha;
-    public uint64 usage;               // TextureUsage flags, OR'd together
+    public TextureUsage usage;         // what the surface's textures are used for
 
     friend SurfaceCapabilities::preferred[make];
 
-    ctor make(TextureFormat format, TextureFormat viewFormat, PresentMode present, AlphaMode alpha, uint64 usage) {
+    ctor make(TextureFormat format, TextureFormat viewFormat, PresentMode present, AlphaMode alpha, TextureUsage usage) {
         this.format = format;
         this.viewFormat = viewFormat;
         this.present = present;
@@ -1814,7 +1863,7 @@ type resource SurfaceCapabilities {
     DynamicArray<TextureFormat> formatList;
     DynamicArray<PresentMode> presentList;
     DynamicArray<AlphaMode> alphaList;
-    uint64 usageBits;
+    TextureUsage usageSet;
 
     friend Surface::configure[refuses];
 
@@ -1822,7 +1871,7 @@ type resource SurfaceCapabilities {
     // (the web's, natively). Safe to hand in anything, since `configure` checks against the surface's own answer.
     public ctor Result<SurfaceCapabilities, GpuError> make(DynamicArray<TextureFormat> formats,
                                                         DynamicArray<PresentMode> presentModes,
-                                                        DynamicArray<AlphaMode> alphaModes, uint64 usages) {
+                                                        DynamicArray<AlphaMode> alphaModes, TextureUsage usages) {
         if (formats.length() == 0) { return Result::Err(error: GpuError::Refused(words: "the surface offers no format")); }
         bool fifo = false;
         isize i = 0;
@@ -1831,24 +1880,24 @@ type resource SurfaceCapabilities {
             return Result::Err(error: GpuError::Refused(words: "the surface does not offer Fifo, which webgpu.h promises"));
         }
         if (alphaModes.length() == 0) { return Result::Err(error: GpuError::Refused(words: "the surface offers no alpha mode")); }
-        if ((usages & TextureUsage::RenderAttachment) == 0) {
+        if (!usages.has(flags: TextureUsage::RenderAttachment)) {
             return Result::Err(error: GpuError::Refused(words: "the surface does not offer RenderAttachment, which webgpu.h promises"));
         }
         return Result::Ok(value: SurfaceCapabilities.of(formats: give formats, presentModes: give presentModes,
                                                         alphaModes: give alphaModes, usages: usages));
     }
     ctor of(DynamicArray<TextureFormat> formats, DynamicArray<PresentMode> presentModes, DynamicArray<AlphaMode> alphaModes,
-            uint64 usages) {
+            TextureUsage usages) {
         this.formatList = give formats;
         this.presentList = give presentModes;
         this.alphaList = give alphaModes;
-        this.usageBits = usages;
+        this.usageSet = usages;
     }
 
     public const fn const ref DynamicArray<TextureFormat> formats() { return this.formatList; }
     public const fn const ref DynamicArray<PresentMode> presentModes() { return this.presentList; }
     public const fn const ref DynamicArray<AlphaMode> alphaModes() { return this.alphaList; }
-    public const fn uint64 usages() { return this.usageBits; }
+    public const fn TextureUsage usages() { return this.usageSet; }
 
     // Where to start: the first format, drawn through its sRGB form when it has one (itself when it is one); Fifo; the
     // first alpha mode; RenderAttachment.
@@ -1903,10 +1952,9 @@ type resource SurfaceCapabilities {
             string a = config.alpha.name();
             return "the surface does not offer alpha mode ${a}; it offers ${alphas}";
         }
-        if (config.usage == 0) { return "no usage: a surface's textures need at least one"; }
-        if ((config.usage & this.usageBits) != config.usage) {
+        if (!this.usageSet.has(flags: config.usage)) {
             string asked = usageNames(usage: config.usage);
-            string offered = usageNames(usage: this.usageBits);
+            string offered = usageNames(usage: this.usageSet);
             return "the surface does not offer usage ${asked}; it offers ${offered}";
         }
         return "";
@@ -1926,7 +1974,9 @@ fn uint32 handedOver(uint32 pixels) { return pixels; }
 @compileFor(ARCH_WASM32)
 fn uint64 answeredUsages(uint64 got) {
     if (got != 0) { return got; }
-    return TextureUsage::RenderAttachment | TextureUsage::TextureBinding | TextureUsage::CopySrc | TextureUsage::CopyDst;
+    TextureUsage canvas = TextureUsage::RenderAttachment | TextureUsage::TextureBinding | TextureUsage::CopySrc
+                          | TextureUsage::CopyDst;
+    return canvas.bits();
 }
 @compileFor(!ARCH_WASM32)
 fn uint64 answeredUsages(uint64 got) { return got; }
@@ -1965,7 +2015,7 @@ unsafe fn Result<SurfaceCapabilities, GpuError> capabilitiesOf(UnsafePtr surface
         match (a) { case Some(value: x): { alphas.add(item: x); } case None: { } };
         i = i + 1;
     }
-    uint64 usages = answeredUsages(got: raw.usages);
+    TextureUsage usages = TextureUsage.fromBits(bits: answeredUsages(got: raw.usages));
     surfaceCapabilitiesFreeMembers(surfaceCapabilities: raw);
     return SurfaceCapabilities.make(formats: give formats, presentModes: give presents, alphaModes: give alphas, usages: usages);
 }
@@ -2083,7 +2133,7 @@ type resource Surface implements Copyable<This>(bare: give) {
         WGPUSurfaceConfiguration c = WGPUSurfaceConfiguration.zero();
         c.device = device.raw();
         c.format = config.format.value();
-        c.usage = config.usage;
+        c.usage = config.usage.bits();
         c.width = handedOver(pixels: width);
         c.height = handedOver(pixels: height);
         InlineArray<int32>#(1) views = [0; 1];

@@ -25,7 +25,7 @@ import {
     gpu::Backend, gpu::Limits, gpu::Feature, gpu::FeatureSet, gpu::DeviceOptions,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError,
     gpu::PowerPreference, gpu::Buffer, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::Texture,
-    gpu::TextureFormat, gpu::TextureUsage, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass,
+    gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass,
     gpu::CommandBuffer, gpu::Color,
     gpu::DeviceErrors, gpu::GpuErrorReport, gpu::GpuErrorKind, gpu::DeviceLoss, gpu::LossReason,
     gpu::ErrorFilter, gpu::ErrorScope, gpu::ScopePop, gpu::PopStatus,
@@ -321,7 +321,7 @@ fn string described(const ref SurfaceConfig c) {
     string v = c.viewFormat.name();
     string p = c.present.name();
     string a = c.alpha.name();
-    uint64 u = c.usage;
+    uint64 u = c.usage.bits();
     return "${f} through ${v}, ${p}, ${a}, usage ${u}";
 }
 
@@ -383,9 +383,55 @@ fn string acquireFailures() {
     return "";
 }
 
+// WebGPU's flag sets, each a type of its own (AGENTS.gpu.md item 12, decision 6); that one cannot stand for another, and
+// that no empty set can be written, is tests/xfail/usage_mixed's. "" when each set's bits are webgpu.h's.
+fn string flagBits() {
+    uint64 b = (BufferUsage::MapRead | BufferUsage::CopyDst).bits();
+    uint64 v = (BufferUsage::Vertex | BufferUsage::Index | BufferUsage::Uniform | BufferUsage::Storage
+                | BufferUsage::Indirect | BufferUsage::MapWrite | BufferUsage::CopySrc).bits();
+    uint64 t = (TextureUsage::RenderAttachment | TextureUsage::CopySrc).bits();
+    uint64 u = (TextureUsage::TextureBinding | TextureUsage::StorageBinding | TextureUsage::CopyDst).bits();
+    uint64 s = (ShaderStage::Vertex | ShaderStage::Fragment).bits();
+    uint64 c = ShaderStage::Compute.bits();
+    if (b != 0x9 || v != 0x1F6 || t != 0x11 || u != 0xE || s != 0x3 || c != 0x4) {
+        return "buffer ${b} and ${v}, texture ${t} and ${u}, stages ${s} and ${c}";
+    }
+    return "";
+}
+
+// "" when `has` answers for every flag asked for, and only those.
+fn string flagHas() {
+    BufferUsage read = BufferUsage::MapRead | BufferUsage::CopyDst;
+    if (!read.has(flags: BufferUsage::CopyDst)) { return "MapRead | CopyDst lacks CopyDst"; }
+    if (!read.has(flags: BufferUsage::CopyDst | BufferUsage::MapRead)) { return "MapRead | CopyDst lacks both"; }
+    if (read.has(flags: BufferUsage::Vertex)) { return "MapRead | CopyDst has Vertex"; }
+    if (read.has(flags: BufferUsage::CopyDst | BufferUsage::Vertex)) { return "MapRead | CopyDst has CopyDst | Vertex"; }
+    TextureUsage target = TextureUsage::RenderAttachment | TextureUsage::CopySrc;
+    if (!target.has(flags: TextureUsage::RenderAttachment) || target.has(flags: TextureUsage::CopyDst)) {
+        return "RenderAttachment | CopySrc answered wrongly";
+    }
+    ShaderStage seen = ShaderStage::Vertex | ShaderStage::Fragment;
+    if (!seen.has(flags: ShaderStage::Fragment) || seen.has(flags: ShaderStage::Compute)
+        || seen.has(flags: ShaderStage::Fragment | ShaderStage::Compute)) {
+        return "Vertex | Fragment answered wrongly";
+    }
+    return "";
+}
+
+// "" when sets are equal by their flags alone.
+fn string flagEquality() {
+    if ((BufferUsage::Uniform | BufferUsage::CopyDst) != (BufferUsage::CopyDst | BufferUsage::Uniform)) {
+        return "Uniform | CopyDst differs from CopyDst | Uniform";
+    }
+    if ((BufferUsage::Uniform | BufferUsage::CopyDst) == BufferUsage::Uniform) { return "Uniform | CopyDst equals Uniform"; }
+    if ((TextureUsage::CopySrc | TextureUsage::CopySrc) != TextureUsage::CopySrc) { return "CopySrc twice is not CopySrc"; }
+    if (ShaderStage::Vertex == ShaderStage::Fragment) { return "Vertex equals Fragment"; }
+    return "";
+}
+
 // "" when capabilities made of these lists are refused.
 unsafe fn string refused(DynamicArray<TextureFormat> formats, DynamicArray<PresentMode> presents,
-                         DynamicArray<AlphaMode> alphas, uint64 usages) {
+                         DynamicArray<AlphaMode> alphas, TextureUsage usages) {
     Result<SurfaceCapabilities, GpuError> made = SurfaceCapabilities.make(formats: give formats, presentModes: give presents,
                                                                         alphaModes: give alphas, usages: usages);
     return match (made) {
@@ -534,6 +580,9 @@ type resource Check implements App {
 
     public unsafe ctor make() {
         this.formatCases();
+        this.verdict(name: "a flag set's bits are webgpu.h's, its members joined", why: flagBits());
+        this.verdict(name: "a flag set has every flag asked for, and no other", why: flagHas());
+        this.verdict(name: "flag sets are equal when they hold the same flags, in any order", why: flagEquality());
         this.capabilityCases();
         this.verdict(name: "an acquire fails in one of seven ways, each with its words", why: acquireFailures());
         Result<Instance, GpuError> made = Instance.make();
@@ -1026,8 +1075,8 @@ type resource Check implements App {
         wf.add(item: TextureFormat::RGBA16Float);
         DynamicArray<AlphaMode> wa = alphas1(a: AlphaMode::Opaque);
         wa.add(item: AlphaMode::Premultiplied);
-        uint64 canvas = TextureUsage::RenderAttachment | TextureUsage::TextureBinding | TextureUsage::CopySrc
-                        | TextureUsage::CopyDst;
+        TextureUsage canvas = TextureUsage::RenderAttachment | TextureUsage::TextureBinding | TextureUsage::CopySrc
+                              | TextureUsage::CopyDst;
         Result<SurfaceCapabilities, GpuError> web = SurfaceCapabilities.make(formats: give wf,
                                                                            presentModes: presents1(a: PresentMode::Fifo),
                                                                            alphaModes: give wa, usages: canvas);
@@ -1227,7 +1276,7 @@ type resource SurfaceRun {
                 string formats = formatList(fs: c.formats());
                 string presents = presentList(ps: c.presentModes());
                 string alphas = alphaList(modes: c.alphaModes());
-                uint64 usages = c.usages();
+                uint64 usages = c.usages().bits();
                 println(s: "info the surface offers ${formats}; ${presents}; ${alphas}; usages ${usages}");
                 t.verdict(name: "a surface answers its capabilities", why: "");
                 // wgpu-native ends the process on this acquire (measured 3 of 3, 2026-11-10), and a browser throws.
@@ -1275,7 +1324,7 @@ type resource SurfaceRun {
         this.window = Optional::Some(value: give win);
 
         Optional<TextureFormat> lw = linearWithTwin(offered: c.formats());
-        bool copies = (c.usages() & TextureUsage::CopySrc) != 0;
+        bool copies = c.usages().has(flags: TextureUsage::CopySrc);
         SurfaceConfig srgb = c.preferred();
         this.caps = Optional::Some(value: give c);
         match (lw) {
@@ -1753,11 +1802,8 @@ unsafe fn void configureCases(ref Check t, ref Surface surface, ref Surface earl
     Result<Unit, ConfigureError> vf = surface.configure(device: device, config: other);
     t.verdict(name: "a view format that changes more than sRGB-ness is refused as NotOffered",
               why: expectRefusal(got: vf, want: "NotOffered"));
-    SurfaceConfig unused = caps.preferred();
-    unused.usage = 0;
-    Result<Unit, ConfigureError> nu = surface.configure(device: device, config: unused);
-    t.verdict(name: "a configure with no usage is refused as NotOffered", why: expectRefusal(got: nu, want: "NotOffered"));
-    if ((caps.usages() & TextureUsage::StorageBinding) == 0) {
+    // A configure with no usage cannot be written: there is no empty TextureUsage (tests/xfail/usage_mixed).
+    if (!caps.usages().has(flags: TextureUsage::StorageBinding)) {
         SurfaceConfig storage = caps.preferred();
         storage.usage = TextureUsage::RenderAttachment | TextureUsage::StorageBinding;
         Result<Unit, ConfigureError> su = surface.configure(device: device, config: storage);

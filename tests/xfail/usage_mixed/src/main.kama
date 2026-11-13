@@ -1,0 +1,15 @@
+// Must not compile: each of WebGPU's flag sets is a type of its own (AGENTS.gpu.md item 12, decision 6), as kama's are
+// (`std::fs::Permissions`). A texture's usage where a buffer's is wanted, a set mixing the two, and a buffer usage where
+// a binding's shader stages are wanted are each refused as unrelated types, though webgpu.h gives all three the same
+// numbers (TextureUsage CopyDst, BufferUsage MapWrite and ShaderStage Fragment are each 2). And no empty set can be
+// written: WebGPU refuses a buffer or a texture with no usage.
+import { gpu::Device, gpu::Buffer, gpu::Texture, gpu::TextureFormat, gpu::BufferUsage, gpu::TextureUsage, gpu::ShaderStage };
+
+unsafe fn void misuse(ref Device device) {
+    Buffer a = device.createBuffer(size: 64, usage: TextureUsage::CopyDst);
+    Buffer b = device.createBuffer(size: 64, usage: BufferUsage::Vertex | TextureUsage::CopyDst);
+    ShaderStage seen = ShaderStage::Vertex | BufferUsage::MapWrite;
+    TextureUsage none = TextureUsage.fromBits(bits: 0);
+}
+
+fn uint8 main() { return 0; }

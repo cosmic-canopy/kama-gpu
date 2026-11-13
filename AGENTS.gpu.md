@@ -711,6 +711,20 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       map sees it.
     - **A label reaches the error's words on both legs,** and a scope keeps the first error in call order.
 
+    **Built on 2026-11-12 (kyoten's eighteenth session), part 2 of 5, in steps** (kama 0.9.938), each test-first:
+    - **The flag sets (decision 6):**
+      - `BufferUsage`, `TextureUsage` and `ShaderStage` as `type value`s with a private `fromBits`, `|`, `has(flags:)`,
+        `==` (`@generate(Equatable)`) and `bits()`. `createBuffer`, `createTexture`, `SurfaceConfig.usage` and
+        `SurfaceCapabilities` take them.
+      - Red first: `tests/xfail/usage_mixed`, a texture usage where a buffer's is wanted, a mixed set, a buffer usage as
+        a stage and an empty set, compiled but for `ShaderStage`. Now it is refused for exactly its four reasons, and
+        `tools/test.sh` holds it to them (3 "unrelated types", 1 private `fromBits`).
+      - Three cases with no GPU: each set's bits are webgpu.h's, `has` asks for every flag, and equality ignores order.
+        The configure-with-no-usage case went, since such a configure cannot be written.
+      - `tests/` is 111 cases natively, 90 in Edge and Chrome for Testing, and 21 in Firefox.
+      - **Mutations: 12 of 12 caught,** once the stage case asked a `has` of two flags where only one is held: "has any
+        flag" passed it until then.
+
 ## Where the truth is
 
 - **This package's own documents,** above: the SPEC, the ROADMAP and its detail, COVERAGE.md, and the CHANGELOG.

@@ -5,6 +5,17 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Breaking: each of WebGPU's flag sets is a type of its own** (2026-11-12, kama 0.9.938; GPU-4's second part,
+  AGENTS.gpu.md item 12, decision 6).
+  - `BufferUsage`, `TextureUsage` and the new `ShaderStage` are `type value`s, no longer `uint64` constants. Each is
+    joined with `|`, read with `has(flags:)`, compared with `==`, and its number is `bits()`.
+  - A texture's usage where a buffer's is wanted, or a set mixing the two, no longer compiles. Neither does an empty
+    set.
+  - `SurfaceConfig.usage` and `SurfaceCapabilities.usages()` are `TextureUsage`. A configure with no usage, which
+    `configure` refused, cannot be written.
+  - Call sites written with the members (`BufferUsage::MapRead | BufferUsage::CopyDst`) read as before. A `uint64`
+    holding a set becomes the set's type.
+
 - **New: shader modules and their compilation messages** (2026-11-12, kama 0.9.928; GPU-4's first part,
   AGENTS.gpu.md item 12, decisions 1 and 3): `ShaderModuleDescriptor.make(wgsl:)` with `label(text:)`,
   `device.createShaderModule(descriptor:)`, and `module.compilationInfo()`, polled to a `CompilationInfo` whose

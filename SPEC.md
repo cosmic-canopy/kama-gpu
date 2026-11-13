@@ -146,18 +146,33 @@ Measured, each held by the tests per leg:
   browser refuses its submit, reporting "[Invalid CommandBuffer] is invalid due to a previous error";
 - a failed device request's state block is released at once on both legs.
 
+## Flag sets
+
+**Each of WebGPU's flag sets is a type of its own**, as kama's are (`std::fs::Permissions`). Each member is a set of
+one, and sets are joined with `|` (`BufferUsage::MapRead | BufferUsage::CopyDst`). One set cannot stand where another is
+wanted, though webgpu.h gives them the same numbers.
+- `has(flags:)` asks whether a set holds every flag of another.
+- `==` compares two sets by their flags.
+- `bits()` is webgpu.h's number, for a program that binds more of webgpu.h itself.
+- **No empty set can be written,** since WebGPU refuses a buffer or a texture with no usage.
+
+The sets:
+- **`BufferUsage`:** `MapRead`, `MapWrite`, `CopySrc`, `CopyDst`, `Index`, `Vertex`, `Uniform`, `Storage` and
+  `Indirect`.
+- **`TextureUsage`:** `CopySrc`, `CopyDst`, `TextureBinding`, `StorageBinding` and `RenderAttachment`.
+- **`ShaderStage`:** `Vertex`, `Fragment` and `Compute`.
+
 ## Buffers
 
-- **`device.createBuffer(size:, usage:)`,** `usage` the `BufferUsage` flags OR'd: `MapRead`, `MapWrite`, `CopySrc`,
-  `CopyDst`, `Index`, `Vertex`, `Uniform`, `Storage` and `Indirect`.
+- **`device.createBuffer(size:, usage:)`,** `usage` a `BufferUsage`.
 - **`buffer.size()`.**
 - **`buffer.mapRead(offset:, size:) -> BufferRead`,** polled to `ReadStatus` (`Pending`, `Ready` or `Failed(error)`),
   then `bytes()` copies the mapped range out. Dropping the read unmaps the buffer.
 
 ## Textures and views
 
-- **`device.createTexture(width:, height:, format:, usage:)`:** a 2D texture, one mip level, one sample, `usage` the
-  `TextureUsage` flags (`CopySrc`, `CopyDst`, `TextureBinding`, `StorageBinding`, `RenderAttachment`).
+- **`device.createTexture(width:, height:, format:, usage:)`:** a 2D texture, one mip level, one sample, `usage` a
+  `TextureUsage`.
 - **`texture.createView()`,** in the texture's own format.
 - **`TextureFormat` names every format webgpu.h has (101),** the same numbers on both legs:
   - `value()`, webgpu.h's number, and `TextureFormat::fromValue(value:)`, `None` for a number webgpu.h names no

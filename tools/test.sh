@@ -88,6 +88,18 @@ else
     cat tests/out/xfail.log; echo "FAIL refused, but not as a use after move"; failed=1
 fi
 
+step "xfail: one flag set where another is wanted, and an empty set"
+xf=tests/xfail/usage_mixed
+"$KAMA" pkg install "$xf/kama.json" > /dev/null
+if "$KAMA" check "$xf/kama.json" > "tests/out/xfail-usage.log" 2>&1; then
+    echo "FAIL the mixed flag sets compiled"; failed=1
+elif [ "$(grep -c "these are unrelated types" tests/out/xfail-usage.log)" = 3 ] \
+        && grep -q "fromBits.*not visible\|fromBits.*private" tests/out/xfail-usage.log; then
+    echo "ok   each flag set is its own type: 3 mixes refused as unrelated types, and no empty set can be made"
+else
+    cat tests/out/xfail-usage.log; echo "FAIL refused, but not as 3 unrelated-type mixes and a private fromBits"; failed=1
+fi
+
 step "the web leg: built, and run in every headless browser present"
 if ! command -v emcc >/dev/null 2>&1; then
     echo "skip no emcc on PATH (run from an interactive UCRT64 shell, bash -lic)"
