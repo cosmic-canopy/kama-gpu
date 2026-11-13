@@ -7,7 +7,7 @@ is the git log and [CHANGELOG.md](CHANGELOG.md).
 
 **Where it stands** (2026-11-13, kama 0.9.938): offscreen work and a surface on an `@kama/window` window, natively on
 Windows over Vulkan, on wgpu-native v29.0.1.1, and on the web (emdawnwebgpu, Dawn v20260423.175430) in headless Edge
-157, Chrome for Testing 157 and Firefox 160 on a canvas. It calls 72 of webgpu.h's 206 functions. Not published.
+157, Chrome for Testing 157 and Firefox 160 on a canvas. It calls 78 of webgpu.h's 206 functions. Not published.
 
 ## Using it
 
@@ -163,13 +163,15 @@ wanted, though webgpu.h gives them the same numbers.
 - `has(flags:)` asks whether a set holds every flag of another.
 - `==` compares two sets by their flags.
 - `bits()` is webgpu.h's number, for a program that binds more of webgpu.h itself.
-- **No empty set can be written,** since WebGPU refuses a buffer or a texture with no usage.
+- **No empty usage can be written,** since WebGPU refuses a buffer or a texture with no usage. `ColorWriteMask` has
+  `None`, since WebGPU takes a target written in no channel.
 
 The sets:
 - **`BufferUsage`:** `MapRead`, `MapWrite`, `CopySrc`, `CopyDst`, `Index`, `Vertex`, `Uniform`, `Storage` and
   `Indirect`.
 - **`TextureUsage`:** `CopySrc`, `CopyDst`, `TextureBinding`, `StorageBinding` and `RenderAttachment`.
 - **`ShaderStage`:** `Vertex`, `Fragment` and `Compute`.
+- **`ColorWriteMask`:** `None`, `Red`, `Green`, `Blue`, `Alpha` and `All`.
 
 ## Buffers
 
@@ -290,10 +292,71 @@ runs over several lines: its `Shader '<label>' …` line, then the source line e
 place already gives. The package keeps that line, or a message's first line that is not blank where it has none, as
 Dawn's is. Firefox reports places in UTF-16 units as Dawn does, the first error only, and no warning, as naga gives none.
 
+## Render pipelines
+
+- **`device.createRenderPipeline(descriptor:) -> RenderPipeline`,** handed back at once, its error reported as every
+  error is, to the device's channel or a scope. Its description is WebGPU's `GPURenderPipelineDescriptor`, its
+  dictionaries as kama types (AGENTS.gpu.md item 12, decision 1):
+  - `RenderPipelineDescriptor.make(layout:, vertex:)` takes the two parts WebGPU requires. `layout` is a `Layout`:
+    `Auto`, read from the shaders, or `Explicit(layout:)`, a `PipelineLayout`. Then `fragment(state:)`,
+    `depthStencil(state:)` and `label(text:)`; `primitiveMut()` and `multisampleMut()` change those parts in place
+    (`d.primitiveMut().cullMode = CullMode::Back;`).
+  - `VertexState.make(module:, entryPoint:)`, with `constant(name:, value:)` for a WGSL `override` and
+    `buffer(layout:)` per vertex buffer slot. A `VertexBufferLayout.make(arrayStride:)` has `stepMode(mode:)`
+    (`VertexStepMode`: `Vertex` by default, `Instance`) and `attribute(format:, offset:, shaderLocation:)`. `format` is
+    a `VertexFormat`, every one webgpu.h names (41), generated with `TextureFormat`, with `value()` and `name()`.
+  - `FragmentState.make(module:, entryPoint:)`, with `constant(name:, value:)`, `target(state:)` per colour attachment,
+    and `emptyTarget()` for one left empty (WebGPU's `null` target).
+  - The value parts are `type value`s whose fields start at WebGPU's defaults and whose `make` takes what WebGPU
+    requires:
+    - `PrimitiveState.make()`: `topology` (`PrimitiveTopology`: `PointList`, `LineList`, `LineStrip`, `TriangleList`
+      by default, `TriangleStrip`), `stripIndexFormat` (an `Optional<IndexFormat>`: `Uint16` or `Uint32`), `frontFace`
+      (`FrontFace`: `CCW` by default, `CW`), `cullMode` (`CullMode`: `None` by default, `Front`, `Back`) and
+      `unclippedDepth`;
+    - `MultisampleState.make()`: `count` (1), `mask` (every sample) and `alphaToCoverageEnabled`;
+    - `DepthStencilState.make(format:, depthWriteEnabled:, depthCompare:)`, with `stencilFront` and `stencilBack`
+      (`StencilFaceState.make()`: `compare`, `Always` by default, and `failOp`, `depthFailOp` and `passOp`, each a
+      `StencilOperation`, `Keep` by default), `stencilReadMask` and `stencilWriteMask` (every bit), and `depthBias`,
+      `depthBiasSlopeScale` and `depthBiasClamp` (0);
+    - `ColorTargetState.make(format:)`: `blend` (none by default) and `writeMask` (a `ColorWriteMask`, `All` by
+      default);
+    - `BlendState.make(color:, alpha:)`, each a `BlendComponent.make()`: `operation` (`BlendOperation`: `Add` by
+      default, `Subtract`, `ReverseSubtract`, `Min`, `Max`), `srcFactor` (`One`) and `dstFactor` (`Zero`), each a
+      `BlendFactor`.
+  - So a target or a constant cannot be written for a stage that is not there, and a part with no kind cannot be
+    written either. webgpu.h's bindings start zero-filled, where a sample mask of 0 draws nothing, silently, on both
+    legs. The package hands over every default itself.
+- **`pipeline.getBindGroupLayout(index:) -> BindGroupLayout`:** group `index`'s layout, read from the shaders of a
+  pipeline made with `Layout::Auto`.
+- `RenderPipeline` is a copy-is-`AddRef` resource with `adopt` and `raw`.
+- **What a browser throws on, or wgpu-native ends the process on, is refused in the package's words** (decision 9):
+  - a pipeline constant or a depth bias that is not a finite number;
+  - a depth write to a format with no depth (Stencil8, or a colour format);
+  - a target or depth format whose feature the device was not given (`TextureFormat.requiredFeature()`);
+  - a `Src1` blend factor without `DualSourceBlending`.
+
+  The pipeline handed back is made with no fragment stage, no depth, no vertex buffer and no constant, which WebGPU
+  refuses on both legs, under a quiet section, so it is invalid. A stride or an attribute offset past 2^53 - 1 is
+  clamped.
+- What WebGPU refuses is a validation error naming the label:
+  - a missing entry point, or a layout that does not match the shaders;
+  - a stride not a multiple of 4 or past the limit;
+  - a sample count of 3, or more than 8 targets;
+  - a strip index format with a list, or a depth bias with lines;
+  - a target that cannot be rendered to;
+  - a constant the shader does not declare;
+  - min or max blending with a factor other than One;
+  - `unclippedDepth` without `DepthClipControl`;
+  - a depth test on Stencil8.
+
+  `getBindGroupLayout` past `maxBindGroups` is one too, naming the pipeline on the web.
+
 ## Command encoding, render passes and the queue
 
 - **`encoder.beginRenderPass(target:, clear:) -> RenderPass`:** one colour attachment, cleared to `clear` (a `Color`,
   made memberwise: `Color.of(r:, g:, b:, a:)`) and stored. `pass.end()` consumes the pass.
+- **`pass.setPipeline(pipeline:)` and `pass.draw(vertexCount:, instanceCount:, firstVertex:, firstInstance:)`:** draw
+  with a render pipeline.
 - **`encoder.copyTextureToBuffer(texture:, buffer:, width:, height:, bytesPerRow:)`:** a region of the texture's first
   level, `bytesPerRow` a multiple of 256.
 - **`encoder.finish() -> CommandBuffer`,** which consumes the encoder. An error the recording made is reported here,
@@ -398,18 +461,19 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   make, the coverage rules on their fixture, and the constants;
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 28 facts, natively;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 150 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 191 cases natively with a display, debug and release.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
-- the web leg, headless, on the page's canvases: `tests/` (127 cases) and `examples/clear` (60 frames on `#canvas`)
+- the web leg, headless, on the page's canvases: `tests/` (168 cases) and `examples/clear` (60 frames on `#canvas`)
   under `kama run --target WASM --headless` in Edge and Chrome as installed; `tests/` in the pinned Firefox 160, which
   gives WebGPU no adapter under `kama run` until its runner sets one pref (kyoten's KY-54), so it reports that and skips
-  the cases that need one (`--adapter-optional`), holds `maxImmediateSize` to 0 (`--no-immediates`) and a WGSL
-  warning to no message (`--no-shader-warnings`); and both
+  the cases that need one (`--adapter-optional`), holds `maxImmediateSize` to 0 (`--no-immediates`), a WGSL
+  warning to no message (`--no-shader-warnings`), and a buffer of 2^53 - 256 bytes to an out-of-memory error, which is
+  how Firefox reports it (`--huge-buffer-out-of-memory`); and both
   through `tools/webtest.mjs` in the pinned Chrome for Testing, which does not run under `kama run` (kyoten's KY-53).
 
 What runs on one leg only: wgpu-native's own timing (an error in the channel when its call returns, a scope's pop ready

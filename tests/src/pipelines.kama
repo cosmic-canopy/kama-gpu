@@ -1,0 +1,828 @@
+// The cases of GPU-4's third part (AGENTS.gpu.md item 12, decisions 1, 2, 6 and 9), a step a tick on every leg: render
+// pipelines made from WebGPU's description, drawn and read back, what WebGPU refuses of them, and what the package
+// refuses first, where a browser throws or wgpu-native ends the process. The device is given no feature.
+//
+// They report through `Verdicts`, which the check reads each tick, as the binding cases do.
+
+import {
+    core::println,
+    std::memory::replace,
+    std::collections::DynamicArray,
+    gpu::Instance, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::PowerPreference,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::DeviceOptions, gpu::GpuError,
+    gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::Color,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus,
+    gpu::Texture, gpu::TextureView, gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::CompareFunction,
+    gpu::ShaderModuleDescriptor, gpu::ShaderModule,
+    gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
+    gpu::BufferBindingType, gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindingResource,
+    gpu::BufferBinding,
+    gpu::ColorWriteMask, gpu::VertexFormat, gpu::PrimitiveTopology, gpu::IndexFormat, gpu::FrontFace, gpu::CullMode,
+    gpu::StencilOperation, gpu::BlendOperation, gpu::BlendFactor, gpu::VertexStepMode, gpu::PrimitiveState,
+    gpu::MultisampleState, gpu::StencilFaceState, gpu::DepthStencilState, gpu::BlendComponent, gpu::BlendState,
+    gpu::ColorTargetState, gpu::VertexBufferLayout, gpu::VertexState, gpu::FragmentState, gpu::Layout,
+    gpu::RenderPipelineDescriptor, gpu::RenderPipeline,
+    Verdicts,
+};
+export { PipelineRun };
+
+comptime int32 SETTLE = 60;   // the most ticks a case waits for an error the browser owes
+comptime int32 QUIET = 10;    // the ticks a case waits to see that no error comes
+comptime uint32 SIDE = 4;     // a drawn target is SIDE by SIDE texels
+comptime uint32 ROW = 256;    // a copied row's bytes: WebGPU's alignment
+
+// The stages the cases make pipelines of. `vs0` covers the target with one counter-clockwise triangle from its vertex
+// index, scaled by the pipeline constant `scale` (1 by default), and `vs` reads a vertex buffer's location 0. `fs`
+// writes (k, 0.5, 0.25, 1), where `k` is a pipeline constant, 1 by default; `fsu` writes group 0's uniform; `fs1` writes
+// location 1 alone.
+fn string pipelineWgsl() {
+    return "override k: f32 = 1.0;\n"
+        + "override scale: f32 = 1.0;\n"
+        + "@group(0) @binding(0) var<uniform> u: vec4f;\n"
+        + "struct VOut { @builtin(position) pos: vec4f };\n"
+        + "@vertex fn vs(@location(0) p: vec2f) -> VOut { var o: VOut; o.pos = vec4f(p, 0.25, 1.0); return o; }\n"
+        + "@vertex fn vs0(@builtin(vertex_index) i: u32) -> VOut {\n"
+        + "  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));\n"
+        + "  var o: VOut; o.pos = vec4f(p[i] * scale, 0.25, 1.0); return o; }\n"
+        + "@fragment fn fs() -> @location(0) vec4f { return vec4f(k, 0.5, 0.25, 1.0); }\n"
+        + "@fragment fn fsu() -> @location(0) vec4f { return u; }\n"
+        + "@fragment fn fs1() -> @location(1) vec4f { return vec4f(1.0); }\n";
+}
+
+// NaN and the infinities, made at run time: kama refuses a constant division by zero.
+fn float64 notANumber() {
+    float64 zero = 0.0;
+    return zero / zero;
+}
+fn float64 infinity(float64 sign) {
+    float64 zero = 0.0;
+    return sign / zero;
+}
+
+type resource PipelineRun {
+    int32 stage = 0;
+    int32 waited = 0;
+    bool optional;   // `--adapter-optional`: no adapter here is a skip
+    Verdicts found;
+    Optional<Instance> instance = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+    Optional<ShaderModule> shaders = Optional::None;            // pipelineWgsl's module
+    Optional<RenderPipeline> refusedPipeline = Optional::None;  // a refused pipeline, for a use of it
+    Optional<Buffer> readback = Optional::None;                 // a drawn target's copy
+    Optional<BufferRead> reading = Optional::None;
+
+    public ctor make(bool adapterOptional) {
+        this.optional = adapterOptional;
+        this.found = Verdicts.make();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // One tick's step: true once every case has run.
+    public unsafe fn bool step() {
+        this.waited = this.waited + 1;
+        if (this.stage == 0) { this.plainCases(); this.open(); }
+        else if (this.stage == 1) { this.awaitAdapter(); }
+        else if (this.stage == 2) { this.awaitDevice(); }
+        else if (this.stage == 10) { this.goodPipelines(); }
+        else if (this.stage == 11) { this.awaitNone(name: "pipelines WebGPU takes are made with no error: auto and explicit layouts, vertex buffers, a constant, depth, stencil, a blend, no channel written, an empty target, a strip, four samples, and depth alone", next: 20); }
+        else if (this.stage == 20) { this.drawn(kind: 0, next: 21); }
+        else if (this.stage == 21) { this.awaitDrawn(name: "a pipeline at WebGPU's defaults draws its fragment's colour, through a copy of it once the pipeline it was copied from is gone: one sample, every sample, every channel, a triangle list", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 30); }
+        else if (this.stage == 30) { this.drawn(kind: 1, next: 31); }
+        else if (this.stage == 31) { this.awaitDrawn(name: "a fragment's pipeline constant reaches its shader", want: pixel(r: 0, g: 128, b: 64, a: 255), next: 40); }
+        else if (this.stage == 40) { this.drawn(kind: 2, next: 41); }
+        else if (this.stage == 41) { this.awaitDrawn(name: "a write mask of Red and Alpha writes those channels alone", want: pixel(r: 255, g: 0, b: 0, a: 255), next: 50); }
+        else if (this.stage == 50) { this.drawn(kind: 3, next: 51); }
+        else if (this.stage == 51) { this.awaitDrawn(name: "with front faces culled, a counter-clockwise triangle draws nothing", want: pixel(r: 0, g: 0, b: 0, a: 0), next: 60); }
+        else if (this.stage == 60) { this.drawn(kind: 4, next: 61); }
+        else if (this.stage == 61) { this.awaitDrawn(name: "with clockwise front faces and front faces culled, a counter-clockwise triangle is drawn", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 70); }
+        else if (this.stage == 70) { this.drawn(kind: 5, next: 71); }
+        else if (this.stage == 71) { this.awaitDrawn(name: "a point list draws the triangle's corners, not the triangle", want: pixel(r: 0, g: 0, b: 0, a: 0), next: 80); }
+        else if (this.stage == 80) { this.drawn(kind: 6, next: 81); }
+        else if (this.stage == 81) { this.awaitDrawn(name: "a blend of the source times Zero and the destination times One keeps the destination's colour", want: pixel(r: 0, g: 0, b: 255, a: 255), next: 85); }
+        else if (this.stage == 85) { this.drawn(kind: 7, next: 86); }
+        else if (this.stage == 86) { this.awaitDrawn(name: "a vertex stage's pipeline constant reaches its shader: a scale of 0 draws nothing", want: pixel(r: 0, g: 0, b: 0, a: 0), next: 90); }
+        else if (this.stage == 90) { this.groupOfAuto(); }
+        else if (this.stage == 91) { this.awaitNone(name: "an auto layout's group 0, read with getBindGroupLayout, makes a bind group WebGPU takes", next: 100); }
+        else if (this.stage == 100) { this.misused(kind: 0, next: 101); }
+        else if (this.stage == 101) { this.awaitOne(name: "a missing entry point is a validation error naming the pipeline's label", label: "missing entry", says: "", next: 110); }
+        else if (this.stage == 110) { this.misused(kind: 1, next: 111); }
+        else if (this.stage == 111) { this.awaitOne(name: "a stride not a multiple of 4 is a validation error naming the pipeline's label", label: "odd stride", says: "", next: 120); }
+        else if (this.stage == 120) { this.misused(kind: 2, next: 121); }
+        else if (this.stage == 121) { this.awaitOne(name: "three samples is a validation error naming the pipeline's label", label: "three samples", says: "", next: 130); }
+        else if (this.stage == 130) { this.misused(kind: 3, next: 131); }
+        else if (this.stage == 131) { this.awaitOne(name: "nine colour targets is a validation error naming the pipeline's label", label: "nine targets", says: "", next: 140); }
+        else if (this.stage == 140) { this.misused(kind: 4, next: 141); }
+        else if (this.stage == 141) { this.awaitOne(name: "a strip index format with a triangle list is a validation error naming the pipeline's label", label: "strip with a list", says: "", next: 150); }
+        else if (this.stage == 150) { this.misused(kind: 5, next: 151); }
+        else if (this.stage == 151) { this.awaitOne(name: "a depth bias with lines is a validation error naming the pipeline's label", label: "bias with lines", says: "", next: 160); }
+        else if (this.stage == 160) { this.misused(kind: 6, next: 161); }
+        else if (this.stage == 161) { this.awaitOne(name: "a target format that cannot be rendered to is a validation error naming the pipeline's label", label: "not renderable", says: "", next: 170); }
+        else if (this.stage == 170) { this.misused(kind: 7, next: 171); }
+        else if (this.stage == 171) { this.awaitOne(name: "a constant the shader does not declare is a validation error naming the pipeline's label", label: "unknown constant", says: "", next: 180); }
+        else if (this.stage == 180) { this.misused(kind: 8, next: 181); }
+        else if (this.stage == 181) { this.awaitOne(name: "min blending with a factor other than One is a validation error naming the pipeline's label", label: "min with a factor", says: "", next: 190); }
+        else if (this.stage == 190) { this.misused(kind: 9, next: 191); }
+        else if (this.stage == 191) { this.awaitOne(name: "a stride of 2^60 is a validation error naming the pipeline's label, not the end of the program", label: "far stride", says: "", next: 200); }
+        else if (this.stage == 200) { this.misused(kind: 10, next: 201); }
+        else if (this.stage == 201) { this.awaitOne(name: "an attribute offset of 2^60 is a validation error naming the pipeline's label, not the end of the program", label: "far offset", says: "", next: 202); }
+        else if (this.stage == 202) { this.misused(kind: 11, next: 203); }
+        else if (this.stage == 203) { this.awaitOne(name: "unclippedDepth without DepthClipControl is a validation error naming the pipeline's label", label: "unclipped", says: "", next: 204); }
+        else if (this.stage == 204) { this.misused(kind: 12, next: 205); }
+        else if (this.stage == 205) { this.awaitOne(name: "a depth test on Stencil8, which has no depth, is a validation error naming the pipeline's label", label: "stencil with a depth test", says: "", next: 206); }
+        else if (this.stage == 206) { this.misused(kind: 13, next: 207); }
+        else if (this.stage == 207) { this.awaitOne(name: "a layout that does not match the shaders is a validation error naming the pipeline's label", label: "mismatched layout", says: "", next: 210); }
+        else if (this.stage == 210) { this.groupPastTheEnd(); }
+        else if (this.stage == 211) { this.awaitOne(name: "getBindGroupLayout past maxBindGroups is a validation error", label: "", says: "", next: 300); }
+        else if (this.stage == 300) { this.misused(kind: 20, next: 301); }
+        else if (this.stage == 301) { this.awaitOne(name: "a NaN depth bias slope is a validation error in the package's words, not the end of the program", label: "nan slope", says: "not a finite number", next: 310); }
+        else if (this.stage == 310) { this.misused(kind: 21, next: 311); }
+        else if (this.stage == 311) { this.awaitOne(name: "an infinite depth bias clamp is a validation error in the package's words, not the end of the program", label: "infinite clamp", says: "not a finite number", next: 320); }
+        else if (this.stage == 320) { this.misused(kind: 22, next: 321); }
+        else if (this.stage == 321) { this.awaitOne(name: "a NaN vertex constant is a validation error in the package's words, not the end of the program", label: "nan vertex constant", says: "not a finite number", next: 330); }
+        else if (this.stage == 330) { this.misused(kind: 23, next: 331); }
+        else if (this.stage == 331) { this.awaitOne(name: "a -inf fragment constant is a validation error in the package's words, not the end of the program", label: "infinite fragment constant", says: "not a finite number", next: 340); }
+        else if (this.stage == 340) { this.misused(kind: 24, next: 341); }
+        else if (this.stage == 341) { this.awaitOne(name: "a depth write to Stencil8 is a validation error in the package's words, where wgpu-native ends the process", label: "depth to stencil", says: "a format with no depth", next: 350); }
+        else if (this.stage == 350) { this.misused(kind: 25, next: 351); }
+        else if (this.stage == 351) { this.awaitOne(name: "a depth write to a colour format is a validation error in the package's words, where wgpu-native ends the process", label: "depth to colour", says: "a format with no depth", next: 360); }
+        else if (this.stage == 360) { this.misused(kind: 26, next: 361); }
+        else if (this.stage == 361) { this.awaitOne(name: "a BC target on a device without TextureCompressionBC is a validation error in the package's words, not the end of the program", label: "compressed target", says: "TextureCompressionBC", next: 370); }
+        else if (this.stage == 370) { this.misused(kind: 27, next: 371); }
+        else if (this.stage == 371) { this.awaitOne(name: "a Depth32FloatStencil8 depth format on a device without its feature is a validation error in the package's words, not the end of the program", label: "unfeatured depth", says: "needs the feature Depth32FloatStencil8", next: 380); }
+        else if (this.stage == 380) { this.misused(kind: 28, next: 381); }
+        else if (this.stage == 381) { this.awaitOne(name: "a 16-bit norm target on a device without TextureFormatsTier1 is a validation error in the package's words, not the end of the program", label: "sixteen-bit target", says: "TextureFormatsTier1", next: 390); }
+        else if (this.stage == 390) { this.misused(kind: 29, next: 391); }
+        else if (this.stage == 391) { this.awaitOne(name: "a Src1 blend factor on a device without DualSourceBlending is a validation error in the package's words, not the end of the program", label: "dual source", says: "DualSourceBlending", next: 400); }
+        else if (this.stage == 400) { this.useRefused(); }
+        else if (this.stage == 401) { this.awaitOne(name: "the pipeline a refusal hands back is invalid: its getBindGroupLayout is a validation error", label: "", says: "", next: 410); }
+        else if (this.stage == 410) { this.fromCopiedModule(); }
+        else if (this.stage == 411) { this.awaitNone(name: "a pipeline made from a module's copy, once the module it was copied from is gone, is made with no error", next: 420); }
+        else if (this.stage == 420) { this.compressedTexture(); }
+        else if (this.stage == 421) { this.awaitOne(name: "a BC texture on a device without TextureCompressionBC is a validation error in the package's words, not the end of the program", label: "BC1RGBAUnorm", says: "TextureCompressionBC", next: 999); }
+        return this.stage >= 999;
+    }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
+
+    // The parts' defaults and ColorWriteMask's numbers, which need no GPU.
+    unsafe fn void plainCases() {
+        uint64 none = ColorWriteMask::None.bits();
+        uint64 red = ColorWriteMask::Red.bits();
+        uint64 green = ColorWriteMask::Green.bits();
+        uint64 blue = ColorWriteMask::Blue.bits();
+        uint64 alpha = ColorWriteMask::Alpha.bits();
+        uint64 all = ColorWriteMask::All.bits();
+        bool joined = (ColorWriteMask::Red | ColorWriteMask::Green | ColorWriteMask::Blue | ColorWriteMask::Alpha) == ColorWriteMask::All;
+        string bits = none == 0 && red == 1 && green == 2 && blue == 4 && alpha == 8 && all == 15 && joined
+            ? "" : "None ${none}, Red ${red}, Green ${green}, Blue ${blue}, Alpha ${alpha}, All ${all}";
+        this.found.add(name: "ColorWriteMask's bits are webgpu.h's, None among them, and its four channels join to All", why: give bits);
+        ColorWriteMask redBlue = ColorWriteMask::Red | ColorWriteMask::Blue;
+        bool has = redBlue.has(flags: ColorWriteMask::Red) && !redBlue.has(flags: ColorWriteMask::Red | ColorWriteMask::Green)
+            && !ColorWriteMask::None.has(flags: ColorWriteMask::Red) && ColorWriteMask::All.has(flags: ColorWriteMask::None);
+        this.found.add(name: "ColorWriteMask's has asks for every channel", why: has ? "" : "has() answered wrong");
+        string held = defaultsHeld();
+        this.found.add(name: "a pipeline's parts start at WebGPU's defaults, not at zero", why: give held);
+    }
+
+    unsafe fn void open() {
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.make(power: PowerPreference::Default)));
+                this.instance = Optional::Some(value: give inst);
+                this.next(to: 1);
+            }
+            case Err(error: e): { string why = e.message(); this.found.add(name: "an instance for the pipeline cases", why: give why); this.next(to: 999); }
+        };
+    }
+
+    unsafe fn void awaitAdapter() {
+        if (this.adapterRequest.isNone()) { this.next(to: 999); return; }
+        AdapterStatus s = match (this.adapterRequest) {
+            case Some(value: r): r.poll();
+            case None: AdapterStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.adapterRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(adapter: a): {
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                this.next(to: 2);
+            }
+            case Failed(error: e): {
+                bool none = match (e) { case NoAdapter(words: w): true; case _: false; };
+                if (none && this.optional) {
+                    println(s: "skip the pipeline cases: there is no WebGPU adapter here (--adapter-optional)");
+                } else {
+                    string why = e.message();
+                    this.found.add(name: "an adapter for the pipeline cases", why: give why);
+                }
+                this.next(to: 999);
+            }
+        };
+    }
+
+    unsafe fn void awaitDevice() {
+        if (this.deviceRequest.isNone()) { this.next(to: 999); return; }
+        DeviceStatus s = match (this.deviceRequest) {
+            case Some(value: r): r.poll();
+            case None: DeviceStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.deviceRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(device: d, queue: q): {
+                ShaderModuleDescriptor m = ShaderModuleDescriptor.make(wgsl: pipelineWgsl());
+                m.label(text: "pipeline stages");
+                this.shaders = Optional::Some(value: d.createShaderModule(descriptor: give m));
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+                this.next(to: 10);
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a device for the pipeline cases", why: give why); this.next(to: 999); }
+        };
+    }
+
+    // An empty command buffer submitted: on the web, what lets a pending error through to the channel.
+    unsafe fn void flush() {
+        match (this.device) {
+            case Some(value: d): {
+                match (this.queue) {
+                    case Some(value: q): { CommandEncoder enc = d.createCommandEncoder(); CommandBuffer cb = give enc.finish(); q.submit(commands: give cb); }
+                    case None: { this.found.add(name: "a pipeline case flushes through the run's queue", why: "the queue is gone (stage ${this.stage})"); }
+                };
+            }
+            case None: { }
+        };
+    }
+
+    unsafe fn Optional<DeviceErrors> drain() {
+        match (this.device) {
+            case Some(value: d): { return Optional::Some(value: d.takeErrors()); }
+            case None: { return Optional::None; }
+        };
+    }
+
+    // Once QUIET ticks have passed, the channel holds nothing.
+    unsafe fn void awaitNone(const ref string name, int32 next) {
+        if (this.waited < QUIET) { return; }
+        Optional<DeviceErrors> got = this.drain();
+        string why = match (got) {
+            case Some(value: errs): errs.isEmpty() ? "" : "the channel holds " + described(errs: errs);
+            case None: "no device";
+        };
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // Once an error arrives, or SETTLE ticks pass: one validation error, its words naming `label` (and saying `says`).
+    unsafe fn void awaitOne(const ref string name, const ref string label, const ref string says, int32 next) {
+        Optional<DeviceErrors> got = this.drain();
+        bool none = match (got) { case Some(value: errs): errs.isEmpty(); case None: true; };
+        if (none && this.waited < SETTLE) { return; }
+        string why = match (got) {
+            case Some(value: errs): oneNaming(errs: errs, label: label, says: says);
+            case None: "no device";
+        };
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // Pipelines WebGPU takes, each made and dropped: no error.
+    unsafe fn void goodPipelines() {
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): {
+                        int32 kind = 0;
+                        while (kind < GOOD_KINDS) {
+                            RenderPipeline made = d.createRenderPipeline(descriptor: goodDescriptor(d: d, shaders: m, kind: kind));
+                            kind = kind + 1;
+                        }
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 11);
+    }
+
+    // A pipeline of `drawnDescriptor`'s `kind` draws one triangle into a cleared target, which is copied out and mapped.
+    unsafe fn void drawn(int32 kind, int32 next) {
+        Optional<Buffer> copied = Optional::None;
+        Optional<BufferRead> started = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): {
+                        RenderPipeline p = copiedPipeline(d: d, descriptor: drawnDescriptor(shaders: m, kind: kind));
+                        Texture target = d.createTexture(width: SIDE, height: SIDE, format: TextureFormat::RGBA8Unorm,
+                                                         usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc);
+                        TextureView view = target.createView();
+                        uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
+                        Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
+                        CommandEncoder encoder = d.createCommandEncoder();
+                        float64 blue = kind == 6 ? 1.0 : 0.0;
+                        RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: 0.0, g: 0.0, b: blue, a: 0.0));
+                        pass.setPipeline(pipeline: p);
+                        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+                        give pass.end();
+                        encoder.copyTextureToBuffer(texture: target, buffer: b, width: SIDE, height: SIDE, bytesPerRow: ROW);
+                        CommandBuffer commands = give encoder.finish();
+                        match (this.queue) {
+                            case Some(value: q): { q.submit(commands: give commands); }
+                            case None: { CommandBuffer unsent = give commands; }
+                        };
+                        started = Optional::Some(value: b.mapRead(offset: 0, size: bytes));
+                        copied = Optional::Some(value: give b);
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.readback = give copied;
+        this.reading = give started;
+        this.next(to: next);
+    }
+
+    // The drawn target's first texel is `want`, and the channel is empty.
+    unsafe fn void awaitDrawn(const ref string name, DynamicArray<uint8> want, int32 next) {
+        match (this.device) { case Some(value: d): { d.poll(wait: true); } case None: { } };
+        ReadStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: ReadStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.waited < SETTLE) { return; }
+        string why = match (s) {
+            case Pending: "the map did not finish";
+            case Failed(error: e): e.message();
+            case Ready: "";
+        };
+        if (why.isEmpty()) {
+            DynamicArray<uint8> got = match (this.reading) { case Some(value: r): firstTexel(r: r); case None: DynamicArray.empty(); };
+            why = sameBytes(got: got, want: want);
+        }
+        Optional<DeviceErrors> errs = this.drain();
+        string heard = match (errs) {
+            case Some(value: e): e.isEmpty() ? "" : "the channel holds " + described(errs: e);
+            case None: "";
+        };
+        if (why.isEmpty()) { why = copy heard; }
+        this.reading = Optional::None;
+        this.readback = Optional::None;
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // A pipeline whose layout is read from its shaders, and a bind group of its group 0 holding a uniform buffer.
+    unsafe fn void groupOfAuto() {
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): {
+                        RenderPipeline p = d.createRenderPipeline(descriptor: uniformDescriptor(d: d, shaders: m, explicit: false));
+                        BindGroupLayout read = p.getBindGroupLayout(index: 0);
+                        Buffer u = d.createBuffer(descriptor: BufferDescriptor.make(size: 16, usage: BufferUsage::Uniform));
+                        BindGroupDescriptor g = BindGroupDescriptor.make(layout: give read);
+                        g.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: copy u)));
+                        g.label(text: "of an auto layout");
+                        BindGroup made = d.createBindGroup(descriptor: give g);
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 91);
+    }
+
+    // A pipeline of `misusedDescriptor`'s `kind`; a refused one (kind 20, the NaN slope) is kept for a use of it.
+    unsafe fn void misused(int32 kind, int32 next) {
+        Optional<RenderPipeline> made = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): { made = Optional::Some(value: d.createRenderPipeline(descriptor: misusedDescriptor(d: d, shaders: m, kind: kind))); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        if (kind == 20) { this.refusedPipeline = give made; } else { Optional<RenderPipeline> dropped = give made; }
+        this.flush();
+        this.next(to: next);
+    }
+
+    // getBindGroupLayout(4) of an auto pipeline, past the default maxBindGroups of 4.
+    unsafe fn void groupPastTheEnd() {
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): {
+                        RenderPipeline p = d.createRenderPipeline(descriptor: uniformDescriptor(d: d, shaders: m, explicit: false));
+                        BindGroupLayout past = p.getBindGroupLayout(index: 4);
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 211);
+    }
+
+    // getBindGroupLayout(0) of the refused pipeline: its handle is invalid, so WebGPU refuses this.
+    unsafe fn void useRefused() {
+        Optional<RenderPipeline> held = replace(place: this.refusedPipeline, with: Optional::None);
+        match (give held) {
+            case Some(value: p): { BindGroupLayout of = p.getBindGroupLayout(index: 0); }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 401);
+    }
+
+    // A module copied, the original dropped, then a pipeline of the copy: the copy holds its own reference.
+    unsafe fn void fromCopiedModule() {
+        match (this.device) {
+            case Some(value: d): {
+                ShaderModuleDescriptor md = ShaderModuleDescriptor.make(wgsl: pipelineWgsl());
+                md.label(text: "copied stages");
+                Optional<ShaderModule> original = Optional::Some(value: d.createShaderModule(descriptor: give md));
+                Optional<ShaderModule> kept = Optional::None;
+                match (original) {
+                    case Some(value: o): { kept = Optional::Some(value: copy o); }
+                    case None: { }
+                };
+                original = Optional::None;
+                match (kept) {
+                    case Some(value: c): { RenderPipeline p = d.createRenderPipeline(descriptor: drawnDescriptor(shaders: c, kind: 0)); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 411);
+    }
+
+    // A BC texture on this device, which was given no feature.
+    unsafe fn void compressedTexture() {
+        match (this.device) {
+            case Some(value: d): { Texture image = d.createTexture(width: 4, height: 4, format: TextureFormat::BC1RGBAUnorm, usage: TextureUsage::TextureBinding); }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 421);
+    }
+}
+
+comptime int32 GOOD_KINDS = 14;
+
+// A pipeline of `descriptor`, handed back as a copy once the pipeline it was copied from is gone.
+unsafe fn RenderPipeline copiedPipeline(ref Device d, RenderPipelineDescriptor descriptor) {
+    RenderPipeline original = d.createRenderPipeline(descriptor: give descriptor);
+    return copy original;
+}
+
+// A vertex stage of `entry` and a fragment stage of `fs` into one RGBA8Unorm target.
+unsafe fn RenderPipelineDescriptor plainDescriptor(ref ShaderModule shaders, const ref string entry, const ref string label) {
+    VertexState v = VertexState.make(module: copy shaders, entryPoint: copy entry);
+    FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs");
+    f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+    RenderPipelineDescriptor d = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+    d.fragment(state: give f);
+    d.label(text: copy label);
+    return d;
+}
+
+// `fsu`'s pipeline, its layout read from its shaders or given: a uniform at group 0's binding 0, seen by the fragment.
+unsafe fn RenderPipelineDescriptor uniformDescriptor(ref Device d, ref ShaderModule shaders, bool explicit) {
+    VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs0");
+    FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fsu");
+    f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+    Layout chosen = Layout::Auto;
+    if (explicit) {
+        BindGroupLayoutDescriptor l = BindGroupLayoutDescriptor.make();
+        l.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Buffer(layout: BufferBindingLayout.make()));
+        PipelineLayoutDescriptor p = PipelineLayoutDescriptor.make();
+        p.group(layout: d.createBindGroupLayout(descriptor: give l));
+        chosen = Layout::Explicit(layout: d.createPipelineLayout(descriptor: give p));
+    }
+    RenderPipelineDescriptor result = RenderPipelineDescriptor.make(layout: give chosen, vertex: give v);
+    result.fragment(state: give f);
+    result.label(text: "uniform");
+    return result;
+}
+
+// Pipelines WebGPU takes: 0 auto, 1 an explicit layout, 2 a vertex buffer, 3 a fragment constant, 4 depth, 5 an
+// alpha blend, 6 no channel written, 7 an empty target before one the shader writes, 8 a strip with an index format,
+// 9 depth alone, 10 stencil, 11 four samples, 12 a vertex buffer stepped per instance, 13 Stencil8 with no depth write
+// and no depth test (wgpu-native ends the process on a depth write there, so its `false` must reach it).
+unsafe fn RenderPipelineDescriptor goodDescriptor(ref Device d, ref ShaderModule shaders, int32 kind) {
+    if (kind == 1) { return uniformDescriptor(d: d, shaders: shaders, explicit: true); }
+    if (kind == 7) {
+        VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs0");
+        FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs1");
+        f.emptyTarget();
+        f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+        RenderPipelineDescriptor holed = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+        holed.fragment(state: give f);
+        holed.label(text: "good 7");
+        return holed;
+    }
+    if (kind == 9) {
+        VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs0");
+        RenderPipelineDescriptor depthOnly = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+        depthOnly.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true, depthCompare: CompareFunction::Less));
+        depthOnly.label(text: "good 9");
+        return depthOnly;
+    }
+    if (kind == 2 || kind == 12) {
+        VertexBufferLayout l = VertexBufferLayout.make(arrayStride: 8);
+        l.attribute(format: VertexFormat::Float32x2, offset: 0, shaderLocation: 0);
+        if (kind == 12) { l.stepMode(mode: VertexStepMode::Instance); }
+        VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs");
+        v.buffer(layout: give l);
+        FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs");
+        f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+        RenderPipelineDescriptor buffered = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+        buffered.fragment(state: give f);
+        buffered.label(text: "good buffer");
+        return buffered;
+    }
+    VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs0");
+    FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs");
+    ColorTargetState t = ColorTargetState.make(format: TextureFormat::RGBA8Unorm);
+    if (kind == 3) { f.constant(name: "k", value: 0.5); }
+    if (kind == 5) {
+        BlendComponent over = BlendComponent.make();
+        over.srcFactor = BlendFactor::SrcAlpha;
+        over.dstFactor = BlendFactor::OneMinusSrcAlpha;
+        t.blend = Optional::Some(value: BlendState.make(color: over, alpha: over));
+    }
+    if (kind == 6) { t.writeMask = ColorWriteMask::None; }
+    f.target(state: t);
+    RenderPipelineDescriptor result = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+    result.fragment(state: give f);
+    if (kind == 4) {
+        result.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth24Plus, depthWriteEnabled: true, depthCompare: CompareFunction::Less));
+    }
+    if (kind == 8) {
+        result.primitiveMut().topology = PrimitiveTopology::TriangleStrip;
+        result.primitiveMut().stripIndexFormat = Optional::Some(value: IndexFormat::Uint16);
+    }
+    if (kind == 10) {
+        DepthStencilState s = DepthStencilState.make(format: TextureFormat::Depth24PlusStencil8, depthWriteEnabled: false, depthCompare: CompareFunction::Always);
+        s.stencilFront.compare = CompareFunction::Equal;
+        s.stencilFront.passOp = StencilOperation::IncrementClamp;
+        s.stencilBack.failOp = StencilOperation::Zero;
+        s.stencilReadMask = 0xFF;
+        s.stencilWriteMask = 0x0F;
+        result.depthStencil(state: s);
+    }
+    if (kind == 11) { result.multisampleMut().count = 4; }
+    if (kind == 13) {
+        result.depthStencil(state: DepthStencilState.make(format: TextureFormat::Stencil8, depthWriteEnabled: false, depthCompare: CompareFunction::Always));
+    }
+    result.label(text: "good");
+    return result;
+}
+
+// A pipeline drawing `vs0` and `fs` into one RGBA8Unorm target at WebGPU's defaults, but for what `kind` changes:
+// 1 the constant k = 0, 2 a write mask of Red and Alpha, 3 front faces culled, 4 clockwise front faces and front faces
+// culled, 5 a point list, 6 a blend that keeps the destination's colour, 7 the vertex constant scale = 0.
+unsafe fn RenderPipelineDescriptor drawnDescriptor(ref ShaderModule shaders, int32 kind) {
+    VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs0");
+    FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs");
+    ColorTargetState t = ColorTargetState.make(format: TextureFormat::RGBA8Unorm);
+    if (kind == 1) { f.constant(name: "k", value: 0.0); }
+    if (kind == 7) { v.constant(name: "scale", value: 0.0); }
+    if (kind == 2) { t.writeMask = ColorWriteMask::Red | ColorWriteMask::Alpha; }
+    if (kind == 6) {
+        BlendComponent keep = BlendComponent.make();
+        keep.srcFactor = BlendFactor::Zero;
+        keep.dstFactor = BlendFactor::One;
+        t.blend = Optional::Some(value: BlendState.make(color: keep, alpha: BlendComponent.make()));
+    }
+    f.target(state: t);
+    RenderPipelineDescriptor d = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+    d.fragment(state: give f);
+    if (kind == 3) { d.primitiveMut().cullMode = CullMode::Front; }
+    if (kind == 4) {
+        d.primitiveMut().cullMode = CullMode::Front;
+        d.primitiveMut().frontFace = FrontFace::CW;
+    }
+    if (kind == 5) { d.primitiveMut().topology = PrimitiveTopology::PointList; }
+    d.label(text: "drawn");
+    return d;
+}
+
+// A pipeline WebGPU refuses (0 to 10), or the package refuses first (20 to 29), each labelled for its case.
+unsafe fn RenderPipelineDescriptor misusedDescriptor(ref Device d, ref ShaderModule shaders, int32 kind) {
+    if (kind == 0) { return plainDescriptor(shaders: shaders, entry: "nosuch", label: "missing entry"); }
+    if (kind == 13) {
+        // fsu reads a uniform at group 0's binding 0; this layout puts a read-only storage buffer there
+        VertexState sv = VertexState.make(module: copy shaders, entryPoint: "vs0");
+        FragmentState sf = FragmentState.make(module: copy shaders, entryPoint: "fsu");
+        sf.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+        BufferBindingLayout rows = BufferBindingLayout.make();
+        rows.kind = BufferBindingType::ReadOnlyStorage;
+        BindGroupLayoutDescriptor l = BindGroupLayoutDescriptor.make();
+        l.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Buffer(layout: rows));
+        PipelineLayoutDescriptor pl = PipelineLayoutDescriptor.make();
+        pl.group(layout: d.createBindGroupLayout(descriptor: give l));
+        RenderPipelineDescriptor mismatched = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: d.createPipelineLayout(descriptor: give pl)), vertex: give sv);
+        mismatched.fragment(state: give sf);
+        mismatched.label(text: "mismatched layout");
+        return mismatched;
+    }
+    if (kind == 1 || kind == 9 || kind == 10) {
+        VertexBufferLayout l = VertexBufferLayout.make(arrayStride: kind == 1 ? 10 : (kind == 9 ? 1152921504606846976 : 8));
+        l.attribute(format: VertexFormat::Float32x2, offset: kind == 10 ? 1152921504606846976 : 0, shaderLocation: 0);
+        VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs");
+        v.buffer(layout: give l);
+        FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs");
+        f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+        RenderPipelineDescriptor buffered = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+        buffered.fragment(state: give f);
+        buffered.label(text: kind == 1 ? "odd stride" : (kind == 9 ? "far stride" : "far offset"));
+        return buffered;
+    }
+    if (kind == 22) {
+        VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs0");
+        v.constant(name: "k", value: notANumber());
+        FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs");
+        f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+        RenderPipelineDescriptor constant = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+        constant.fragment(state: give f);
+        constant.label(text: "nan vertex constant");
+        return constant;
+    }
+    VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs0");
+    FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs");
+    ColorTargetState t = ColorTargetState.make(format: TextureFormat::RGBA8Unorm);
+    string label = "misused";
+    if (kind == 3) {
+        int32 n = 0;
+        while (n < 8) { f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm)); n = n + 1; }
+        label = "nine targets";
+    }
+    if (kind == 6) { t.format = TextureFormat::RGB9E5Ufloat; label = "not renderable"; }
+    if (kind == 7) { f.constant(name: "nosuch", value: 1.0); label = "unknown constant"; }
+    if (kind == 8) {
+        BlendComponent least = BlendComponent.make();
+        least.operation = BlendOperation::Min;
+        least.srcFactor = BlendFactor::SrcAlpha;
+        t.blend = Optional::Some(value: BlendState.make(color: least, alpha: BlendComponent.make()));
+        label = "min with a factor";
+    }
+    if (kind == 23) { f.constant(name: "k", value: infinity(sign: -1.0)); label = "infinite fragment constant"; }
+    if (kind == 26) { t.format = TextureFormat::BC1RGBAUnorm; label = "compressed target"; }
+    if (kind == 28) { t.format = TextureFormat::R16Unorm; label = "sixteen-bit target"; }
+    if (kind == 29) {
+        BlendComponent dual = BlendComponent.make();
+        dual.dstFactor = BlendFactor::Src1;
+        t.blend = Optional::Some(value: BlendState.make(color: dual, alpha: BlendComponent.make()));
+        label = "dual source";
+    }
+    f.target(state: t);
+    RenderPipelineDescriptor result = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+    result.fragment(state: give f);
+    if (kind == 2) { result.multisampleMut().count = 3; label = "three samples"; }
+    if (kind == 11) { result.primitiveMut().unclippedDepth = true; label = "unclipped"; }
+    if (kind == 12) {
+        result.depthStencil(state: DepthStencilState.make(format: TextureFormat::Stencil8, depthWriteEnabled: false, depthCompare: CompareFunction::Less));
+        label = "stencil with a depth test";
+    }
+    if (kind == 4) { result.primitiveMut().stripIndexFormat = Optional::Some(value: IndexFormat::Uint16); label = "strip with a list"; }
+    if (kind == 5) {
+        DepthStencilState biased = DepthStencilState.make(format: TextureFormat::Depth24Plus, depthWriteEnabled: true, depthCompare: CompareFunction::Less);
+        biased.depthBias = 1;
+        result.depthStencil(state: biased);
+        result.primitiveMut().topology = PrimitiveTopology::LineList;
+        label = "bias with lines";
+    }
+    if (kind == 20 || kind == 21) {
+        DepthStencilState biased = DepthStencilState.make(format: TextureFormat::Depth24Plus, depthWriteEnabled: true, depthCompare: CompareFunction::Less);
+        if (kind == 20) { biased.depthBiasSlopeScale = cast<float32>(notANumber()); label = "nan slope"; }
+        if (kind == 21) { biased.depthBiasClamp = cast<float32>(infinity(sign: 1.0)); label = "infinite clamp"; }
+        result.depthStencil(state: biased);
+    }
+    if (kind == 24) {
+        result.depthStencil(state: DepthStencilState.make(format: TextureFormat::Stencil8, depthWriteEnabled: true, depthCompare: CompareFunction::Always));
+        label = "depth to stencil";
+    }
+    if (kind == 25) {
+        result.depthStencil(state: DepthStencilState.make(format: TextureFormat::RGBA8Unorm, depthWriteEnabled: true, depthCompare: CompareFunction::Always));
+        label = "depth to colour";
+    }
+    if (kind == 27) {
+        result.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32FloatStencil8, depthWriteEnabled: true, depthCompare: CompareFunction::Less));
+        label = "unfeatured depth";
+    }
+    result.label(text: give label);
+    return result;
+}
+
+// "" when each of the parts starts at WebGPU's defaults.
+fn string defaultsHeld() {
+    PrimitiveState p = PrimitiveState.make();
+    bool list = match (p.topology) { case TriangleList: true; case _: false; };
+    bool ccw = match (p.frontFace) { case CCW: true; case _: false; };
+    bool uncut = match (p.cullMode) { case None: true; case _: false; };
+    if (!list || p.stripIndexFormat.isSome() || !ccw || !uncut || p.unclippedDepth) {
+        return "PrimitiveState is not a triangle list, no strip format, counter-clockwise, nothing culled, clipped";
+    }
+    MultisampleState m = MultisampleState.make();
+    uint32 count = m.count;
+    uint32 mask = m.mask;
+    if (count != 1 || mask != 0xFFFFFFFF || m.alphaToCoverageEnabled) { return "MultisampleState: count ${count}, mask ${mask}"; }
+    StencilFaceState s = StencilFaceState.make();
+    bool always = match (s.compare) { case Always: true; case _: false; };
+    bool keeps = keeping(o: s.failOp) && keeping(o: s.depthFailOp) && keeping(o: s.passOp);
+    if (!always || !keeps) { return "StencilFaceState is not Always and Keep"; }
+    DepthStencilState d = DepthStencilState.make(format: TextureFormat::Depth24Plus, depthWriteEnabled: true, depthCompare: CompareFunction::Less);
+    bool front = match (d.stencilFront.compare) { case Always: true; case _: false; };
+    if (d.stencilReadMask != 0xFFFFFFFF || d.stencilWriteMask != 0xFFFFFFFF || d.depthBias != 0
+        || d.depthBiasSlopeScale != 0.0 || d.depthBiasClamp != 0.0 || !front) {
+        return "DepthStencilState's masks, bias or stencil faces are not WebGPU's defaults";
+    }
+    BlendComponent b = BlendComponent.make();
+    bool adds = match (b.operation) { case Add: true; case _: false; };
+    bool once = match (b.srcFactor) { case One: true; case _: false; };
+    bool nothing = match (b.dstFactor) { case Zero: true; case _: false; };
+    if (!adds || !once || !nothing) { return "BlendComponent is not Add, One, Zero"; }
+    ColorTargetState t = ColorTargetState.make(format: TextureFormat::RGBA8Unorm);
+    if (t.writeMask != ColorWriteMask::All || t.blend.isSome()) { return "ColorTargetState writes not every channel, or blends"; }
+    return "";
+}
+
+fn bool keeping(StencilOperation o) { return match (o) { case Keep: true; case _: false; }; }
+
+// The red, green, blue and alpha bytes of one RGBA8Unorm texel.
+fn DynamicArray<uint8> pixel(uint8 r, uint8 g, uint8 b, uint8 a) {
+    DynamicArray<uint8> p = DynamicArray.empty();
+    p.add(item: r);
+    p.add(item: g);
+    p.add(item: b);
+    p.add(item: a);
+    return p;
+}
+
+// The first texel's four bytes of a mapped copy.
+unsafe fn DynamicArray<uint8> firstTexel(const ref BufferRead r) {
+    DynamicArray<uint8> all = r.bytes();
+    DynamicArray<uint8> four = DynamicArray.empty();
+    isize i = 0;
+    while (i < 4 && i < all.length()) { four.add(item: all[i]); i = i + 1; }
+    return four;
+}
+
+fn string sameBytes(const ref DynamicArray<uint8> got, const ref DynamicArray<uint8> want) {
+    if (got.length() != want.length()) {
+        isize g = got.length();
+        isize w = want.length();
+        return "${g} bytes, not ${w}";
+    }
+    isize i = 0;
+    while (i < got.length()) {
+        if (got[i] != want[i]) {
+            uint8 a = got[i];
+            uint8 b = want[i];
+            return "byte ${i} is ${a}, not ${b}";
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+// The channel's reports, for a failure's words.
+fn string described(const ref DeviceErrors errs) {
+    isize n = errs.reports().length();
+    if (n == 0) { return "nothing"; }
+    string first = errs.reports()[0].message();
+    return "${n} report(s), the first: ${first}";
+}
+
+// "" when `errs` holds one validation error whose words name `label`, and say `says` when it is not "".
+fn string oneNaming(const ref DeviceErrors errs, const ref string label, const ref string says) {
+    if (errs.reports().length() != 1) { return "want one error; " + described(errs: errs); }
+    bool validation = match (errs.reports()[0].kind()) { case Validation: true; case _: false; };
+    string words = errs.reports()[0].message();
+    if (!validation) { return "not a validation error: ${words}"; }
+    if (!words.contains(substring: label)) { return "its words do not name `${label}`: ${words}"; }
+    if (!says.isEmpty() && !words.contains(substring: says)) { return "its words do not say `${says}`: ${words}"; }
+    return "";
+}

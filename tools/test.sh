@@ -124,7 +124,7 @@ else
             name="${browser##*[/\\]}"
             if [[ "${name,,}" == *firefox* ]]; then
                 echo "-- kama run, $browser (no WebGPU adapter here: the cases that need one say so)"
-                KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless -- --adapter-optional --no-immediates --no-shader-warnings || failed=1
+                KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless -- --adapter-optional --no-immediates --no-shader-warnings --huge-buffer-out-of-memory || failed=1
             else
                 echo "-- kama run, $browser"
                 KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless || failed=1

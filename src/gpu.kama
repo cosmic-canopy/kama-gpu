@@ -28,7 +28,7 @@
 // `TextureFormat` is generated with the bindings (src/formats.gen.kama).
 
 import {
-    TextureFormat,
+    TextureFormat, VertexFormat,
     std::collections::DynamicArray, std::collections::ConstView,
     std::memory::Shared,
     std::encoding::utf8::decode, std::encoding::utf8::Utf8Error, std::num::float32Max,
@@ -90,6 +90,16 @@ import {
     gpu::native::compilationPoll, gpu::native::compilationCount, gpu::native::compilationPlace,
     gpu::native::compilationTextLength, gpu::native::compilationText, gpu::native::compilationMessage,
     gpu::native::compilationDrop,
+    gpu::native::deviceCreateRenderPipeline, gpu::native::renderPipelineAddRef, gpu::native::renderPipelineRelease,
+    gpu::native::renderPipelineGetBindGroupLayout, gpu::native::renderPassEncoderSetPipeline,
+    gpu::native::renderPassEncoderDraw,
+    gpu::native::WGPURenderPipelineDescriptor, gpu::native::WGPUVertexBufferLayout, gpu::native::WGPUVertexAttribute,
+    gpu::native::WGPUConstantEntry, gpu::native::WGPUColorTargetState, gpu::native::WGPUBlendState,
+    gpu::native::WGPUBlendComponent, gpu::native::WGPUDepthStencilState, gpu::native::WGPUStencilFaceState,
+    gpu::native::WGPUFragmentState, gpu::native::WGPUColorWriteMask, gpu::native::WGPUBlendFactor,
+    gpu::native::WGPUBlendOperation, gpu::native::WGPUCullMode, gpu::native::WGPUFrontFace, gpu::native::WGPUIndexFormat,
+    gpu::native::WGPUOptionalBool, gpu::native::WGPUPrimitiveTopology, gpu::native::WGPUStencilOperation,
+    gpu::native::WGPUVertexStepMode,
     window::Window, window::NativeWindow, window::NativeKind, window::Size,
 };
 
@@ -109,6 +119,10 @@ export {
     BindGroup, BindGroupDescriptor, BindingResource, BufferBinding,
     ShaderModuleDescriptor, ShaderModule, CompilationRequest, CompilationStatus, CompilationInfo, CompilationMessage,
     CompilationMessageKind,
+    ColorWriteMask, VertexFormat, PrimitiveTopology, IndexFormat, FrontFace, CullMode, StencilOperation, BlendOperation,
+    BlendFactor, VertexStepMode, PrimitiveState, MultisampleState, StencilFaceState, DepthStencilState, BlendComponent,
+    BlendState, ColorTargetState, VertexBufferLayout, VertexState, FragmentState, Layout, RenderPipelineDescriptor,
+    RenderPipeline,
 };
 
 comptime int32 MESSAGE_BYTES = 512;
@@ -741,6 +755,29 @@ type value ShaderStage {
     public const fn uint64 bits() { return this.mask; }
 }
 
+// The channels of a colour target a pipeline writes (WebGPU's `GPUColorWriteFlags`), joined with `|` (AGENTS.gpu.md
+// item 12, decision 6). `None` writes no channel, which WebGPU takes, as it takes no empty usage; `All`, every channel,
+// is WebGPU's default.
+@generate(Equatable)
+type value ColorWriteMask {
+    uint64 mask;
+
+    ctor fromBits(uint64 bits) { this.mask = bits; }
+
+    public comptime ColorWriteMask None = ColorWriteMask.fromBits(bits: WGPUColorWriteMask::None);
+    public comptime ColorWriteMask Red = ColorWriteMask.fromBits(bits: WGPUColorWriteMask::Red);
+    public comptime ColorWriteMask Green = ColorWriteMask.fromBits(bits: WGPUColorWriteMask::Green);
+    public comptime ColorWriteMask Blue = ColorWriteMask.fromBits(bits: WGPUColorWriteMask::Blue);
+    public comptime ColorWriteMask Alpha = ColorWriteMask.fromBits(bits: WGPUColorWriteMask::Alpha);
+    public comptime ColorWriteMask All = ColorWriteMask.fromBits(bits: WGPUColorWriteMask::All);
+
+    // Every channel either side has.
+    public ColorWriteMask operator|(ColorWriteMask rhs) { return ColorWriteMask.fromBits(bits: this.mask | rhs.mask); }
+    // Does this set hold every channel of `flags`?
+    public const fn bool has(ColorWriteMask flags) { return (this.mask & flags.mask) == flags.mask; }
+    public const fn uint64 bits() { return this.mask; }
+}
+
 // A colour, each channel 0 to 1, made memberwise: `Color.of(r: 0.1, g: 0.2, b: 0.3, a: 1.0)`.
 @generate(of)
 type value Color {
@@ -1149,6 +1186,73 @@ type resource Device implements Copyable<This>(bare: give) {
         UnsafePtr raw = deviceCreateSampler(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d)));
         quietEnd(device: this.handle);
         return Sampler.fromDevice(raw: raw, block: this.hold.raw());
+    }
+
+    // A render pipeline as `descriptor` describes it (WebGPU's `createRenderPipeline`; AGENTS.gpu.md item 12, decision
+    // 2). It is handed back at once, its error reported as every error is, to the device's channel or a scope. What a
+    // browser throws on or wgpu-native ends the process on is refused in the package's words, and the pipeline handed
+    // back is invalid (decision 9).
+    public unsafe fn RenderPipeline createRenderPipeline(RenderPipelineDescriptor descriptor) {
+        string refused = this.pipelineRefusal(descriptor: descriptor);
+        LoweredPipeline lowered = LoweredPipeline.fromDescription(descriptor: descriptor);
+        if (refused.isEmpty()) {
+            UnsafePtr raw = deviceCreateRenderPipeline(device: this.handle, descriptor: lowered.pointer());
+            return RenderPipeline.fromDevice(raw: raw, block: this.hold.raw());
+        }
+        this.refuse(words: refused);
+        quietBegin(device: this.handle);
+        UnsafePtr substitute = deviceCreateRenderPipeline(device: this.handle, descriptor: lowered.substitutePointer());
+        quietEnd(device: this.handle);
+        return RenderPipeline.fromDevice(raw: substitute, block: this.hold.raw());
+    }
+
+    // Why the package refuses `descriptor` on this device, or "" (decision 9): a pipeline constant or a depth bias that
+    // is not a finite number, a format or a blend factor whose feature the device lacks (a browser throws on each), and
+    // a depth write to a format with no depth (wgpu-native ends the process on it). The rest is WebGPU's validation.
+    unsafe const fn string pipelineRefusal(const ref RenderPipelineDescriptor descriptor) {
+        string what = "the render pipeline '" + descriptor.labelled + "'";
+        string vertexConstants = constantRefusal(names: descriptor.vertexState.constantNames,
+                                                 values: descriptor.vertexState.constantValues, what: what);
+        if (!vertexConstants.isEmpty()) { return vertexConstants; }
+        match (descriptor.depthState) {
+            case Some(value: s): {
+                float64 slope = cast<float64>(s.depthBiasSlopeScale);
+                float64 clamp = cast<float64>(s.depthBiasClamp);
+                if (!finiteNumber(x: slope) || !finiteNumber(x: clamp)) {
+                    return "${what} has a depth bias that is not a finite number (depthBiasSlopeScale ${slope}, depthBiasClamp ${clamp}): WebGPU refuses it";
+                }
+                if (s.depthWriteEnabled && !hasDepth(format: s.format)) {
+                    string f = s.format.name();
+                    return "${what} writes depth to ${f}, a format with no depth: WebGPU refuses it";
+                }
+                string depthFormat = this.formatRefusal(format: s.format, what: what);
+                if (!depthFormat.isEmpty()) { return depthFormat; }
+            }
+            case None: { }
+        };
+        match (descriptor.fragmentState) {
+            case Some(value: f): {
+                string fragmentConstants = constantRefusal(names: f.constantNames, values: f.constantValues, what: what);
+                if (!fragmentConstants.isEmpty()) { return fragmentConstants; }
+                bool dual = this.features().has(feature: Feature::DualSourceBlending);
+                isize i = 0;
+                while (i < f.targetList.length()) {
+                    match (f.targetList[i]) {
+                        case Some(value: target): {
+                            string targetFormat = this.formatRefusal(format: target.format, what: what);
+                            if (!targetFormat.isEmpty()) { return targetFormat; }
+                            if (!dual && blendsDual(target: target)) {
+                                return "${what} blends with a Src1 factor, which needs the feature DualSourceBlending; the device was not given it, and WebGPU refuses it";
+                            }
+                        }
+                        case None: { }
+                    };
+                    i = i + 1;
+                }
+            }
+            case None: { }
+        };
+        return "";
     }
 
     // Why `what` may not use `format` on this device, or "": a format whose feature the device was not given, which a
@@ -1738,6 +1842,7 @@ type resource BindGroupLayout implements Copyable<This>(bare: give) {
     StateHold hold = StateHold.empty();   // its device's state, which its errors reach
 
     friend Device::createBindGroupLayout[fromDevice];
+    friend RenderPipeline::getBindGroupLayout[fromDevice];
 
     // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
@@ -2279,6 +2384,577 @@ fn string oneLine(const ref string words) {
     return give firstLine;
 }
 
+// ---- render pipelines (GPU-4 part 3; AGENTS.gpu.md item 12, decisions 1, 2 and 9) ------------------------------------
+
+// How vertices make primitives (WebGPU's `GPUPrimitiveTopology`).
+type enum PrimitiveTopology { PointList, LineList, LineStrip, TriangleList, TriangleStrip }
+// The element of an index buffer (WebGPU's `GPUIndexFormat`).
+type enum IndexFormat { Uint16, Uint32 }
+// The winding that faces the viewer (WebGPU's `GPUFrontFace`): counter-clockwise or clockwise.
+type enum FrontFace { CCW, CW }
+// The faces left undrawn (WebGPU's `GPUCullMode`).
+type enum CullMode { None, Front, Back }
+// What a stencil test's outcome does to the stencil value (WebGPU's `GPUStencilOperation`).
+type enum StencilOperation { Keep, Zero, Replace, Invert, IncrementClamp, DecrementClamp, IncrementWrap, DecrementWrap }
+// How a blend joins the source and the destination (WebGPU's `GPUBlendOperation`).
+type enum BlendOperation { Add, Subtract, ReverseSubtract, Min, Max }
+// What a blend multiplies each side by (WebGPU's `GPUBlendFactor`). The four `Src1` factors need DualSourceBlending.
+type enum BlendFactor {
+    Zero, One, Src, OneMinusSrc, SrcAlpha, OneMinusSrcAlpha, Dst, OneMinusDst, DstAlpha, OneMinusDstAlpha,
+    SrcAlphaSaturated, Constant, OneMinusConstant, Src1, OneMinusSrc1, Src1Alpha, OneMinusSrc1Alpha
+}
+// Whether a vertex buffer advances per vertex or per instance (WebGPU's `GPUVertexStepMode`).
+type enum VertexStepMode { Vertex, Instance }
+
+fn int32 topologyValue(PrimitiveTopology t) {
+    return match (t) {
+        case PointList: WGPUPrimitiveTopology::PointList;
+        case LineList: WGPUPrimitiveTopology::LineList;
+        case LineStrip: WGPUPrimitiveTopology::LineStrip;
+        case TriangleList: WGPUPrimitiveTopology::TriangleList;
+        case TriangleStrip: WGPUPrimitiveTopology::TriangleStrip;
+    };
+}
+
+fn int32 indexFormatValue(IndexFormat f) {
+    return match (f) { case Uint16: WGPUIndexFormat::Uint16; case Uint32: WGPUIndexFormat::Uint32; };
+}
+
+fn int32 frontFaceValue(FrontFace f) {
+    return match (f) { case CCW: WGPUFrontFace::CCW; case CW: WGPUFrontFace::CW; };
+}
+
+fn int32 cullModeValue(CullMode c) {
+    return match (c) { case None: WGPUCullMode::None; case Front: WGPUCullMode::Front; case Back: WGPUCullMode::Back; };
+}
+
+fn int32 stencilOperationValue(StencilOperation o) {
+    return match (o) {
+        case Keep: WGPUStencilOperation::Keep;
+        case Zero: WGPUStencilOperation::Zero;
+        case Replace: WGPUStencilOperation::Replace;
+        case Invert: WGPUStencilOperation::Invert;
+        case IncrementClamp: WGPUStencilOperation::IncrementClamp;
+        case DecrementClamp: WGPUStencilOperation::DecrementClamp;
+        case IncrementWrap: WGPUStencilOperation::IncrementWrap;
+        case DecrementWrap: WGPUStencilOperation::DecrementWrap;
+    };
+}
+
+fn int32 blendOperationValue(BlendOperation o) {
+    return match (o) {
+        case Add: WGPUBlendOperation::Add;
+        case Subtract: WGPUBlendOperation::Subtract;
+        case ReverseSubtract: WGPUBlendOperation::ReverseSubtract;
+        case Min: WGPUBlendOperation::Min;
+        case Max: WGPUBlendOperation::Max;
+    };
+}
+
+fn int32 blendFactorValue(BlendFactor f) {
+    return match (f) {
+        case Zero: WGPUBlendFactor::Zero;
+        case One: WGPUBlendFactor::One;
+        case Src: WGPUBlendFactor::Src;
+        case OneMinusSrc: WGPUBlendFactor::OneMinusSrc;
+        case SrcAlpha: WGPUBlendFactor::SrcAlpha;
+        case OneMinusSrcAlpha: WGPUBlendFactor::OneMinusSrcAlpha;
+        case Dst: WGPUBlendFactor::Dst;
+        case OneMinusDst: WGPUBlendFactor::OneMinusDst;
+        case DstAlpha: WGPUBlendFactor::DstAlpha;
+        case OneMinusDstAlpha: WGPUBlendFactor::OneMinusDstAlpha;
+        case SrcAlphaSaturated: WGPUBlendFactor::SrcAlphaSaturated;
+        case Constant: WGPUBlendFactor::Constant;
+        case OneMinusConstant: WGPUBlendFactor::OneMinusConstant;
+        case Src1: WGPUBlendFactor::Src1;
+        case OneMinusSrc1: WGPUBlendFactor::OneMinusSrc1;
+        case Src1Alpha: WGPUBlendFactor::Src1Alpha;
+        case OneMinusSrc1Alpha: WGPUBlendFactor::OneMinusSrc1Alpha;
+    };
+}
+
+fn int32 stepModeValue(VertexStepMode m) {
+    return match (m) { case Vertex: WGPUVertexStepMode::Vertex; case Instance: WGPUVertexStepMode::Instance; };
+}
+
+// WebGPU's `GPUPrimitiveState`: how vertices make primitives and which faces are culled, at WebGPU's defaults (a
+// triangle list, counter-clockwise front faces, nothing culled). A strip's index format is set only for a strip, and
+// `unclippedDepth` needs DepthClipControl.
+type value PrimitiveState {
+    public PrimitiveTopology topology = PrimitiveTopology::TriangleList;
+    public Optional<IndexFormat> stripIndexFormat = Optional::None;
+    public FrontFace frontFace = FrontFace::CCW;
+    public CullMode cullMode = CullMode::None;
+    public bool unclippedDepth = false;
+
+    public ctor make() { }
+}
+
+// WebGPU's `GPUMultisampleState`: the samples a pipeline draws, at WebGPU's defaults (one sample, every sample in the
+// mask, no alpha to coverage). A mask of 0 draws nothing, silently, on both legs (measured).
+type value MultisampleState {
+    public uint32 count = 1;
+    public uint32 mask = 0xFFFFFFFF;
+    public bool alphaToCoverageEnabled = false;
+
+    public ctor make() { }
+}
+
+// WebGPU's `GPUStencilFaceState`: one face's stencil test and what each outcome does, at WebGPU's defaults (always
+// passing, keeping the value).
+type value StencilFaceState {
+    public CompareFunction compare = CompareFunction::Always;
+    public StencilOperation failOp = StencilOperation::Keep;
+    public StencilOperation depthFailOp = StencilOperation::Keep;
+    public StencilOperation passOp = StencilOperation::Keep;
+
+    public ctor make() { }
+}
+
+// WebGPU's `GPUDepthStencilState`: the depth and stencil target's format, the depth test, the stencil test and the
+// depth bias. WebGPU requires the format, whether depth is written and the depth test, so `make` takes them; the rest
+// start at WebGPU's defaults. A depth bias that is not a finite number, and a depth write to a format with no depth,
+// are refused (decision 9): a browser throws on the first, and wgpu-native ends the process on the second.
+type value DepthStencilState {
+    public TextureFormat format;
+    public bool depthWriteEnabled;
+    public CompareFunction depthCompare;
+    public StencilFaceState stencilFront = StencilFaceState.make();
+    public StencilFaceState stencilBack = StencilFaceState.make();
+    public uint32 stencilReadMask = 0xFFFFFFFF;
+    public uint32 stencilWriteMask = 0xFFFFFFFF;
+    public int32 depthBias = 0;
+    public float32 depthBiasSlopeScale = 0.0;
+    public float32 depthBiasClamp = 0.0;
+
+    public ctor make(TextureFormat format, bool depthWriteEnabled, CompareFunction depthCompare) {
+        this.format = format;
+        this.depthWriteEnabled = depthWriteEnabled;
+        this.depthCompare = depthCompare;
+    }
+}
+
+// WebGPU's `GPUBlendComponent`: how one side of a blend (the colour or the alpha) joins source and destination, at
+// WebGPU's defaults (the source times one, plus the destination times zero: the source as it is).
+type value BlendComponent {
+    public BlendOperation operation = BlendOperation::Add;
+    public BlendFactor srcFactor = BlendFactor::One;
+    public BlendFactor dstFactor = BlendFactor::Zero;
+
+    public ctor make() { }
+}
+
+// WebGPU's `GPUBlendState`: the colour's blend and the alpha's, both of which WebGPU requires.
+type value BlendState {
+    public BlendComponent color;
+    public BlendComponent alpha;
+
+    public ctor make(BlendComponent color, BlendComponent alpha) {
+        this.color = color;
+        this.alpha = alpha;
+    }
+}
+
+// WebGPU's `GPUColorTargetState`: a colour target's format, its blend (none by default: the source is written as it
+// is), and the channels written (all by default). A format whose feature the device lacks is refused (decision 9).
+type value ColorTargetState {
+    public TextureFormat format;
+    public Optional<BlendState> blend = Optional::None;
+    public ColorWriteMask writeMask = ColorWriteMask::All;
+
+    public ctor make(TextureFormat format) { this.format = format; }
+}
+
+// WebGPU's `GPUVertexBufferLayout`: one vertex buffer's stride in bytes, whether it advances per vertex (the default)
+// or per instance, and its attributes. A stride or an offset past 2^53 - 1 is clamped (decision 9).
+type resource VertexBufferLayout {
+    uint64 stride;
+    VertexStepMode steps = VertexStepMode::Vertex;
+    DynamicArray<WGPUVertexAttribute> attributeList;
+
+    friend LoweredPipeline::fromDescription[...];
+
+    public ctor make(uint64 arrayStride) {
+        this.stride = arrayStride;
+        this.attributeList = DynamicArray.empty();
+    }
+    // Per vertex, the default, or per instance.
+    public fn void stepMode(VertexStepMode mode) { this.steps = mode; }
+    // An attribute: `format` at `offset` bytes into each element, read by the shader's `@location(shaderLocation)`.
+    public fn void attribute(VertexFormat format, uint64 offset, uint32 shaderLocation) {
+        WGPUVertexAttribute a = WGPUVertexAttribute.zero();
+        a.format = format.value();
+        a.offset = inRange(v: offset);
+        a.shaderLocation = shaderLocation;
+        this.attributeList.add(item: a);
+    }
+}
+
+// WebGPU's `GPUVertexState`: the vertex stage's module and entry point, its pipeline constants, and the vertex buffers
+// it reads, in slot order.
+type resource VertexState {
+    ShaderModule shader;
+    string entry;
+    DynamicArray<string> constantNames;
+    DynamicArray<float64> constantValues;
+    DynamicArray<VertexBufferLayout> bufferList;
+
+    friend LoweredPipeline::fromDescription[...];
+    friend Device::pipelineRefusal[...];
+
+    public ctor make(ShaderModule module, string entryPoint) {
+        this.shader = give module;
+        this.entry = give entryPoint;
+        this.constantNames = DynamicArray.empty();
+        this.constantValues = DynamicArray.empty();
+        this.bufferList = DynamicArray.empty();
+    }
+    // The pipeline-overridable constant `name` (a WGSL `override`) set to `value`. A value that is not a finite number
+    // is refused (decision 9).
+    public fn void constant(string name, float64 value) {
+        this.constantNames.add(item: give name);
+        this.constantValues.add(item: value);
+    }
+    // The next vertex buffer slot's layout.
+    public fn void buffer(VertexBufferLayout layout) { this.bufferList.add(item: give layout); }
+}
+
+// WebGPU's `GPUFragmentState`: the fragment stage's module and entry point, its pipeline constants, and its colour
+// targets in attachment order, any of them left empty (WebGPU's `null` target).
+type resource FragmentState {
+    ShaderModule shader;
+    string entry;
+    DynamicArray<string> constantNames;
+    DynamicArray<float64> constantValues;
+    DynamicArray<Optional<ColorTargetState>> targetList;
+
+    friend LoweredPipeline::fromDescription[...];
+    friend Device::pipelineRefusal[...];
+
+    public ctor make(ShaderModule module, string entryPoint) {
+        this.shader = give module;
+        this.entry = give entryPoint;
+        this.constantNames = DynamicArray.empty();
+        this.constantValues = DynamicArray.empty();
+        this.targetList = DynamicArray.empty();
+    }
+    // The pipeline-overridable constant `name` (a WGSL `override`) set to `value`, refused unless finite (decision 9).
+    public fn void constant(string name, float64 value) {
+        this.constantNames.add(item: give name);
+        this.constantValues.add(item: value);
+    }
+    // The next colour attachment's target.
+    public fn void target(ColorTargetState state) { this.targetList.add(item: Optional::Some(value: state)); }
+    // The next colour attachment left empty: nothing is written there.
+    public fn void emptyTarget() { this.targetList.add(item: Optional::None); }
+}
+
+// Whether a pipeline's bind group layouts are given (`Explicit`) or read from its shaders (`Auto`, WebGPU's "auto",
+// whose layouts `pipeline.getBindGroupLayout(index:)` hands back).
+type enum Layout { Auto, Explicit(PipelineLayout layout) }
+
+// WebGPU's `GPURenderPipelineDescriptor` (AGENTS.gpu.md item 12, decision 1): its layout and its vertex stage, which
+// WebGPU requires; how primitives are made, its depth and stencil (none by default), its samples, and its fragment
+// stage (none by default, as a depth-only pass has); and a label. The value parts are changed in place:
+// `d.primitiveMut().cullMode = CullMode::Back;`.
+type resource RenderPipelineDescriptor {
+    Layout layoutChoice;
+    VertexState vertexState;
+    PrimitiveState primitiveState = PrimitiveState.make();
+    Optional<DepthStencilState> depthState = Optional::None;
+    MultisampleState multisampleState = MultisampleState.make();
+    Optional<FragmentState> fragmentState = Optional::None;
+    string labelled = "";
+
+    friend LoweredPipeline::fromDescription[...];
+    friend Device::pipelineRefusal[...];
+
+    public ctor make(Layout layout, VertexState vertex) {
+        this.layoutChoice = give layout;
+        this.vertexState = give vertex;
+    }
+    // The fragment stage: its module, entry point, constants and colour targets.
+    public fn void fragment(FragmentState state) { this.fragmentState = Optional::Some(value: give state); }
+    // The depth and stencil test, and the format of the target it reads.
+    public fn void depthStencil(DepthStencilState state) { this.depthState = Optional::Some(value: state); }
+    public fn void label(string text) { this.labelled = give text; }
+    public const fn const ref string labelText() { return this.labelled; }
+    // How vertices make primitives, changed in place.
+    public fn ref PrimitiveState primitiveMut() { return this.primitiveState; }
+    // The samples drawn, changed in place.
+    public fn ref MultisampleState multisampleMut() { return this.multisampleState; }
+}
+
+// Whether `format` has a depth aspect, which a depth write needs.
+fn bool hasDepth(TextureFormat format) {
+    return match (format) {
+        case Depth16Unorm: true;
+        case Depth24Plus: true;
+        case Depth24PlusStencil8: true;
+        case Depth32Float: true;
+        case Depth32FloatStencil8: true;
+        case _: false;
+    };
+}
+
+// Whether `x` is a finite number: x - x is 0 for one, and NaN for NaN or an infinity.
+fn bool finiteNumber(float64 x) {
+    float64 gap = x - x;
+    return gap == 0.0;
+}
+
+fn bool dualSource(BlendFactor f) {
+    return match (f) {
+        case Src1: true;
+        case OneMinusSrc1: true;
+        case Src1Alpha: true;
+        case OneMinusSrc1Alpha: true;
+        case _: false;
+    };
+}
+
+// Whether `target` blends with one of the four `Src1` factors, which need DualSourceBlending.
+fn bool blendsDual(ColorTargetState target) {
+    return match (target.blend) {
+        case Some(value: b): dualSource(f: b.color.srcFactor) || dualSource(f: b.color.dstFactor)
+            || dualSource(f: b.alpha.srcFactor) || dualSource(f: b.alpha.dstFactor);
+        case None: false;
+    };
+}
+
+// Why `what` may not set these constants, or "": one that is not a finite number, which a browser throws on.
+fn string constantRefusal(const ref DynamicArray<string> names, const ref DynamicArray<float64> values, const ref string what) {
+    isize i = 0;
+    while (i < values.length()) {
+        float64 v = values[i];
+        if (!finiteNumber(x: v)) {
+            string n = copy names[i];
+            return "${what} sets the pipeline constant '${n}' to ${v}, which is not a finite number: WebGPU refuses it";
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+fn WGPUStencilFaceState stencilFaceOf(StencilFaceState f) {
+    WGPUStencilFaceState s = WGPUStencilFaceState.zero();
+    s.compare = compareValue(c: f.compare);
+    s.failOp = stencilOperationValue(o: f.failOp);
+    s.depthFailOp = stencilOperationValue(o: f.depthFailOp);
+    s.passOp = stencilOperationValue(o: f.passOp);
+    return s;
+}
+
+fn WGPUDepthStencilState depthStencilOf(DepthStencilState state) {
+    WGPUDepthStencilState d = WGPUDepthStencilState.zero();
+    d.format = state.format.value();
+    d.depthWriteEnabled = state.depthWriteEnabled ? WGPUOptionalBool::True : WGPUOptionalBool::False;
+    d.depthCompare = compareValue(c: state.depthCompare);
+    d.stencilFront = stencilFaceOf(f: state.stencilFront);
+    d.stencilBack = stencilFaceOf(f: state.stencilBack);
+    d.stencilReadMask = state.stencilReadMask;
+    d.stencilWriteMask = state.stencilWriteMask;
+    d.depthBias = state.depthBias;
+    d.depthBiasSlopeScale = state.depthBiasSlopeScale;
+    d.depthBiasClamp = state.depthBiasClamp;
+    return d;
+}
+
+fn WGPUBlendComponent blendComponentOf(BlendComponent c) {
+    WGPUBlendComponent b = WGPUBlendComponent.zero();
+    b.operation = blendOperationValue(o: c.operation);
+    b.srcFactor = blendFactorValue(f: c.srcFactor);
+    b.dstFactor = blendFactorValue(f: c.dstFactor);
+    return b;
+}
+
+fn WGPUConstantEntry constantOf(const ref string name, float64 value) {
+    WGPUConstantEntry c = WGPUConstantEntry.zero();
+    c.key = labelOf(text: name);
+    c.value = value;
+    return c;
+}
+
+// webgpu.h's description of a render pipeline, lowered from a `RenderPipelineDescriptor`. It holds every array its
+// pointers reach, and borrows its strings from the description, so both must outlive the call it is handed to.
+type resource LoweredPipeline {
+    DynamicArray<DynamicArray<WGPUVertexAttribute>> attributeLists;
+    DynamicArray<WGPUVertexBufferLayout> buffers;
+    DynamicArray<WGPUConstantEntry> vertexConstants;
+    DynamicArray<WGPUConstantEntry> fragmentConstants;
+    DynamicArray<WGPUBlendState> blends;
+    DynamicArray<WGPUColorTargetState> targets;
+    DynamicArray<WGPUDepthStencilState> depth;     // none or one
+    DynamicArray<WGPUFragmentState> fragment;      // none or one
+    WGPURenderPipelineDescriptor described;
+
+    friend Device::createRenderPipeline[pointer, substitutePointer];
+
+    public unsafe ctor fromDescription(const ref RenderPipelineDescriptor descriptor) {
+        this.attributeLists = DynamicArray.empty();
+        this.buffers = DynamicArray.empty();
+        this.vertexConstants = DynamicArray.empty();
+        this.fragmentConstants = DynamicArray.empty();
+        this.blends = DynamicArray.empty();
+        this.targets = DynamicArray.empty();
+        this.depth = DynamicArray.empty();
+        this.fragment = DynamicArray.empty();
+        this.described = WGPURenderPipelineDescriptor.zero();
+        this.described.label = labelOf(text: descriptor.labelled);
+        match (descriptor.layoutChoice) {
+            case Auto: { }
+            case Explicit(layout: l): { this.described.layout = l.raw(); }
+        };
+
+        // the vertex stage: every array filled before a pointer into it is taken
+        isize i = 0;
+        while (i < descriptor.vertexState.bufferList.length()) {
+            this.attributeLists.add(item: copy descriptor.vertexState.bufferList[i].attributeList);
+            WGPUVertexBufferLayout l = WGPUVertexBufferLayout.zero();
+            l.stepMode = stepModeValue(m: descriptor.vertexState.bufferList[i].steps);
+            l.arrayStride = inRange(v: descriptor.vertexState.bufferList[i].stride);
+            l.attributeCount = cast<usize>(descriptor.vertexState.bufferList[i].attributeList.length());
+            this.buffers.add(item: l);
+            i = i + 1;
+        }
+        i = 0;
+        while (i < this.buffers.length()) {
+            this.buffers[i].attributes = cast<UnsafePtr>(this.attributeLists[i].dataPtrMut());
+            i = i + 1;
+        }
+        i = 0;
+        while (i < descriptor.vertexState.constantNames.length()) {
+            this.vertexConstants.add(item: constantOf(name: descriptor.vertexState.constantNames[i],
+                                                      value: descriptor.vertexState.constantValues[i]));
+            i = i + 1;
+        }
+        this.described.vertex.module = descriptor.vertexState.shader.raw();
+        this.described.vertex.entryPoint = labelOf(text: descriptor.vertexState.entry);
+        this.described.vertex.constantCount = cast<usize>(this.vertexConstants.length());
+        this.described.vertex.constants = cast<UnsafePtr>(this.vertexConstants.dataPtrMut());
+        this.described.vertex.bufferCount = cast<usize>(this.buffers.length());
+        this.described.vertex.buffers = cast<UnsafePtr>(this.buffers.dataPtrMut());
+
+        // how primitives are made, and the samples
+        PrimitiveState shape = descriptor.primitiveState;
+        this.described.primitive.topology = topologyValue(t: shape.topology);
+        int32 strip = match (shape.stripIndexFormat) {
+            case Some(value: f): indexFormatValue(f: f);
+            case None: WGPUIndexFormat::Undefined;
+        };
+        this.described.primitive.stripIndexFormat = strip;
+        this.described.primitive.frontFace = frontFaceValue(f: shape.frontFace);
+        this.described.primitive.cullMode = cullModeValue(c: shape.cullMode);
+        this.described.primitive.unclippedDepth = shape.unclippedDepth ? 1 : 0;
+        MultisampleState samples = descriptor.multisampleState;
+        this.described.multisample.count = samples.count;
+        this.described.multisample.mask = samples.mask;
+        this.described.multisample.alphaToCoverageEnabled = samples.alphaToCoverageEnabled ? 1 : 0;
+
+        // depth and stencil
+        match (descriptor.depthState) {
+            case Some(value: s): { this.depth.add(item: depthStencilOf(state: s)); }
+            case None: { }
+        };
+        if (this.depth.length() > 0) { this.described.depthStencil = cast<UnsafePtr>(this.depth.dataPtrMut()); }
+
+        // the fragment stage: its targets, and their blends, filled before a pointer into either is taken
+        match (descriptor.fragmentState) {
+            case Some(value: f): {
+                DynamicArray<isize> blendAt = DynamicArray.empty();
+                isize k = 0;
+                while (k < f.targetList.length()) {
+                    WGPUColorTargetState c = WGPUColorTargetState.zero();
+                    isize at = -1;
+                    match (f.targetList[k]) {
+                        case Some(value: target): {
+                            c.format = target.format.value();
+                            c.writeMask = target.writeMask.bits();
+                            match (target.blend) {
+                                case Some(value: b): {
+                                    WGPUBlendState blended = WGPUBlendState.zero();
+                                    blended.color = blendComponentOf(c: b.color);
+                                    blended.alpha = blendComponentOf(c: b.alpha);
+                                    at = this.blends.length();
+                                    this.blends.add(item: blended);
+                                }
+                                case None: { }
+                            };
+                        }
+                        case None: { }
+                    };
+                    this.targets.add(item: c);
+                    blendAt.add(item: at);
+                    k = k + 1;
+                }
+                k = 0;
+                while (k < this.targets.length()) {
+                    if (blendAt[k] >= 0) { this.targets[k].blend = cast<UnsafePtr>(addr(of: this.blends[blendAt[k]])); }
+                    k = k + 1;
+                }
+                k = 0;
+                while (k < f.constantNames.length()) {
+                    this.fragmentConstants.add(item: constantOf(name: f.constantNames[k], value: f.constantValues[k]));
+                    k = k + 1;
+                }
+                WGPUFragmentState fs = WGPUFragmentState.zero();
+                fs.module = f.shader.raw();
+                fs.entryPoint = labelOf(text: f.entry);
+                fs.constantCount = cast<usize>(this.fragmentConstants.length());
+                fs.constants = cast<UnsafePtr>(this.fragmentConstants.dataPtrMut());
+                fs.targetCount = cast<usize>(this.targets.length());
+                fs.targets = cast<UnsafePtr>(this.targets.dataPtrMut());
+                this.fragment.add(item: fs);
+            }
+            case None: { }
+        };
+        if (this.fragment.length() > 0) { this.described.fragment = cast<UnsafePtr>(this.fragment.dataPtrMut()); }
+    }
+
+    // The description, for the call.
+    unsafe fn UnsafePtr pointer() { return cast<UnsafePtr>(addr(of: this.described)); }
+
+    // The same pipeline with no fragment stage, no depth, no vertex buffers and no constants, which WebGPU refuses on
+    // both legs since it has no target: what a refused description is replaced by, so the pipeline handed back is
+    // invalid (decision 9).
+    unsafe fn UnsafePtr substitutePointer() {
+        this.described.fragment = null;
+        this.described.depthStencil = null;
+        this.described.vertex.bufferCount = 0;
+        this.described.vertex.constantCount = 0;
+        return cast<UnsafePtr>(addr(of: this.described));
+    }
+}
+
+type resource RenderPipeline implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
+
+    friend Device::createRenderPipeline[fromDevice];
+
+    // One made elsewhere; it takes over one reference, and holds no device state.
+    public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+    }
+    public unsafe ctor copy(ref RenderPipeline source) {
+        this.handle = source.handle;
+        renderPipelineAddRef(renderPipeline: this.handle);
+        this.hold = copy source.hold;
+    }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    // The layout of bind group `index` (WebGPU's `getBindGroupLayout`), read from the shaders of a pipeline made with
+    // `Layout::Auto`. An index past the device's maxBindGroups is a validation error.
+    public unsafe fn BindGroupLayout getBindGroupLayout(uint32 index) {
+        UnsafePtr raw = renderPipelineGetBindGroupLayout(renderPipeline: this.handle, groupIndex: index);
+        return BindGroupLayout.fromDevice(raw: raw, block: this.hold.raw());
+    }
+
+    unsafe ~RenderPipeline() { if (this.handle != null) { renderPipelineRelease(renderPipeline: this.handle); } }
+}
+
 // ---- recording -------------------------------------------------------------------------------------------------------
 
 type resource CommandEncoder implements Copyable<This>(bare: give) {
@@ -2367,6 +3043,18 @@ type resource RenderPass implements Copyable<This>(bare: give) {
         this.hold = copy source.hold;
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    // Draw with `pipeline` from here on (WebGPU's `setPipeline`).
+    public unsafe fn void setPipeline(const ref RenderPipeline pipeline) {
+        renderPassEncoderSetPipeline(renderPassEncoder: this.handle, pipeline: pipeline.raw());
+    }
+
+    // Draw `vertexCount` vertices of each of `instanceCount` instances, from `firstVertex` and `firstInstance` (WebGPU's
+    // `draw`).
+    public unsafe fn void draw(uint32 vertexCount, uint32 instanceCount, uint32 firstVertex, uint32 firstInstance) {
+        renderPassEncoderDraw(renderPassEncoder: this.handle, vertexCount: vertexCount, instanceCount: instanceCount,
+                              firstVertex: firstVertex, firstInstance: firstInstance);
+    }
 
     // The pass is over; it is spent.
     public unsafe give fn void end() { renderPassEncoderEnd(renderPassEncoder: this.handle); }

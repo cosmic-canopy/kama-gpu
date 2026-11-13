@@ -33,7 +33,7 @@ import {
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::WindowOptions, window::Size, window::NativeWindow,
     addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly, heapInUse,
-    ShaderRun, Verdicts, BindingRun,
+    ShaderRun, Verdicts, BindingRun, PipelineRun,
 };
 
 comptime uint32 SIDE = 64;
@@ -545,6 +545,12 @@ unsafe fn bool noImmediates() { return hasFlag(flag: "--no-immediates"); }
 // passes it.
 unsafe fn bool noShaderWarnings() { return hasFlag(flag: "--no-shader-warnings"); }
 
+// `--huge-buffer-out-of-memory`: a browser that reports a buffer of 2^53 - 256 bytes, the size the package clamps a
+// larger one to, as out of memory, where WebGPU makes it a validation error (Firefox 160, measured on 2026-11-13; a
+// buffer of 2^28 + 1 bytes is a validation error there too), is held to that, where every other leg is held to WebGPU's
+// validation error. Only Firefox's leg passes it. Either way it is an error, not the end of the program (decision 9).
+unsafe fn bool hugeBufferOutOfMemory() { return hasFlag(flag: "--huge-buffer-out-of-memory"); }
+
 type resource Check implements App {
     Optional<Instance> instance = Optional::None;
     Optional<AdapterPool> pool = Optional::None;      // the adapters, one for each device below
@@ -570,11 +576,12 @@ type resource Check implements App {
     Optional<Queue> queue = Optional::None;
     Optional<Buffer> readback = Optional::None;
     Optional<BufferRead> read = Optional::None;
-    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 the error cases, 5 the shader cases, 6 done
+    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 the error cases, 5 the shader cases, 6 the binding cases, 7 the pipeline cases, 8 done
     Optional<SurfaceRun> surfaces = Optional::None;
     Optional<ErrorRun> errorRun = Optional::None;
     Optional<ShaderRun> shaderRun = Optional::None;
     Optional<BindingRun> bindingRun = Optional::None;
+    Optional<PipelineRun> pipelineRun = Optional::None;
     Instant began = monotonicNow();
     int32 runs = 0;
     int32 failures = 0;
@@ -641,7 +648,8 @@ type resource Check implements App {
             if (heap >= 0) { println(s: "info the heap in use, stage ${was} to ${now}: ${heap} bytes"); }
         }
         if (this.stage == 6) { this.bindingStep(); }
-        if (this.stage == 7) { return this.finish(); }
+        if (this.stage == 7) { this.pipelineStep(); }
+        if (this.stage == 8) { return this.finish(); }
         return 1;
     }
 
@@ -697,6 +705,24 @@ type resource Check implements App {
         if (done) { this.bindingRun = Optional::None; this.stage = 7; }
     }
 
+    // The cases of GPU-4's third part (tests/src/pipelines.kama), a step this tick, their verdicts reported here. With no
+    // adapter here (`--adapter-optional`) the check comes straight here, for the cases that need none.
+    unsafe fn void pipelineStep() {
+        Optional<PipelineRun> taken = replace(place: this.pipelineRun, with: Optional::None);
+        PipelineRun pending = match (give taken) { case Some(value: r): give r; case None: PipelineRun.make(adapterOptional: adapterOptional()); };
+        bool done = pending.step();
+        isize i = 0;
+        while (i < pending.verdicts().count()) {
+            string name = pending.verdicts().nameAt(at: i);
+            string why = pending.verdicts().whyAt(at: i);
+            this.verdict(name: name, why: why);
+            i = i + 1;
+        }
+        pending.verdicts().clear();
+        this.pipelineRun = Optional::Some(value: give pending);
+        if (done) { this.pipelineRun = Optional::None; this.stage = 8; }
+    }
+
     unsafe fn void awaitAdapter() {
         Optional<AdapterPool> taken = replace(place: this.pool, with: Optional::None);
         match (give taken) {
@@ -708,7 +734,8 @@ type resource Check implements App {
                 if (n < cast<isize>(ADAPTERS)) {
                     string words = p.failedWith();
                     if (p.noneHere() && adapterOptional()) {
-                        // Every case after this one needs an adapter: the surface cases and the error cases too.
+                        // Every case after this one needs an adapter, the surface cases and the error cases too, but the
+                        // pipeline cases' first, which the pipeline run makes before it asks for one.
                         this.verdict(name: "with no adapter here, WebGPU says why (NoAdapter's words)",
                                      why: words.isEmpty() ? "no words" : "");
                         println(s: "skip every case that needs a WebGPU adapter: there is none here (--adapter-optional): ${words}");
@@ -2339,7 +2366,8 @@ type resource ErrorRun {
             this.next(to: 99);
             return;
         }
-        string why = match (got) { case Some(value: errs): holds(errs: errs, want: 1, kind: GpuErrorKind::Validation); case None: "none"; };
+        GpuErrorKind expected = hugeBufferOutOfMemory() ? GpuErrorKind::OutOfMemory : GpuErrorKind::Validation;
+        string why = match (got) { case Some(value: errs): holds(errs: errs, want: 1, kind: expected); case None: "none"; };
         t.verdict(name: "a buffer of 2^60 bytes is a validation error, not the end of the program", why: why);
         this.next(to: 99);
     }

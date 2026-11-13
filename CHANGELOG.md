@@ -5,6 +5,20 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: render pipelines** (2026-11-13, kama 0.9.938; GPU-4's third part, AGENTS.gpu.md item 12, decisions 1, 2, 6
+  and 9):
+  - `device.createRenderPipeline(descriptor:)` and `RenderPipeline`, with `getBindGroupLayout(index:)`.
+  - `RenderPipelineDescriptor.make(layout:, vertex:)`, `VertexState`, `FragmentState`, `VertexBufferLayout`, and the
+    value parts `PrimitiveState`, `MultisampleState`, `DepthStencilState`, `StencilFaceState`, `ColorTargetState`,
+    `BlendState` and `BlendComponent`, each at WebGPU's defaults. `Layout` is `Auto` or `Explicit(layout:)`.
+  - New enums: `PrimitiveTopology`, `IndexFormat`, `FrontFace`, `CullMode`, `StencilOperation`, `BlendOperation`,
+    `BlendFactor`, `VertexStepMode`, and `VertexFormat`, generated with `TextureFormat`.
+  - New flag set: `ColorWriteMask`, with `None`.
+  - `pass.setPipeline(pipeline:)` and `pass.draw(vertexCount:, instanceCount:, firstVertex:, firstInstance:)`.
+  - A non-finite depth bias or pipeline constant, a depth write to a format with no depth, a format or a `Src1` blend
+    factor whose feature the device lacks: each a validation error in the package's words, where a browser threw or
+    wgpu-native ended the process.
+
 - **Fixed: a texture format whose feature the device lacks no longer ends a web program** (2026-11-13, kama 0.9.938;
   GPU-4's third part, found by its probe, AGENTS.gpu.md item 12, decision 9):
   - `device.createTexture` and a storage texture in `createBindGroupLayout` refuse it in the package's words, on both

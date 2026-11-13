@@ -18,6 +18,7 @@
 // The optional third output is the safe API's `TextureFormat` (src/formats.gen.kama), every format both headers name,
 // written from the same headers in the same run so the enum and the bindings cannot disagree. Its `requiredFeature()`
 // follows WebGPU's "texture format required features" by the formats' names, since no header carries that table.
+// The same file carries `VertexFormat`, every vertex format both headers name.
 //
 // `wgpugen --coverage …` writes COVERAGE.md instead: which of the headers' functions the safe API calls, from kama's
 // answer to where each binding and seam wrapper is referenced (§ coverage, below; tools/check-bindings.sh runs it).
@@ -1104,9 +1105,9 @@ unsafe fn void emitFormats(ref DynamicArray<uint8> dst, ref Report report, const
     emit(dst: dst, s: "// tools/check-bindings.sh --write). Each number is the bindings' constant, which that script holds to each leg's");
     emit(dst: dst, s: "// header.");
     emit(dst: dst, s: "");
-    emit(dst: dst, s: "import { gpu::native::WGPUTextureFormat, Feature };");
+    emit(dst: dst, s: "import { gpu::native::WGPUTextureFormat, gpu::native::WGPUVertexFormat, Feature };");
     emit(dst: dst, s: "");
-    emit(dst: dst, s: "export { TextureFormat };");
+    emit(dst: dst, s: "export { TextureFormat, VertexFormat };");
     emit(dst: dst, s: "");
     emit(dst: dst, s: "// A texel format: every one webgpu.h names, by its name there. One a device lacks the feature for (a compressed one,");
     emit(dst: dst, s: "// say) is refused where it is used, in the implementation's words.");
@@ -1213,6 +1214,80 @@ unsafe fn void emitFormats(ref DynamicArray<uint8> dst, ref Report report, const
         i = i + 1;
     }
     emit(dst: dst, s: "        return Optional::None;");
+    emit(dst: dst, s: "    }");
+    emit(dst: dst, s: "}");
+}
+
+// The safe API's `VertexFormat` (src/formats.gen.kama, after `TextureFormat`): every `WGPUVertexFormat` member both
+// headers name but `Force32`, with its number and its name. A member only one header names is left out, reported.
+unsafe fn void emitVertexFormats(ref DynamicArray<uint8> dst, ref Report report, const ref Header native, const ref Header web) {
+    string setName = "WGPUVertexFormat";
+    DynamicArray<string> nrows = linesOf(body: native.enumDecls().bodyOf(name: setName));
+    DynamicArray<string> wrows = linesOf(body: web.enumDecls().bodyOf(name: setName));
+    DynamicArray<string> names = DynamicArray.empty();
+    isize i = 0;
+    while (i < nrows.length()) {
+        string cname = memberName(row: nrows[i]);
+        string m = safeMember(m: afterFirstUnderscore(s: cname));
+        if (m != "Undefined" && m != "Force32") {
+            if (rowIndex(rows: wrows, member: cname) < 0) {
+                string why = "VertexFormat ${m}: only wgpu-native's header names it";
+                report.skip(why: why);
+            } else {
+                names.add(item: copy m);
+            }
+        }
+        i = i + 1;
+    }
+    i = 0;
+    while (i < wrows.length()) {
+        string cname = memberName(row: wrows[i]);
+        if (rowIndex(rows: nrows, member: cname) < 0) {
+            string m0 = afterFirstUnderscore(s: cname);
+            string why = "VertexFormat ${m0}: only emdawnwebgpu's header names it";
+            report.skip(why: why);
+        }
+        i = i + 1;
+    }
+    if (names.length() == 0) {
+        string why = "${setName}: no member both headers name";
+        report.problem(why: why);
+        return;
+    }
+    emit(dst: dst, s: "");
+    emit(dst: dst, s: "// A vertex attribute's format: every one webgpu.h names, by its name there (`Float32x3`, `Unorm8x4`).");
+    emit(dst: dst, s: "type enum VertexFormat {");
+    i = 0;
+    while (i < names.length()) {
+        string end = ",";
+        if (i == names.length() - 1) { end = ";"; }
+        string row = "    ${names[i]}${end}";
+        appendLine(dst: dst, s: row);
+        i = i + 1;
+    }
+    emit(dst: dst, s: "");
+    emit(dst: dst, s: "    // WebGPU's number for it.");
+    emit(dst: dst, s: "    public const fn int32 value() {");
+    emit(dst: dst, s: "        return match (this) {");
+    i = 0;
+    while (i < names.length()) {
+        string row = "            case ${names[i]}: WGPUVertexFormat::${names[i]};";
+        appendLine(dst: dst, s: row);
+        i = i + 1;
+    }
+    emit(dst: dst, s: "        };");
+    emit(dst: dst, s: "    }");
+    emit(dst: dst, s: "");
+    emit(dst: dst, s: "    // Its name, as webgpu.h spells it after `WGPUVertexFormat_`.");
+    emit(dst: dst, s: "    public const fn string name() {");
+    emit(dst: dst, s: "        return match (this) {");
+    i = 0;
+    while (i < names.length()) {
+        string row = "            case ${names[i]}: \"${names[i]}\";";
+        appendLine(dst: dst, s: row);
+        i = i + 1;
+    }
+    emit(dst: dst, s: "        };");
     emit(dst: dst, s: "    }");
     emit(dst: dst, s: "}");
 }
@@ -1818,6 +1893,7 @@ unsafe fn int32 run() {
     emitFunctions(dst: body, exports: exports, report: report, names: names, native: native, web: web);
     DynamicArray<uint8> formats = DynamicArray.empty();
     emitFormats(dst: formats, report: report, native: native, web: web);
+    emitVertexFormats(dst: formats, report: report, native: native, web: web);
 
     if (report.problemCount() > 0) {
         isize p = 0;

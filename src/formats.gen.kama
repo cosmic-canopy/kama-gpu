@@ -3,9 +3,9 @@
 // tools/check-bindings.sh --write). Each number is the bindings' constant, which that script holds to each leg's
 // header.
 
-import { gpu::native::WGPUTextureFormat, Feature };
+import { gpu::native::WGPUTextureFormat, gpu::native::WGPUVertexFormat, Feature };
 
-export { TextureFormat };
+export { TextureFormat, VertexFormat };
 
 // A texel format: every one webgpu.h names, by its name there. One a device lacks the feature for (a compressed one,
 // say) is refused where it is used, in the implementation's words.
@@ -612,5 +612,144 @@ type enum TextureFormat {
         if (value == WGPUTextureFormat::ASTC12x12Unorm) { return Optional::Some(value: TextureFormat::ASTC12x12Unorm); }
         if (value == WGPUTextureFormat::ASTC12x12UnormSrgb) { return Optional::Some(value: TextureFormat::ASTC12x12UnormSrgb); }
         return Optional::None;
+    }
+}
+
+// A vertex attribute's format: every one webgpu.h names, by its name there (`Float32x3`, `Unorm8x4`).
+type enum VertexFormat {
+    Uint8,
+    Uint8x2,
+    Uint8x4,
+    Sint8,
+    Sint8x2,
+    Sint8x4,
+    Unorm8,
+    Unorm8x2,
+    Unorm8x4,
+    Snorm8,
+    Snorm8x2,
+    Snorm8x4,
+    Uint16,
+    Uint16x2,
+    Uint16x4,
+    Sint16,
+    Sint16x2,
+    Sint16x4,
+    Unorm16,
+    Unorm16x2,
+    Unorm16x4,
+    Snorm16,
+    Snorm16x2,
+    Snorm16x4,
+    Float16,
+    Float16x2,
+    Float16x4,
+    Float32,
+    Float32x2,
+    Float32x3,
+    Float32x4,
+    Uint32,
+    Uint32x2,
+    Uint32x3,
+    Uint32x4,
+    Sint32,
+    Sint32x2,
+    Sint32x3,
+    Sint32x4,
+    Unorm10_10_10_2,
+    Unorm8x4BGRA;
+
+    // WebGPU's number for it.
+    public const fn int32 value() {
+        return match (this) {
+            case Uint8: WGPUVertexFormat::Uint8;
+            case Uint8x2: WGPUVertexFormat::Uint8x2;
+            case Uint8x4: WGPUVertexFormat::Uint8x4;
+            case Sint8: WGPUVertexFormat::Sint8;
+            case Sint8x2: WGPUVertexFormat::Sint8x2;
+            case Sint8x4: WGPUVertexFormat::Sint8x4;
+            case Unorm8: WGPUVertexFormat::Unorm8;
+            case Unorm8x2: WGPUVertexFormat::Unorm8x2;
+            case Unorm8x4: WGPUVertexFormat::Unorm8x4;
+            case Snorm8: WGPUVertexFormat::Snorm8;
+            case Snorm8x2: WGPUVertexFormat::Snorm8x2;
+            case Snorm8x4: WGPUVertexFormat::Snorm8x4;
+            case Uint16: WGPUVertexFormat::Uint16;
+            case Uint16x2: WGPUVertexFormat::Uint16x2;
+            case Uint16x4: WGPUVertexFormat::Uint16x4;
+            case Sint16: WGPUVertexFormat::Sint16;
+            case Sint16x2: WGPUVertexFormat::Sint16x2;
+            case Sint16x4: WGPUVertexFormat::Sint16x4;
+            case Unorm16: WGPUVertexFormat::Unorm16;
+            case Unorm16x2: WGPUVertexFormat::Unorm16x2;
+            case Unorm16x4: WGPUVertexFormat::Unorm16x4;
+            case Snorm16: WGPUVertexFormat::Snorm16;
+            case Snorm16x2: WGPUVertexFormat::Snorm16x2;
+            case Snorm16x4: WGPUVertexFormat::Snorm16x4;
+            case Float16: WGPUVertexFormat::Float16;
+            case Float16x2: WGPUVertexFormat::Float16x2;
+            case Float16x4: WGPUVertexFormat::Float16x4;
+            case Float32: WGPUVertexFormat::Float32;
+            case Float32x2: WGPUVertexFormat::Float32x2;
+            case Float32x3: WGPUVertexFormat::Float32x3;
+            case Float32x4: WGPUVertexFormat::Float32x4;
+            case Uint32: WGPUVertexFormat::Uint32;
+            case Uint32x2: WGPUVertexFormat::Uint32x2;
+            case Uint32x3: WGPUVertexFormat::Uint32x3;
+            case Uint32x4: WGPUVertexFormat::Uint32x4;
+            case Sint32: WGPUVertexFormat::Sint32;
+            case Sint32x2: WGPUVertexFormat::Sint32x2;
+            case Sint32x3: WGPUVertexFormat::Sint32x3;
+            case Sint32x4: WGPUVertexFormat::Sint32x4;
+            case Unorm10_10_10_2: WGPUVertexFormat::Unorm10_10_10_2;
+            case Unorm8x4BGRA: WGPUVertexFormat::Unorm8x4BGRA;
+        };
+    }
+
+    // Its name, as webgpu.h spells it after `WGPUVertexFormat_`.
+    public const fn string name() {
+        return match (this) {
+            case Uint8: "Uint8";
+            case Uint8x2: "Uint8x2";
+            case Uint8x4: "Uint8x4";
+            case Sint8: "Sint8";
+            case Sint8x2: "Sint8x2";
+            case Sint8x4: "Sint8x4";
+            case Unorm8: "Unorm8";
+            case Unorm8x2: "Unorm8x2";
+            case Unorm8x4: "Unorm8x4";
+            case Snorm8: "Snorm8";
+            case Snorm8x2: "Snorm8x2";
+            case Snorm8x4: "Snorm8x4";
+            case Uint16: "Uint16";
+            case Uint16x2: "Uint16x2";
+            case Uint16x4: "Uint16x4";
+            case Sint16: "Sint16";
+            case Sint16x2: "Sint16x2";
+            case Sint16x4: "Sint16x4";
+            case Unorm16: "Unorm16";
+            case Unorm16x2: "Unorm16x2";
+            case Unorm16x4: "Unorm16x4";
+            case Snorm16: "Snorm16";
+            case Snorm16x2: "Snorm16x2";
+            case Snorm16x4: "Snorm16x4";
+            case Float16: "Float16";
+            case Float16x2: "Float16x2";
+            case Float16x4: "Float16x4";
+            case Float32: "Float32";
+            case Float32x2: "Float32x2";
+            case Float32x3: "Float32x3";
+            case Float32x4: "Float32x4";
+            case Uint32: "Uint32";
+            case Uint32x2: "Uint32x2";
+            case Uint32x3: "Uint32x3";
+            case Uint32x4: "Uint32x4";
+            case Sint32: "Sint32";
+            case Sint32x2: "Sint32x2";
+            case Sint32x3: "Sint32x3";
+            case Sint32x4: "Sint32x4";
+            case Unorm10_10_10_2: "Unorm10_10_10_2";
+            case Unorm8x4BGRA: "Unorm8x4BGRA";
+        };
     }
 }
