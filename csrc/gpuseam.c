@@ -167,6 +167,10 @@ static _Thread_local char t_thread;
 static _Thread_local gpuseam_state *t_finishing;
 static _Thread_local int32_t t_finish_failed;
 
+// A shader module this thread is creating: natively its first error is copied here, for its compilation info, before it
+// goes where every error goes (gpuseam_create_shader_module).
+static _Thread_local gpuseam_report *t_observed;
+
 // Natively an error goes to the innermost scope on its thread whose filter matches it: every error measured reaches the
 // callback inside the call that caused it, on the calling thread (tests/facts, `inthecall`). A scope keeps the first
 // and swallows the rest, as WebGPU's does. Past every scope, an error goes to the channel. On the web the browser's
@@ -175,6 +179,7 @@ static void on_uncaptured_error(WGPUDevice const *device, WGPUErrorType type, WG
     (void)device; (void)u2;
     gpuseam_state *s = (gpuseam_state *)u1;
     if (t_finishing == s) t_finish_failed = 1;
+    if (t_observed != NULL && t_observed->message == NULL) *t_observed = report_of(kind_of(type), message);
     gpuseam_report r = report_of(kind_of(type), message);
     state_lock(s);
 #ifndef __EMSCRIPTEN__
@@ -810,6 +815,150 @@ void gpuseam_map_drop(gpuseam_map *m) {
     map_free(m);
 }
 
+// ---- a shader module and its compilation messages -------------------------------------------------------------------
+
+WGPUShaderModule gpuseam_create_shader_module(WGPUDevice device, const uint8_t *code, int32_t code_length,
+                                              const uint8_t *label, int32_t label_length, uint8_t **observed,
+                                              int32_t *observed_length) {
+    WGPUShaderSourceWGSL wgsl;
+    memset(&wgsl, 0, sizeof wgsl);
+    wgsl.chain.sType = WGPUSType_ShaderSourceWGSL;
+    wgsl.code.data = (const char *)code;
+    wgsl.code.length = code_length > 0 ? (size_t)code_length : 0;
+    WGPUShaderModuleDescriptor d;
+    memset(&d, 0, sizeof d);
+    d.nextInChain = &wgsl.chain;
+    d.label.data = (const char *)label;
+    d.label.length = label_length > 0 ? (size_t)label_length : 0;
+    *observed = NULL;
+    *observed_length = 0;
+    gpuseam_report seen = { 0, NULL, 0 };
+    gpuseam_report *outer = t_observed;
+    t_observed = &seen;
+    WGPUShaderModule m = wgpuDeviceCreateShaderModule(device, &d);
+    t_observed = outer;
+    *observed = (uint8_t *)seen.message;
+    *observed_length = seen.length;
+    return m;
+}
+
+void gpuseam_free_bytes(uint8_t *bytes) { free(bytes); }
+
+typedef struct {
+    int32_t type;
+    uint64_t line, line_pos, offset, length;
+    char *text;
+    int32_t text_length;
+} gpuseam_compilation_entry;
+
+struct gpuseam_compilation {
+    atomic_int state;
+    WGPUShaderModule module;   // a reference held while the slot lives
+    gpuseam_compilation_entry *entries;
+    int32_t count;
+    char message[GPUSEAM_MESSAGE_BYTES];
+    int32_t message_length;
+};
+
+static void compilation_free(gpuseam_compilation *c) {
+    for (int32_t i = 0; i < c->count; i++) free(c->entries[i].text);
+    free(c->entries);
+    if (c->module != NULL) wgpuShaderModuleRelease(c->module);
+    free(c);
+}
+
+#ifdef __EMSCRIPTEN__
+static void on_compilation_info(WGPUCompilationInfoRequestStatus status, WGPUCompilationInfo const *info, void *u1,
+                                void *u2) {
+    (void)u2;
+    gpuseam_compilation *c = (gpuseam_compilation *)u1;
+    int outcome = GPUSEAM_READY;
+    if (status != WGPUCompilationInfoRequestStatus_Success || info == NULL) {
+        c->message_length = keep_text("the shader module's compilation messages were not answered", c->message);
+        outcome = GPUSEAM_FAILED;
+    } else if (info->messageCount > 0) {
+        c->entries = (gpuseam_compilation_entry *)calloc(info->messageCount, sizeof *c->entries);
+        if (c->entries == NULL) {
+            c->message_length = keep_text("out of memory for the compilation messages", c->message);
+            outcome = GPUSEAM_FAILED;
+        } else {
+            for (size_t i = 0; i < info->messageCount; i++) {
+                const WGPUCompilationMessage *m = &info->messages[i];
+                gpuseam_compilation_entry *e = &c->entries[i];
+                e->type = (int32_t)m->type;
+                e->line = m->lineNum;
+                e->line_pos = m->linePos;
+                e->offset = m->offset;
+                e->length = m->length;
+                gpuseam_report r = report_of(0, m->message);
+                e->text = r.message;
+                e->text_length = r.length;
+            }
+            c->count = (int32_t)info->messageCount;
+        }
+    }
+    int expected = GPUSEAM_PENDING;
+    if (!atomic_compare_exchange_strong_explicit(&c->state, &expected, outcome, memory_order_acq_rel, memory_order_acquire)) {
+        compilation_free(c);   // ABANDONED
+    }
+}
+#endif
+
+gpuseam_compilation *gpuseam_compilation_request(WGPUShaderModule module) {
+#ifdef __EMSCRIPTEN__
+    gpuseam_compilation *c = (gpuseam_compilation *)calloc(1, sizeof *c);
+    if (c == NULL) return NULL;
+    atomic_init(&c->state, GPUSEAM_PENDING);
+    wgpuShaderModuleAddRef(module);
+    c->module = module;
+    WGPUCompilationInfoCallbackInfo ci;
+    memset(&ci, 0, sizeof ci);
+    ci.mode = WGPUCallbackMode_AllowSpontaneous;
+    ci.callback = on_compilation_info;
+    ci.userdata1 = c;
+    wgpuShaderModuleGetCompilationInfo(module, ci);
+    return c;
+#else
+    (void)module;
+    return NULL;
+#endif
+}
+
+int32_t gpuseam_compilation_poll(gpuseam_compilation *c) {
+    return (int32_t)atomic_load_explicit(&c->state, memory_order_acquire);
+}
+
+int32_t gpuseam_compilation_count(gpuseam_compilation *c) {
+    return gpuseam_compilation_poll(c) == GPUSEAM_READY ? c->count : 0;
+}
+
+void gpuseam_compilation_place(gpuseam_compilation *c, int32_t at, int32_t *type, uint64_t *line, uint64_t *line_pos,
+                               uint64_t *offset, uint64_t *length) {
+    const gpuseam_compilation_entry *e = &c->entries[at];
+    *type = e->type;
+    *line = e->line;
+    *line_pos = e->line_pos;
+    *offset = e->offset;
+    *length = e->length;
+}
+
+int32_t gpuseam_compilation_text_length(gpuseam_compilation *c, int32_t at) { return c->entries[at].text_length; }
+const uint8_t *gpuseam_compilation_text(gpuseam_compilation *c, int32_t at) { return (const uint8_t *)c->entries[at].text; }
+
+int32_t gpuseam_compilation_message(gpuseam_compilation *c, uint8_t *dst, int32_t capacity) {
+    if (gpuseam_compilation_poll(c) != GPUSEAM_FAILED) return 0;
+    return copy_out(c->message, c->message_length, dst, capacity);
+}
+
+void gpuseam_compilation_drop(gpuseam_compilation *c) {
+    if (c == NULL) return;
+    int expected = GPUSEAM_PENDING;
+    if (atomic_compare_exchange_strong_explicit(&c->state, &expected, GPUSEAM_ABANDONED, memory_order_acq_rel, memory_order_acquire)) {
+        return;   // the browser's answer is still owed, and frees the slot when it comes
+    }
+    compilation_free(c);
+}
+
 // ---- finishing an encoder -------------------------------------------------------------------------------------------
 
 WGPUCommandBuffer gpuseam_encoder_finish(WGPUCommandEncoder encoder, gpuseam_state *state, int32_t *failed) {
@@ -848,13 +997,13 @@ _Static_assert(WGPU_LIMIT_U64_UNDEFINED == 0xFFFFFFFFFFFFFFFFull, "gpu.kama's LI
 // js/gpuseam.js: 1 when the canvas the selector names gives a WebGPU context.
 extern int32_t gpuseam_web_canvas_has_webgpu(const char *selector);
 // js/gpuseam.js: emdawnwebgpu's configure, its exception caught: -1, or the length of the words it threw.
-extern int32_t gpuseam_web_surface_configure(WGPUSurface surface, const WGPUSurfaceConfiguration *config, char *words,
+extern int32_t gpuseam_web_surface_configure(WGPUSurface surface, const WGPUSurfaceConfiguration *config, uint8_t *words,
                                              int32_t capacity);
 // js/gpuseam.js: 0 when the browser refused `format` for a canvas of the seam's own, else 1.
 extern int32_t gpuseam_web_canvas_takes(int32_t format);
 #endif
 
-int32_t gpuseam_surface_configure(WGPUSurface surface, const WGPUSurfaceConfiguration *config, char *words, int32_t capacity) {
+int32_t gpuseam_surface_configure(WGPUSurface surface, const WGPUSurfaceConfiguration *config, uint8_t *words, int32_t capacity) {
 #if defined(__EMSCRIPTEN__)
     return gpuseam_web_surface_configure(surface, config, words, capacity);
 #else

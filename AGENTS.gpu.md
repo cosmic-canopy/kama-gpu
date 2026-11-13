@@ -38,11 +38,13 @@ in; *as an engine renderer* they stay out.
 ## Where things stand
 
 **[SPEC.md](SPEC.md) is what the package is, [ROADMAP.md](ROADMAP.md) what comes next, and [COVERAGE.md](COVERAGE.md)
-which of webgpu.h it calls.** In short (2026-11-11, kama 0.9.911): offscreen work and a surface on a window run natively
-on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 55 of webgpu.h's 206 functions, a device's
+which of webgpu.h it calls.** In short (2026-11-12, kama 0.9.928): offscreen work and a surface on a window run natively
+on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 59 of webgpu.h's 206 functions, a device's
 errors reach its own holders (GPU-1), a surface holds its window (GPU-2), an acquire before a configure is refused
-(GPU-13), an adapter gives one device and a surface is configured at its window's size (GPU-3). GPU-4, the render
-pipeline set, is next, shaped by `@kama/graphics`' design pass. `tools/test.sh` passes before every commit.
+(GPU-13), an adapter gives one device and a surface is configured at its window's size (GPU-3), and Firefox's
+differences from Dawn are handled (GPU-14). GPU-4, the render pipeline set, is decided (item 12) and under way: shader
+modules and their compilation messages are built, and parts 2 to 5 are next. `tools/test.sh` passes before every
+commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
 
@@ -603,6 +605,44 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
          read-only depth; `ColorAttachment.clearing(view:, color:)` keeps the common case one line;
        - `device.createTexture(descriptor:)` replaces `createTexture(width:, height:, format:, usage:)`: mip levels, a
          sample count, the dimension and the depth formats.
+
+    **Built on 2026-11-12 (kyoten's seventeenth session), part 1 of 5: shader modules and their compilation messages**
+    (decisions 1 and 3, item 3), test-first, red against a stub that placed nothing, then green on both legs:
+    - `ShaderModuleDescriptor.make(wgsl:)` with `label(text:)`; `device.createShaderModule(descriptor:)`; `ShaderModule`
+      (a copy is an `AddRef`; `adopt(raw:, wgsl:)`); `module.compilationInfo()`, polled to a `CompilationInfo` of
+      `CompilationMessage`s placed in UTF-8 bytes. The cases (`tests/src/shaders.kama`, `ShaderRun`, a step a tick on
+      both legs): a good module has no messages and leaves the channel empty; a bad one, its error after a two-byte é
+      and then after a four-byte emoji on its line, is placed exactly, says it has errors, answers a second poll the
+      same, puts one validation error naming its label in the channel, and is answered through a copy once the module
+      it was copied from is gone; a warning reaches the browser's messages, and natively gives none.
+    - `tests/facts` holds naga's place format (`wgsl:2:27` after the é, carets, the `Shader '<label>'` line) and the
+      sixth abort, `wgpuShaderModuleGetCompilationInfo`: 28 facts.
+    - **Decided in the building, within decision 3:** a poll after `Ready` answers `Ready` again, with the same
+      messages, since they are data and not a handle to hand over once; a message's words are one line, naga's
+      `Shader …` line natively.
+    - **Found in the building:** **emdawnwebgpu frees a module's cached compilation info when it is asked a second time**
+      once the first was answered (`webgpu.cpp`: `ReadyHook` wraps the cached pointer in an owner that frees it), and
+      hands the freed memory to the second answer; here a count of 298,840 messages ended the program out of memory. So
+      on the web the package asks once, as the module is made, and every request of the module and its copies reads that
+      answer. The copy case is the regression test: asking per request runs out of memory there. Reported to no one
+      yet: Dawn's, for the owner to decide.
+    - **Found in the building, in Firefox with the pref added by hand:** its WebGPU is wgpu's, so its WGSL compiler is
+      naga. A message's words are naga's whole report over several lines, so the package keeps one line on every leg
+      (`oneLine`: the `Shader …` line, else the first line that is not blank), and the words agree natively and in
+      Firefox. Firefox gives no warning, as naga gives none: `--no-shader-warnings`, passed by Firefox's leg alone, holds
+      it to none, and run in Edge the same flag fails (3 messages), so the day Firefox warns its run fails.
+    - `tests/` prints the C heap in use at each stage on the web (`info the heap in use …`, about 20 KB), since a wasm
+      program's memory is fixed and a leak would show there first.
+    - The seam's `askCompilation` calls the seam on both legs (natively it answers null), so COVERAGE.md sees
+      `GetCompilationInfo` called: 59 of 206.
+    - **Mutations: 13 of 14 caught** (natively: the observer never copying, the observer swallowing the error, characters
+      counted as bytes, the carets uncounted, naga's words whole, the label not passed; in Edge: an emoji one UTF-16
+      unit, every kind an error, the browser asked per request, the web's place dropped, its words dropped; in Firefox:
+      the web's words whole, `--no-shader-warnings` ignored). **Not caught yet: a copy without its `AddRef`,** in
+      native or Edge: no case uses a copy's handle on the GPU once its original is gone. Part 3 makes a pipeline from
+      such a copy, and runs this mutation again.
+
+    `tests/` is 109 cases natively, and 88 in Edge, Chrome for Testing and Firefox with the pref.
 
 ## Where the truth is
 

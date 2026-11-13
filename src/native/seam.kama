@@ -15,6 +15,8 @@ export {
     encoderFinish, scopePush, scopePop, scopeAbandon, scopePopPoll, scopeCaught, scopeKind, scopeLength, scopeMessage, scopeDropPopped,
     SURFACE_OK, SURFACE_OCCLUDED, SURFACE_OUTDATED, SURFACE_LOST, SURFACE_TIMEOUT,
     createSurface, acquireSurface, presentSurface, textureViewIn, configureSurface, surfaceFormatTaken,
+    createShaderModuleOf, freeBytes, compilationRequest, compilationPoll, compilationCount, compilationPlace,
+    compilationTextLength, compilationText, compilationMessage, compilationDrop,
 };
 
 extern "gpuseam.h";
@@ -184,3 +186,38 @@ unsafe fn int32 configureSurface(UnsafePtr surface, UnsafePtr config, UnsafePtr<
     return gpuseam_surface_configure(surface: surface, config: config, words: words, capacity: capacity);
 }
 unsafe fn int32 surfaceFormatTaken(int32 format) { return gpuseam_surface_format_taken(format: format); }
+
+extern fn UnsafePtr gpuseam_create_shader_module(UnsafePtr device, UnsafeConstPtr<uint8> code, int32 code_length,
+                                                 UnsafeConstPtr<uint8> label, int32 label_length,
+                                                 UnsafePtr<UnsafePtr<uint8>> observed, UnsafePtr<int32> observed_length);
+extern fn void gpuseam_free_bytes(UnsafePtr<uint8> bytes);
+extern fn UnsafePtr gpuseam_compilation_request(UnsafePtr module);
+extern fn int32 gpuseam_compilation_poll(UnsafePtr c);
+extern fn int32 gpuseam_compilation_count(UnsafePtr c);
+extern fn void gpuseam_compilation_place(UnsafePtr c, int32 at, UnsafePtr<int32> type, UnsafePtr<uint64> line,
+                                         UnsafePtr<uint64> line_pos, UnsafePtr<uint64> offset, UnsafePtr<uint64> length);
+extern fn int32 gpuseam_compilation_text_length(UnsafePtr c, int32 at);
+extern fn UnsafeConstPtr<uint8> gpuseam_compilation_text(UnsafePtr c, int32 at);
+extern fn int32 gpuseam_compilation_message(UnsafePtr c, UnsafePtr<uint8> dst, int32 capacity);
+extern fn void gpuseam_compilation_drop(UnsafePtr c);
+
+unsafe fn UnsafePtr createShaderModuleOf(UnsafePtr device, UnsafeConstPtr<uint8> code, int32 codeLength,
+                                         UnsafeConstPtr<uint8> label, int32 labelLength,
+                                         UnsafePtr<UnsafePtr<uint8>> observed, UnsafePtr<int32> observedLength) {
+    return gpuseam_create_shader_module(device: device, code: code, code_length: codeLength, label: label,
+                                        label_length: labelLength, observed: observed, observed_length: observedLength);
+}
+unsafe fn void freeBytes(UnsafePtr<uint8> bytes) { gpuseam_free_bytes(bytes: bytes); }
+unsafe fn UnsafePtr compilationRequest(UnsafePtr module) { return gpuseam_compilation_request(module: module); }
+unsafe fn int32 compilationPoll(UnsafePtr c) { return gpuseam_compilation_poll(c: c); }
+unsafe fn int32 compilationCount(UnsafePtr c) { return gpuseam_compilation_count(c: c); }
+unsafe fn void compilationPlace(UnsafePtr c, int32 at, UnsafePtr<int32> type, UnsafePtr<uint64> line,
+                                UnsafePtr<uint64> linePos, UnsafePtr<uint64> offset, UnsafePtr<uint64> length) {
+    gpuseam_compilation_place(c: c, at: at, type: type, line: line, line_pos: linePos, offset: offset, length: length);
+}
+unsafe fn int32 compilationTextLength(UnsafePtr c, int32 at) { return gpuseam_compilation_text_length(c: c, at: at); }
+unsafe fn UnsafeConstPtr<uint8> compilationText(UnsafePtr c, int32 at) { return gpuseam_compilation_text(c: c, at: at); }
+unsafe fn int32 compilationMessage(UnsafePtr c, UnsafePtr<uint8> dst, int32 capacity) {
+    return gpuseam_compilation_message(c: c, dst: dst, capacity: capacity);
+}
+unsafe fn void compilationDrop(UnsafePtr c) { gpuseam_compilation_drop(c: c); }

@@ -229,7 +229,41 @@ WGPUTextureView gpuseam_texture_view_in(WGPUTexture texture, int32_t format);
 // `capacity` - 1 bytes, terminated in `words`) the browser refused it with by throwing. emdawnwebgpu lets an exception
 // out of a canvas's `configure` (Firefox 160's TypeError for an RGBA16Float canvas, its bug 1834395), which would end
 // the program. Natively wgpu-native reports a bad configure as a validation error, so the answer is always -1.
-int32_t gpuseam_surface_configure(WGPUSurface surface, const WGPUSurfaceConfiguration *config, char *words, int32_t capacity);
+int32_t gpuseam_surface_configure(WGPUSurface surface, const WGPUSurfaceConfiguration *config, uint8_t *words, int32_t capacity);
+// ---- a shader module and its compilation messages ----
+
+typedef struct gpuseam_compilation gpuseam_compilation;
+
+// A shader module from WGSL (`code`, `code_length` bytes of UTF-8) with `label` (`label_length` bytes, 0 for none).
+// Natively the first error wgpu-native reports inside the call (tests/facts: errors are reported in the call that caused
+// them) is kept for the module's compilation info: `*observed` is a copy, freed with gpuseam_free_bytes, NULL when there
+// was none. The error goes on to the device's channel or a scope as every error does. On the web `*observed` is NULL:
+// the browser answers later, through gpuseam_compilation_request.
+WGPUShaderModule gpuseam_create_shader_module(WGPUDevice device, const uint8_t *code, int32_t code_length,
+                                              const uint8_t *label, int32_t label_length, uint8_t **observed,
+                                              int32_t *observed_length);
+void gpuseam_free_bytes(uint8_t *bytes);
+
+// Ask the browser for `module`'s compilation messages (getCompilationInfo), into a slot polled as the requests are. On
+// the web only: natively wgpu-native ends the process on that call (tests/facts), so the kama side answers from what
+// creation kept, and this is NULL. NULL too when the slot cannot be allocated.
+gpuseam_compilation *gpuseam_compilation_request(WGPUShaderModule module);
+// GPUSEAM_PENDING, _READY or _FAILED.
+int32_t gpuseam_compilation_poll(gpuseam_compilation *c);
+// A READY slot's messages, in the browser's order.
+int32_t gpuseam_compilation_count(gpuseam_compilation *c);
+// Message `at`: its WGPUCompilationMessageType, and its line, position in its line, offset and length as the
+// implementation gave them (emdawnwebgpu: UTF-16 code units, unconverted; the kama side converts them to UTF-8 bytes).
+void gpuseam_compilation_place(gpuseam_compilation *c, int32_t at, int32_t *type, uint64_t *line, uint64_t *line_pos,
+                               uint64_t *offset, uint64_t *length);
+// Message `at`'s words (UTF-8, not terminated), and their length.
+int32_t gpuseam_compilation_text_length(gpuseam_compilation *c, int32_t at);
+const uint8_t *gpuseam_compilation_text(gpuseam_compilation *c, int32_t at);
+// A FAILED slot's words, copied into `dst` (at most `capacity` bytes): their length.
+int32_t gpuseam_compilation_message(gpuseam_compilation *c, uint8_t *dst, int32_t capacity);
+// Done with the slot: freed now, or abandoned to its callback if one is still owed.
+void gpuseam_compilation_drop(gpuseam_compilation *c);
+
 // 1 when a canvas takes `format` (a WGPUTextureFormat), else 0. WebGPU has no question for it, and a browser may refuse
 // one of the three formats WebGPU says every canvas takes (Firefox 160 refuses RGBA16Float), so on the web the seam
 // tries the three on a canvas of its own, once, when the page's first device is granted. Until then, and natively, 1.

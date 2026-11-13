@@ -12,3 +12,10 @@ int32_t gputests_minimise(void *hwnd, int32_t minimised) {
 #else
 int32_t gputests_minimise(void *hwnd, int32_t minimised) { (void)hwnd; (void)minimised; return -1; }
 #endif
+
+#if defined(__EMSCRIPTEN__)
+#include <malloc.h>
+int64_t gputests_heap_in_use(void) { return (int64_t)mallinfo().uordblks; }
+#else
+int64_t gputests_heap_in_use(void) { return -1; }
+#endif

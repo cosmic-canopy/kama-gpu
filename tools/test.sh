@@ -105,13 +105,14 @@ else
     # installed, and the pinned Firefox, which gives WebGPU no adapter under `kama run` until its runner sets the pref
     # that keeps headless Firefox's GPU process (kyoten's KY-54), so its run says so and skips the cases that need one
     # (--adapter-optional), and the clear, which needs one, is not run in it. Firefox has no immediates, so its run holds
-    # maxImmediateSize to 0 (--no-immediates). Once KY-54 lands, --adapter-optional goes and the clear runs in it too.
+    # maxImmediateSize to 0 (--no-immediates), and its WGSL compiler is naga, which gives no warnings
+    # (--no-shader-warnings). Once KY-54 lands, --adapter-optional goes and the clear runs in it too.
     if browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
         while IFS= read -r browser; do
             name="${browser##*[/\\]}"
             if [[ "${name,,}" == *firefox* ]]; then
                 echo "-- kama run, $browser (no WebGPU adapter here: the cases that need one say so)"
-                KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless -- --adapter-optional --no-immediates || failed=1
+                KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless -- --adapter-optional --no-immediates --no-shader-warnings || failed=1
             else
                 echo "-- kama run, $browser"
                 KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless || failed=1

@@ -4,13 +4,14 @@
 // its live window records the same way, so a test can see a surface hold its window. Adopting a surface the package
 // also holds needs an `AddRef` the same way.
 
-export { addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise };
+export { addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, heapInUse };
 
 extern "gpuseam.h";
 extern "winseam.h";
 extern fn int32 winseam_live_records();
 extern "gputests.h";
 extern fn int32 gputests_minimise(UnsafePtr hwnd, int32 minimised);
+extern fn int64 gputests_heap_in_use();
 
 extern fn void wgpuDeviceAddRef(UnsafePtr device);
 extern fn void wgpuSurfaceAddRef(UnsafePtr surface);
@@ -23,3 +24,5 @@ unsafe fn int32 windowRecords() { return winseam_live_records(); }
 // Minimises the system window `hwnd` (1) or restores it (0) without activating it, so a test never takes the focus: 1
 // when done, -1 where the question is not asked of the system (off Windows, and on the web).
 unsafe fn int32 minimise(UnsafePtr hwnd, int32 minimised) { return gputests_minimise(hwnd: hwnd, minimised: minimised); }
+// The bytes the C heap holds in use on the web (-1 natively).
+unsafe fn int64 heapInUse() { return gputests_heap_in_use(); }

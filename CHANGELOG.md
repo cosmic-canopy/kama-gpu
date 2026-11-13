@@ -5,6 +5,15 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: shader modules and their compilation messages** (2026-11-12, kama 0.9.928; GPU-4's first part,
+  AGENTS.gpu.md item 12, decisions 1 and 3): `ShaderModuleDescriptor.make(wgsl:)` with `label(text:)`,
+  `device.createShaderModule(descriptor:)`, and `module.compilationInfo()`, polled to a `CompilationInfo` whose
+  `CompilationMessage`s are placed in UTF-8 bytes of the WGSL on both legs. Natively the package keeps the error
+  wgpu-native reports as the module is made, and never calls `GetCompilationInfo`, which ends the process (held in
+  `tests/facts` with naga's place format); on the web it asks once, since emdawnwebgpu frees its cached answer on a
+  second ask. A message's words are one line on every leg (naga's report, natively and in Firefox, keeps its `Shader`
+  line). The tests take `--no-shader-warnings`, passed by Firefox's leg alone, since naga gives no warning.
+
 - **Firefox's differences, measured with WebGPU there for the first time** (2026-11-12, kama 0.9.928; AGENTS.gpu.md
   item 11): headless Firefox 160 has WebGPU once one pref keeps its GPU process (kyoten's KY-54, for `kama run` to
   set), and `tests/` then passes all 75 cases in it.

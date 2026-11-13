@@ -32,7 +32,8 @@ import {
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::WindowOptions, window::Size, window::NativeWindow,
-    addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly,
+    addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly, heapInUse,
+    ShaderRun, Verdicts,
 };
 
 comptime uint32 SIDE = 64;
@@ -493,6 +494,11 @@ unsafe fn bool adapterOptional() { return hasFlag(flag: "--adapter-optional"); }
 // WebGPU's 64. Only Firefox's leg passes it, and the day Firefox reports immediates, the 0 fails and the flag goes.
 unsafe fn bool noImmediates() { return hasFlag(flag: "--no-immediates"); }
 
+// `--no-shader-warnings`: a browser whose WGSL compiler reports no warnings (Firefox 160, whose WebGPU is wgpu's and so
+// naga's, as natively) is held to giving none, where Dawn is held to giving one (GPU-4, part 1). Only Firefox's leg
+// passes it.
+unsafe fn bool noShaderWarnings() { return hasFlag(flag: "--no-shader-warnings"); }
+
 type resource Check implements App {
     Optional<Instance> instance = Optional::None;
     Optional<AdapterPool> pool = Optional::None;      // the adapters, one for each device below
@@ -518,9 +524,10 @@ type resource Check implements App {
     Optional<Queue> queue = Optional::None;
     Optional<Buffer> readback = Optional::None;
     Optional<BufferRead> read = Optional::None;
-    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 the error cases, 5 done
+    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 the error cases, 5 the shader cases, 6 done
     Optional<SurfaceRun> surfaces = Optional::None;
     Optional<ErrorRun> errorRun = Optional::None;
+    Optional<ShaderRun> shaderRun = Optional::None;
     Instant began = monotonicNow();
     int32 runs = 0;
     int32 failures = 0;
@@ -571,12 +578,19 @@ type resource Check implements App {
             this.verdict(name: "the GPU answers within 10 s", why: "timed out at stage ${this.stage} (the device: ${lost})");
             this.stage = 3;
         }
+        int32 was = this.stage;
         if (this.stage == 0) { this.awaitAdapter(); }
         if (this.stage == 1) { this.awaitDevices(); }
         if (this.stage == 2) { this.awaitRead(); }
         if (this.stage == 3) { this.surfaceStep(); }
         if (this.stage == 4) { this.errorStep(); }
-        if (this.stage == 5) { return this.finish(); }
+        if (this.stage == 5) { this.shaderStep(); }
+        if (this.stage != was) {
+            int64 heap = heapInUse();
+            int32 now = this.stage;
+            if (heap >= 0) { println(s: "info the heap in use, stage ${was} to ${now}: ${heap} bytes"); }
+        }
+        if (this.stage == 6) { return this.finish(); }
         return 1;
     }
 
@@ -598,6 +612,23 @@ type resource Check implements App {
         if (done) { this.errorRun = Optional::None; this.stage = 5; }
     }
 
+    // The shader-module cases (tests/src/shaders.kama), a step this tick, their verdicts reported here.
+    unsafe fn void shaderStep() {
+        Optional<ShaderRun> taken = replace(place: this.shaderRun, with: Optional::None);
+        ShaderRun pending = match (give taken) { case Some(value: r): give r; case None: ShaderRun.make(adapterOptional: adapterOptional(), noShaderWarnings: noShaderWarnings()); };
+        bool done = pending.step();
+        isize i = 0;
+        while (i < pending.verdicts().count()) {
+            string name = pending.verdicts().nameAt(at: i);
+            string why = pending.verdicts().whyAt(at: i);
+            this.verdict(name: name, why: why);
+            i = i + 1;
+        }
+        pending.verdicts().clear();
+        this.shaderRun = Optional::Some(value: give pending);
+        if (done) { this.shaderRun = Optional::None; this.stage = 6; }
+    }
+
     unsafe fn void awaitAdapter() {
         Optional<AdapterPool> taken = replace(place: this.pool, with: Optional::None);
         match (give taken) {
@@ -613,7 +644,7 @@ type resource Check implements App {
                         this.verdict(name: "with no adapter here, WebGPU says why (NoAdapter's words)",
                                      why: words.isEmpty() ? "no words" : "");
                         println(s: "skip every case that needs a WebGPU adapter: there is none here (--adapter-optional): ${words}");
-                        this.stage = 5;
+                        this.stage = 6;
                         return;
                     }
                     this.verdict(name: "adapters, asked of the instance", why: "${n} of ${ADAPTERS} given: ${words}");

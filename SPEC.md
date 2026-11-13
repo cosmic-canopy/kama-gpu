@@ -128,9 +128,12 @@ wgpu-native that changes it fails the gate by name:
 - an encoder's error is reported inside its `finish`, not at the bad command;
 - a child reports to its device's callback after the device's last release;
 - no loss is reported: not at a destroy, a poll, the device's last release or its last child's;
-- five calls end the process, each matched by its panic's words: an error on a device with no uncaptured callback,
-  an `Internal` error scope pushed, an error scope popped with none pushed, `wgpuInstanceWaitAny`, and a command buffer
-  whose `finish` failed submitted.
+- a WGSL error is reported inside `wgpuDeviceCreateShaderModule`, as a validation error whose words place it as
+  `wgsl:<line>:<column>`, the column in characters, mark its span with a caret a character, and name the module's label
+  in a `Shader` line;
+- six calls end the process, each matched by its panic's words: an error on a device with no uncaptured callback,
+  an `Internal` error scope pushed, an error scope popped with none pushed, `wgpuInstanceWaitAny`, a command buffer
+  whose `finish` failed submitted, and `wgpuShaderModuleGetCompilationInfo`.
 
 Measured, each held by the tests per leg:
 - wgpu-native answers a device request at once; a browser a tick or two later;
@@ -161,6 +164,40 @@ Measured, each held by the tests per leg:
     format for (an implementation's own extensions among them);
   - `name()`;
   - `isSrgb()`, and `srgb()` and `linear()`: a format's sRGB and linear forms.
+
+## Shader modules
+
+- **`ShaderModuleDescriptor.make(wgsl:)`,** WebGPU's `GPUShaderModuleDescriptor`: the WGSL, which WebGPU requires, and
+  `label(text:)`, which the implementation's words name the module by. `wgsl()` and `labelText()` read it back.
+- **`device.createShaderModule(descriptor:) -> ShaderModule`,** handed back at once, as WebGPU's is. An error in the
+  WGSL is reported as every error is, to the device's channel or a scope, naming the module's label, and whatever is
+  made from the module is invalid too. A copy of a module is another reference; `ShaderModule.adopt(raw:, wgsl:)` takes
+  one made elsewhere, with its WGSL.
+- **`module.compilationInfo() -> CompilationRequest`,** WebGPU's `getCompilationInfo`, polled to a `CompilationStatus`:
+  `Pending`, `Ready(info)` or `Failed(error)`. A poll after `Ready` answers `Ready` again, and every request of a module
+  and its copies reads the same answer.
+- **`CompilationInfo`:** `messages()`, in the implementation's order, and `hasErrors()`. Each `CompilationMessage` has
+  `kind()` (a `CompilationMessageKind`: `Error`, `Warning` or `Info`), `message()`, and its place **in UTF-8 bytes of
+  the WGSL**, kama's unit for a string: `line()` and `column()` from 1, `offset()` from 0, and `length()`, the span it
+  points at. A message with no place has all four 0.
+
+What each leg answers, measured on 2026-11-12:
+
+| | native (wgpu-native v29.0.1.1) | web (Dawn, Chrome 157 and Edge 157) |
+|---|---|---|
+| the messages | the error wgpu-native reported inside `createShaderModule`, kept as the module was made, as one message: naga's `Shader …` line | the browser's, asked once as the module is made |
+| how many | the first error only | the first error only, and warnings with their notes |
+| warnings | none: naga has no warning to give through C | a warning (a `derivative_uniformity` diagnostic) arrives as `Warning` |
+| the place as given | `wgsl:<line>:<column>`, the column in characters, and a caret a character | offset and length in UTF-16 code units, which emdawnwebgpu passes on as webgpu.h's UTF-8 fields unconverted (its own TODO) |
+
+So natively the package never calls `wgpuShaderModuleGetCompilationInfo`, which wgpu-native ends the process on, and on
+the web it asks once: **emdawnwebgpu frees a module's cached messages when it is asked a second time** after the first
+was answered, and hands the freed memory to the second answer.
+
+**A message's words are one line on every leg.** naga's report, natively and in Firefox 160 (whose WebGPU is wgpu's),
+runs over several lines: its `Shader '<label>' …` line, then the source line echoed and its carets, which the message's
+place already gives. The package keeps that line, or a message's first line that is not blank where it has none, as
+Dawn's is. Firefox reports places in UTF-16 units as Dawn does, the first error only, and no warning, as naga gives none.
 
 ## Command encoding, render passes and the queue
 
@@ -259,18 +296,19 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 `tools/test.sh` is the gate. It runs:
 - `tools/check-bindings.sh`: the bindings, `TextureFormat` and `COVERAGE.md` against what the headers and the safe API
   make, the coverage rules on their fixture, and the constants;
-- `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 22 facts, natively;
+- `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 28 facts, natively;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 96 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 109 cases natively with a display, debug and release.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
 - the xfail, an encoder used after `finish()`, which must be refused for the move;
-- the web leg, headless, on the page's canvases: `tests/` (75 cases) and `examples/clear` (60 frames on `#canvas`)
+- the web leg, headless, on the page's canvases: `tests/` (88 cases) and `examples/clear` (60 frames on `#canvas`)
   under `kama run --target WASM --headless` in Edge and Chrome as installed; `tests/` in the pinned Firefox 160, which
   gives WebGPU no adapter under `kama run` until its runner sets one pref (kyoten's KY-54), so it reports that and skips
-  the cases that need one (`--adapter-optional`), and holds `maxImmediateSize` to 0 (`--no-immediates`); and both
+  the cases that need one (`--adapter-optional`), holds `maxImmediateSize` to 0 (`--no-immediates`) and a WGSL
+  warning to no message (`--no-shader-warnings`); and both
   through `tools/webtest.mjs` in the pinned Chrome for Testing, which does not run under `kama run` (kyoten's KY-53).
 
 What runs on one leg only: wgpu-native's own timing (an error in the channel when its call returns, a scope's pop ready

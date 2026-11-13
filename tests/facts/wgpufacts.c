@@ -31,10 +31,15 @@ typedef struct {
 } seen;
 
 static seen g_a, g_b;
+static char g_words[4096];   // the last error's words, cut at the buffer, NUL-terminated
 
 static void on_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringView message, void *u1, void *u2) {
-    (void)device; (void)message; (void)u2;
+    (void)device; (void)u2;
     seen *s = (seen *)u1;
+    size_t n = message.data == NULL ? 0 : (message.length == WGPU_STRLEN ? strlen(message.data) : message.length);
+    if (n >= sizeof g_words) n = sizeof g_words - 1;
+    if (n > 0) memcpy(g_words, message.data, n);
+    g_words[n] = '\0';
     s->count += 1;
     s->in_call += g_in_call;
     s->on_caller += (&t_marker == g_main_thread);
@@ -255,7 +260,44 @@ static void no_loss(void) {
     fact(g_b.lost == 0, "nor at a destroyed device's release", "called back");
 }
 
-// ---- the five aborts: the seam's guards are why none is reachable from the safe API --------------------------------
+// A shader module from WGSL (`label` its label), made inside a watched call.
+static WGPUShaderModule wgsl_module(WGPUDevice d, const char *code, const char *label) {
+    WGPUShaderSourceWGSL w;
+    memset(&w, 0, sizeof w);
+    w.chain.sType = WGPUSType_ShaderSourceWGSL;
+    w.code.data = code;
+    w.code.length = strlen(code);
+    WGPUShaderModuleDescriptor md;
+    memset(&md, 0, sizeof md);
+    md.nextInChain = &w.chain;
+    md.label.data = label;
+    md.label.length = strlen(label);
+    g_in_call = 1;
+    WGPUShaderModule m = wgpuDeviceCreateShaderModule(d, &md);
+    g_in_call = 0;
+    return m;
+}
+
+// A WGSL error is reported inside wgpuDeviceCreateShaderModule, and its words place it as naga does: `wgsl:<line>:
+// <column>`, the column in characters, and a caret a character under the echoed line. The package keeps those words as
+// the module is made, and places them in UTF-8 bytes (GPU-4; AGENTS.gpu.md item 12, decision 3).
+static void wgsl_error(void) {
+    WGPUDevice d = device_for(&g_a, 1);
+    // `nosuch` begins at the 27th character of line 2, the 28th byte: é is two bytes.
+    WGPUShaderModule m = wgsl_module(d, "@fragment fn fs() -> @location(0) vec4f {\n"
+                                        "  let caf\xC3\xA9 = 1.0; let b = nosuch + caf\xC3\xA9;\n"
+                                        "  return vec4f(b); }\n", "facts");
+    fact(g_a.count == 1 && g_a.in_call == 1, "a WGSL error is reported inside wgpuDeviceCreateShaderModule", "not in the call");
+    fact(g_a.type == WGPUErrorType_Validation, "as a validation error", "another type");
+    fact(strstr(g_words, "wgsl:2:27") != NULL, "its words place it as wgsl:<line>:<column>, the column in characters",
+         g_words);
+    fact(strstr(g_words, "^^^^^^ ") != NULL, "and mark its span with a caret a character", g_words);
+    fact(strstr(g_words, "Shader 'facts'") != NULL, "and name the module's label in a `Shader` line", g_words);
+    wgpuShaderModuleRelease(m);
+    wgpuDeviceRelease(d);
+}
+
+// ---- the aborts: the seam's guards are why none is reachable from the safe API -------------------------------------
 
 static void abort_no_handler(void) {
     WGPUDevice d = device_for(&g_a, 0);
@@ -302,6 +344,23 @@ static void abort_submit_failed(void) {
     did_not_abort("submitting a command buffer whose finish failed aborts");
 }
 
+static void on_compilation_info(WGPUCompilationInfoRequestStatus s, WGPUCompilationInfo const *info, void *u1, void *u2) {
+    (void)s; (void)info; (void)u1; (void)u2;
+}
+
+// Not implemented in v29.0.1.1, for a good module or a bad one: the package answers natively from what creation kept
+// (GPU-4). The day this holds no more, the package can ask wgpu-native as it asks the browser.
+static void abort_compilation_info(void) {
+    WGPUDevice d = device_for(&g_a, 1);
+    WGPUShaderModule m = wgsl_module(d, "@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }\n", "facts");
+    WGPUCompilationInfoCallbackInfo ci;
+    memset(&ci, 0, sizeof ci);
+    ci.mode = WGPUCallbackMode_AllowSpontaneous;
+    ci.callback = on_compilation_info;
+    wgpuShaderModuleGetCompilationInfo(m, ci);
+    did_not_abort("asking a shader module for its compilation info aborts");
+}
+
 // ---- the program ---------------------------------------------------------------------------------------------------
 
 typedef struct { const char *name; void (*run)(void); } entry;
@@ -312,11 +371,13 @@ static const entry CASES[] = {
     { "atfinish", at_finish },
     { "afterrelease", after_release },
     { "noloss", no_loss },
+    { "wgsl", wgsl_error },
     { "abort-nohandler", abort_no_handler },
     { "abort-internal", abort_internal_filter },
     { "abort-emptypop", abort_empty_pop },
     { "abort-waitany", abort_wait_any },
     { "abort-submit", abort_submit_failed },
+    { "abort-compilationinfo", abort_compilation_info },
 };
 
 int main(int argc, char **argv) {

@@ -1,0 +1,436 @@
+// The shader-module cases (GPU-4, AGENTS.gpu.md item 12, decision 3), a step a tick on every leg: a module from good
+// WGSL has no messages; one from bad WGSL is handed back all the same, its error reaches the device's channel as every
+// error does, naming the module's label, and its compilation info places the error in UTF-8 bytes of the WGSL, after a
+// two-byte é and after a four-byte emoji on its line (where the web's UTF-16 and naga's characters each differ from
+// bytes). A warning reaches the browser's messages; natively naga has none to give.
+//
+// They report through `Verdicts`, which the check reads each tick, since a case here cannot reach the check itself.
+
+import {
+    core::println,
+    std::collections::DynamicArray,
+    std::memory::replace,
+    gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::PowerPreference,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::DeviceOptions, gpu::GpuError,
+    gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer,
+    gpu::ShaderModuleDescriptor, gpu::ShaderModule, gpu::CompilationRequest, gpu::CompilationStatus,
+    gpu::CompilationInfo, gpu::CompilationMessage, gpu::CompilationMessageKind,
+};
+export { ShaderRun, Verdicts };
+
+// What a run found this tick, for the check to report: each a name and why it failed ("" when it passed).
+type resource Verdicts {
+    DynamicArray<string> names;
+    DynamicArray<string> whys;
+
+    public ctor make() {
+        this.names = DynamicArray.empty();
+        this.whys = DynamicArray.empty();
+    }
+    public fn void add(string name, string why) {
+        this.names.add(item: give name);
+        this.whys.add(item: give why);
+    }
+    public const fn isize count() { return this.names.length(); }
+    public const fn string nameAt(isize at) { return copy this.names[at]; }
+    public const fn string whyAt(isize at) { return copy this.whys[at]; }
+    public fn void clear() {
+        this.names = DynamicArray.empty();
+        this.whys = DynamicArray.empty();
+    }
+}
+
+comptime int32 SETTLE = 60;   // the most ticks a case waits for the browser
+
+// A vertex and a fragment stage that compile everywhere.
+fn string goodWgsl() {
+    return "struct VOut { @builtin(position) pos: vec4f };\n"
+        + "@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {\n"
+        + "  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));\n"
+        + "  var o: VOut; o.pos = vec4f(p[i], 0.0, 1.0); return o; }\n"
+        + "@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.25, 1.0); }\n";
+}
+
+// An unknown identifier on line 2, after a two-byte é on the same line.
+fn string accentedWgsl() {
+    return "@fragment fn fs() -> @location(0) vec4f {\n"
+        + "  let caf\u{e9} = 1.0; let b = nosuch + caf\u{e9};\n"
+        + "  return vec4f(b); }\n";
+}
+
+// An unknown identifier on line 2, after a four-byte emoji (two UTF-16 units, one character) in a comment.
+fn string emojiWgsl() {
+    return "@fragment fn fs() -> @location(0) vec4f {\n"
+        + "  /* \u{1F600} */ let b = nosuch;\n"
+        + "  return vec4f(b); }\n";
+}
+
+// A derivative in non-uniform control flow, a warning by its diagnostic rather than an error.
+fn string warningWgsl() {
+    return "diagnostic(warning, derivative_uniformity);\n"
+        + "@group(0) @binding(0) var t: texture_2d<f32>;\n"
+        + "@group(0) @binding(1) var s: sampler;\n"
+        + "struct VOut { @builtin(position) pos: vec4f };\n"
+        + "@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {\n"
+        + "  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));\n"
+        + "  var o: VOut; o.pos = vec4f(p[i], 0.25, 1.0); return o; }\n"
+        + "@fragment fn fs(v: VOut) -> @location(0) vec4f {\n"
+        + "  if (v.pos.x > 2.0) { return textureSample(t, s, v.pos.xy); }\n"
+        + "  return vec4f(1.0); }\n";
+}
+
+// Where the implementation reports a warning: Dawn does; naga has none to give, natively and in Firefox, whose WebGPU is
+// wgpu's (`--no-shader-warnings`, passed by Firefox's leg alone; the day Firefox reports one, its run fails and the flag
+// goes).
+@compileFor(ARCH_WASM32)
+fn bool warnsOnThisLeg() { return true; }
+@compileFor(!ARCH_WASM32)
+fn bool warnsOnThisLeg() { return false; }
+
+// The byte offset of the first `word` in `source`, and of the start of its line.
+fn isize offsetOf(const ref string source, string word) {
+    Optional<isize> i = source.find(substring: word);
+    return match (i) { case Some(value: x): x; case None: -1; };
+}
+fn isize lineStart(const ref string source, isize from) {
+    isize i = from;
+    while (i > 0 && source[i - 1] != 10) { i = i - 1; }
+    return i;
+}
+
+// The fault in `info` against one error on `line` at the first `word` of `source`, or "".
+fn string placed(const ref CompilationInfo info, const ref string source, isize line, string word) {
+    isize n = info.messages().length();
+    if (n != 1) { return "${n} messages, not 1"; }
+    foreach (const ref CompilationMessage m in info.messages().iterConst()) { return placedOne(m: m, source: source, line: line, word: give word); }
+    return "no message";
+}
+
+fn string placedOne(const ref CompilationMessage m, const ref string source, isize line, string word) {
+    bool error = match (m.kind()) { case Error: true; case _: false; };
+    if (!error) { return "its message is not an error"; }
+    isize wantOffset = offsetOf(source: source, word: copy word);
+    isize wantColumn = wantOffset - lineStart(source: source, from: wantOffset) + 1;
+    isize wantLength = word.length();
+    isize gotLine = m.line();
+    isize gotColumn = m.column();
+    isize gotOffset = m.offset();
+    isize gotLength = m.length();
+    if (gotLine != line || gotColumn != wantColumn || gotOffset != wantOffset || gotLength != wantLength) {
+        return "line ${gotLine} column ${gotColumn} offset ${gotOffset} length ${gotLength}, not line ${line} column "
+            + "${wantColumn} offset ${wantOffset} length ${wantLength}";
+    }
+    string words = m.message();
+    if (!words.contains(substring: word)) { return "its words do not name `${word}`: ${words}"; }
+    // The message alone: one line, not the whole report an uncaptured error carries.
+    if (words.contains(substring: "\n")) { return "its words are more than one line: ${words}"; }
+    return "";
+}
+
+// The fault in a drained channel against one validation error naming `label`, or "".
+fn string inChannel(const ref DeviceErrors errs, const ref string label) {
+    isize n = errs.reports().length();
+    if (n != 1) { return "${n} errors in the channel, not 1"; }
+    string words = errs.reports()[0].message();
+    bool validation = match (errs.reports()[0].kind()) { case Validation: true; case _: false; };
+    if (!validation) { return "not a validation error"; }
+    if (!words.contains(substring: copy label)) { return "its words do not name the label `${label}`: ${words}"; }
+    return "";
+}
+
+type resource ShaderRun {
+    int32 stage = 0;
+    int32 waited = 0;
+    bool optional;   // `--adapter-optional`: no adapter here is a skip
+    bool warns;      // the implementation reports a WGSL warning (Dawn's does)
+    Verdicts found;
+    Optional<Instance> instance = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+    Optional<CompilationRequest> asked = Optional::None;
+    Optional<ShaderModule> kept = Optional::None;   // a copy of the bad module, which outlives the module it was copied from
+    string source = "";
+
+    public ctor make(bool adapterOptional, bool noShaderWarnings) {
+        this.optional = adapterOptional;
+        this.warns = warnsOnThisLeg() && !noShaderWarnings;
+        this.found = Verdicts.make();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // One tick's step: true once every case has run.
+    public unsafe fn bool step() {
+        this.waited = this.waited + 1;
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.awaitAdapter(); }
+        else if (this.stage == 2) { this.awaitDevice(); }
+        else if (this.stage == 10) { this.good(); }
+        else if (this.stage == 11) { this.awaitGood(); }
+        else if (this.stage == 20) { this.bad(source: accentedWgsl(), label: "accented", next: 21); }
+        else if (this.stage == 21) { this.awaitBad(name: "after a two-byte character", label: "accented", next: 22); }
+        else if (this.stage == 22) { this.askKept(next: 23); }
+        else if (this.stage == 23) { this.awaitKept(name: "after a two-byte character", next: 30); }
+        else if (this.stage == 30) { this.bad(source: emojiWgsl(), label: "emoji", next: 31); }
+        else if (this.stage == 31) { this.awaitBad(name: "after a four-byte character", label: "emoji", next: 32); }
+        else if (this.stage == 32) { this.askKept(next: 33); }
+        else if (this.stage == 33) { this.awaitKept(name: "after a four-byte character", next: 40); }
+        else if (this.stage == 40) { this.warned(); }
+        else if (this.stage == 41) { this.awaitWarned(); }
+        return this.stage >= 99;
+    }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
+
+    unsafe fn void open() {
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.make(power: PowerPreference::Default)));
+                this.instance = Optional::Some(value: give inst);
+                this.next(to: 1);
+            }
+            case Err(error: e): { string why = e.message(); this.found.add(name: "an instance for the shader cases", why: give why); this.next(to: 99); }
+        };
+    }
+
+    unsafe fn void awaitAdapter() {
+        if (this.adapterRequest.isNone()) { this.next(to: 99); return; }
+        AdapterStatus s = match (this.adapterRequest) {
+            case Some(value: r): r.poll();
+            case None: AdapterStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.adapterRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(adapter: a): {
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                this.next(to: 2);
+            }
+            case Failed(error: e): {
+                bool none = match (e) { case NoAdapter(words: w): true; case _: false; };
+                if (none && this.optional) {
+                    println(s: "skip the shader cases: there is no WebGPU adapter here (--adapter-optional)");
+                } else {
+                    string why = e.message();
+                    this.found.add(name: "an adapter for the shader cases", why: give why);
+                }
+                this.next(to: 99);
+            }
+        };
+    }
+
+    unsafe fn void awaitDevice() {
+        if (this.deviceRequest.isNone()) { this.next(to: 99); return; }
+        DeviceStatus s = match (this.deviceRequest) {
+            case Some(value: r): r.poll();
+            case None: DeviceStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.deviceRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(device: d, queue: q): {
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+                this.next(to: 10);
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a device for the shader cases", why: give why); this.next(to: 99); }
+        };
+    }
+
+    // An empty command buffer submitted: on the web, what lets a pending error through to the channel.
+    unsafe fn void flush() {
+        match (this.device) {
+            case Some(value: d): {
+                match (this.queue) {
+                    case Some(value: q): { CommandEncoder enc = d.createCommandEncoder(); CommandBuffer cb = give enc.finish(); q.submit(commands: give cb); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+    }
+
+    unsafe fn Optional<DeviceErrors> drain() {
+        match (this.device) {
+            case Some(value: d): { return Optional::Some(value: d.takeErrors()); }
+            case None: { return Optional::None; }
+        };
+    }
+
+    unsafe fn Optional<CompilationStatus> pollAsked() {
+        match (this.asked) {
+            case Some(value: r): { return Optional::Some(value: r.poll()); }
+            case None: { return Optional::None; }
+        };
+    }
+
+    // A module from good WGSL: no messages, and nothing in the channel.
+    unsafe fn void good() {
+        this.source = goodWgsl();
+        match (this.device) {
+            case Some(value: d): {
+                ShaderModuleDescriptor desc = ShaderModuleDescriptor.make(wgsl: copy this.source);
+                desc.label(text: "good");
+                ShaderModule m = d.createShaderModule(descriptor: give desc);
+                this.asked = Optional::Some(value: m.compilationInfo());
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 11);
+    }
+
+    unsafe fn void awaitGood() {
+        Optional<CompilationStatus> polled = this.pollAsked();
+        CompilationStatus s = match (give polled) { case Some(value: x): give x; case None: { this.next(to: 20); return; } };
+        match (give s) {
+            case Pending: {
+                if (this.waited < SETTLE) { return; }
+                this.found.add(name: "a good module's compilation info", why: "not answered within ${SETTLE} ticks");
+            }
+            case Ready(info: info): {
+                isize n = info.messages().length();
+                this.found.add(name: "a module from good WGSL has no compilation messages", why: n == 0 ? "" : "${n} messages");
+                Optional<DeviceErrors> errs = this.drain();
+                bool quiet = match (errs) { case Some(value: e): e.isEmpty(); case None: true; };
+                this.found.add(name: "and nothing in the device's channel", why: quiet ? "" : "it holds an error");
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a good module's compilation info", why: "failed: " + why); }
+        };
+        this.asked = Optional::None;
+        this.next(to: 20);
+    }
+
+    // A module from bad WGSL, labelled.
+    unsafe fn void bad(string source, string label, int32 next) {
+        this.source = give source;
+        match (this.device) {
+            case Some(value: d): {
+                ShaderModuleDescriptor desc = ShaderModuleDescriptor.make(wgsl: copy this.source);
+                desc.label(text: copy label);
+                ShaderModule m = d.createShaderModule(descriptor: give desc);
+                this.asked = Optional::Some(value: m.compilationInfo());
+                this.kept = Optional::Some(value: copy m);   // `m` is released here; the copy holds its own reference
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: next);
+    }
+
+    unsafe fn void awaitBad(string name, string label, int32 next) {
+        Optional<CompilationStatus> polled = this.pollAsked();
+        CompilationStatus s = match (give polled) { case Some(value: x): give x; case None: { this.next(to: next); return; } };
+        match (give s) {
+            case Pending: {
+                if (this.waited < SETTLE) { return; }
+                this.found.add(name: "a bad module's compilation info, " + name, why: "not answered within ${SETTLE} ticks");
+            }
+            case Ready(info: info): {
+                this.found.add(name: "a bad module's compilation info places its error in UTF-8 bytes, " + name,
+                               why: placed(info: info, source: this.source, line: 2, word: "nosuch"));
+                this.found.add(name: "and says the module has errors, " + name, why: info.hasErrors() ? "" : "hasErrors() is false");
+                // A poll after Ready answers Ready again.
+                string again = "";
+                Optional<CompilationStatus> repolled = this.pollAsked();
+                match (give repolled) {
+                    case Some(value: s2): {
+                        again = match (give s2) {
+                            case Ready(info: i2): placed(info: i2, source: this.source, line: 2, word: "nosuch");
+                            case Pending: "Pending after Ready";
+                            case Failed(error: e): "failed: " + e.message();
+                        };
+                    }
+                    case None: { again = "no request"; }
+                };
+                this.found.add(name: "a poll after Ready answers the same, " + name, why: give again);
+                // Its error went on to the channel too, naming the module's label.
+                Optional<DeviceErrors> drained = this.drain();
+                string channel = match (drained) {
+                    case Some(value: errs): inChannel(errs: errs, label: label);
+                    case None: "no device";
+                };
+                this.found.add(name: "and its error reaches the device's channel, naming the module's label, " + name, why: give channel);
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a bad module's compilation info, " + name, why: "failed: " + why); }
+        };
+        this.asked = Optional::None;
+        this.next(to: next);
+    }
+
+    // The copy, asked once the module it was copied from is gone: its own reference keeps the module.
+    unsafe fn void askKept(int32 next) {
+        match (this.kept) {
+            case Some(value: m): { this.asked = Optional::Some(value: m.compilationInfo()); }
+            case None: { }
+        };
+        this.next(to: next);
+    }
+
+    unsafe fn void awaitKept(string name, int32 next) {
+        Optional<CompilationStatus> polled = this.pollAsked();
+        CompilationStatus s = match (give polled) { case Some(value: x): give x; case None: { this.next(to: next); return; } };
+        match (give s) {
+            case Pending: {
+                if (this.waited < SETTLE) { return; }
+                this.found.add(name: "a copy of a module answers once the module is gone, " + name, why: "not answered within ${SETTLE} ticks");
+            }
+            case Ready(info: info): {
+                this.found.add(name: "a copy of a module answers once the module is gone, " + name,
+                               why: placed(info: info, source: this.source, line: 2, word: "nosuch"));
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a copy of a module answers once the module is gone, " + name, why: "failed: " + why); }
+        };
+        this.asked = Optional::None;
+        this.kept = Optional::None;
+        this.next(to: next);
+    }
+
+    // A warning: the browser reports it; naga has no warnings to give.
+    unsafe fn void warned() {
+        this.source = warningWgsl();
+        match (this.device) {
+            case Some(value: d): {
+                ShaderModuleDescriptor desc = ShaderModuleDescriptor.make(wgsl: copy this.source);
+                ShaderModule m = d.createShaderModule(descriptor: give desc);
+                this.asked = Optional::Some(value: m.compilationInfo());
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 41);
+    }
+
+    unsafe fn void awaitWarned() {
+        Optional<CompilationStatus> polled = this.pollAsked();
+        CompilationStatus s = match (give polled) { case Some(value: x): give x; case None: { this.next(to: 99); return; } };
+        match (give s) {
+            case Pending: {
+                if (this.waited < SETTLE) { return; }
+                this.found.add(name: "a warning's compilation info", why: "not answered within ${SETTLE} ticks");
+            }
+            case Ready(info: info): {
+                isize warnings = 0;
+                foreach (const ref CompilationMessage m in info.messages().iterConst()) {
+                    bool w = match (m.kind()) { case Warning: true; case _: false; };
+                    if (w) { warnings = warnings + 1; }
+                }
+                if (this.warns) {
+                    this.found.add(name: "a warning reaches the browser's compilation messages, and is no error",
+                                   why: warnings >= 1 && !info.hasErrors() ? "" : "${warnings} warnings");
+                } else {
+                    isize n = info.messages().length();
+                    this.found.add(name: "under naga a warning gives no message: it has none to give", why: n == 0 ? "" : "${n} messages");
+                }
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a warning's compilation info", why: "failed: " + why); }
+        };
+        this.asked = Optional::None;
+        this.next(to: 99);
+    }
+}

@@ -86,10 +86,12 @@ plain twodevices
 plain atfinish
 plain afterrelease
 plain noloss
+plain wgsl
 aborts abort-nohandler "a device with no uncaptured callback aborts on its first error" "wgpu uncaptured error"
 aborts abort-internal "pushing an Internal error scope aborts" "invalid error filter"
 aborts abort-emptypop "popping an error scope with none pushed aborts" 'called `Option::unwrap()` on a `None` value'
 aborts abort-waitany "waiting through wgpuInstanceWaitAny aborts" "not implemented"
 aborts abort-submit "submitting a command buffer whose finish failed aborts" "Error in wgpuQueueSubmit"
+aborts abort-compilationinfo "asking a shader module for its compilation info aborts" "not implemented"
 
 exit "$failed"

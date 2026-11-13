@@ -74,6 +74,11 @@ import {
     gpu::native::surfaceFormatTaken, gpu::native::surfaceGetCapabilities, gpu::native::surfaceCapabilitiesFreeMembers, gpu::native::textureViewIn,
     gpu::native::WGPUSurfaceConfiguration, gpu::native::WGPUSurfaceCapabilities, gpu::native::WGPUStatus,
     gpu::native::WGPUCompositeAlphaMode, gpu::native::WGPUPresentMode,
+    gpu::native::shaderModuleAddRef, gpu::native::shaderModuleRelease, gpu::native::WGPUCompilationMessageType,
+    gpu::native::createShaderModuleOf, gpu::native::freeBytes, gpu::native::compilationRequest,
+    gpu::native::compilationPoll, gpu::native::compilationCount, gpu::native::compilationPlace,
+    gpu::native::compilationTextLength, gpu::native::compilationText, gpu::native::compilationMessage,
+    gpu::native::compilationDrop,
     window::Window, window::NativeWindow, window::NativeKind, window::Size,
 };
 
@@ -86,6 +91,8 @@ export {
     CommandEncoder, RenderPass, CommandBuffer, Color,
     Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
     GpuErrorKind, GpuErrorReport, DeviceErrors, DeviceLoss, LossReason, ErrorFilter, ErrorScope, ScopePop, PopStatus,
+    ShaderModuleDescriptor, ShaderModule, CompilationRequest, CompilationStatus, CompilationInfo, CompilationMessage,
+    CompilationMessageKind,
 };
 
 comptime int32 MESSAGE_BYTES = 512;
@@ -977,6 +984,26 @@ type resource Device implements Copyable<This>(bare: give) {
                                   block: this.hold.raw());
     }
 
+    // A shader module from WGSL (WebGPU's `createShaderModule`). It is handed back at once, as WebGPU's is: an error in
+    // the WGSL is reported as every error is, to the device's channel or a scope, and whatever is made from the module
+    // is invalid too. `module.compilationInfo()` places each message in the WGSL (AGENTS.gpu.md item 12, decision 3).
+    public unsafe fn ShaderModule createShaderModule(ShaderModuleDescriptor descriptor) {
+        string code = copy descriptor.wgsl();
+        string label = copy descriptor.labelText();
+        UnsafePtr<uint8> seen = null;
+        int32 seenLength = 0;
+        UnsafePtr raw = createShaderModuleOf(device: this.handle, code: cast<UnsafeConstPtr<uint8>>(code.cstr()),
+                                             codeLength: cast<int32>(code.length()),
+                                             label: cast<UnsafeConstPtr<uint8>>(label.cstr()),
+                                             labelLength: cast<int32>(label.length()),
+                                             observed: addr(of: seen), observedLength: addr(of: seenLength));
+        string observed = textFrom(p: seen, length: seenLength);
+        freeBytes(bytes: seen);
+        Shared<ShaderText> text = new ShaderText.make(source: give code, observed: give observed,
+                                                      slot: askCompilation(module: raw));
+        return ShaderModule.fromDevice(raw: raw, block: this.hold.raw(), text: give text);
+    }
+
     public unsafe fn CommandEncoder createCommandEncoder() {
         return CommandEncoder.fromDevice(raw: deviceCreateCommandEncoder(device: this.handle, descriptor: null),
                                          block: this.hold.raw());
@@ -1152,6 +1179,362 @@ type resource TextureView implements Copyable<This>(bare: give) {
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
     unsafe ~TextureView() { if (this.handle != null) { textureViewRelease(textureView: this.handle); } }
+}
+
+// ---- shader modules (GPU-4; AGENTS.gpu.md item 12) -------------------------------------------------------------------
+
+// WebGPU's `GPUShaderModuleDescriptor`: the WGSL, which WebGPU requires, and a label, which the implementation's words
+// name the module by.
+type resource ShaderModuleDescriptor {
+    string code;
+    string labelled = "";
+
+    public ctor make(string wgsl) { this.code = give wgsl; }
+    public fn void label(string text) { this.labelled = give text; }
+    public const fn const ref string wgsl() { return this.code; }
+    public const fn const ref string labelText() { return this.labelled; }
+}
+
+// What a module's copies share beside its handle: its WGSL, against which a message's place is counted in UTF-8 bytes;
+// natively the words of the error wgpu-native reported as it was made ("" for none), which wgpu-native cannot be asked
+// for again; and on the web the one request for the browser's messages, made with the module. emdawnwebgpu frees a
+// module's cached messages when it is asked a second time once the first has been answered, and hands the freed memory
+// to the second answer (its `ReadyHook` wraps the cached pointer in an owner; measured 2026-11-12), so the package asks
+// once and every `compilationInfo()` reads that answer.
+type resource ShaderText {
+    string source;
+    string observed;
+    UnsafePtr slot;   // the web's compilation request; null natively
+
+    public unsafe ctor make(string source, string observed, UnsafePtr slot) {
+        this.source = give source;
+        this.observed = give observed;
+        this.slot = slot;
+    }
+    public const fn const ref string wgsl() { return this.source; }
+    public const fn const ref string seen() { return this.observed; }
+    public unsafe const fn UnsafePtr asked() { return this.slot; }
+
+    unsafe ~ShaderText() { compilationDrop(c: this.slot); }
+}
+
+type resource ShaderModule implements Copyable<This>(bare: give) {
+    UnsafePtr handle;
+    StateHold hold = StateHold.empty();   // its device's state, which its errors reach
+    Shared<ShaderText> text;
+
+    friend Device::createShaderModule[fromDevice];
+
+    // One made elsewhere from `wgsl`: it takes over one reference, and holds no device state. Natively its compilation
+    // info has no messages, since its maker heard its errors.
+    public unsafe ctor adopt(UnsafePtr raw, string wgsl) {
+        this.handle = raw;
+        Shared<ShaderText> t = new ShaderText.make(source: give wgsl, observed: "", slot: askCompilation(module: raw));
+        this.text = give t;
+    }
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block, Shared<ShaderText> text) {
+        this.handle = raw;
+        this.hold = StateHold.make(block: block);
+        this.text = give text;
+    }
+    public unsafe ctor copy(ref ShaderModule source) {
+        this.handle = source.handle;
+        shaderModuleAddRef(shaderModule: this.handle);
+        this.hold = copy source.hold;
+        this.text = copy source.text;
+    }
+    public unsafe const fn UnsafePtr raw() { return this.handle; }
+
+    // The module's compilation messages (WebGPU's `getCompilationInfo`), polled: on the web the browser's, asked once
+    // as the module was made and answered a tick or so later; natively the error wgpu-native reported as the module was
+    // made, at once, since wgpu-native ends the process on `GetCompilationInfo` (tests/facts). Each is placed in UTF-8
+    // bytes of the WGSL.
+    public unsafe const fn CompilationRequest compilationInfo() { return CompilationRequest.make(text: copy this.text); }
+
+    unsafe ~ShaderModule() { if (this.handle != null) { shaderModuleRelease(shaderModule: this.handle); } }
+}
+
+// A compilation message's kind (webgpu.h's `WGPUCompilationMessageType`).
+type enum CompilationMessageKind { Error, Warning, Info }
+
+fn CompilationMessageKind messageKindOf(int32 v) {
+    if (v == WGPUCompilationMessageType::Warning) { return CompilationMessageKind::Warning; }
+    if (v == WGPUCompilationMessageType::Info) { return CompilationMessageKind::Info; }
+    return CompilationMessageKind::Error;
+}
+
+// One message (WebGPU's `GPUCompilationMessage`), placed in UTF-8 bytes of the module's WGSL, kama's unit for a string:
+// `line()` and `column()` count from 1, `offset()` from 0, and `length()` is the span the message points at. A message
+// with no place has all four 0.
+type resource CompilationMessage {
+    CompilationMessageKind messageKind;
+    string words;
+    isize lineAt;
+    isize columnAt;
+    isize offsetAt;
+    isize spanLength;
+
+    public ctor make(CompilationMessageKind kind, string message, isize line, isize column, isize offset, isize length) {
+        this.messageKind = kind;
+        this.words = give message;
+        this.lineAt = line;
+        this.columnAt = column;
+        this.offsetAt = offset;
+        this.spanLength = length;
+    }
+    public const fn CompilationMessageKind kind() { return this.messageKind; }
+    public const fn string message() { return copy this.words; }
+    public const fn isize line() { return this.lineAt; }
+    public const fn isize column() { return this.columnAt; }
+    public const fn isize offset() { return this.offsetAt; }
+    public const fn isize length() { return this.spanLength; }
+}
+
+// A module's messages (WebGPU's `GPUCompilationInfo`), in the implementation's order.
+type resource CompilationInfo {
+    DynamicArray<CompilationMessage> list;
+
+    public ctor make(DynamicArray<CompilationMessage> messages) { this.list = give messages; }
+    public const fn const ref DynamicArray<CompilationMessage> messages() { return this.list; }
+    // Whether any message is an error: the module is invalid.
+    public const fn bool hasErrors() {
+        foreach (const ref CompilationMessage m in this.list.iterConst()) {
+            bool error = match (m.kind()) { case Error: true; case _: false; };
+            if (error) { return true; }
+        }
+        return false;
+    }
+}
+
+type enum CompilationStatus { Pending, Ready(CompilationInfo info), Failed(GpuError error) }
+
+// A module's compilation messages on their way: every request of a module and its copies reads the one answer (above).
+// A poll after Ready answers Ready again, with the same messages.
+type resource CompilationRequest {
+    Shared<ShaderText> text;
+
+    friend ShaderModule::compilationInfo[make];
+
+    unsafe ctor make(Shared<ShaderText> text) { this.text = give text; }
+
+    public unsafe const fn CompilationStatus poll() {
+        if (answeredAtCreation()) {
+            return CompilationStatus::Ready(info: nativeInfo(source: this.text.wgsl(), observed: this.text.seen()));
+        }
+        UnsafePtr slot = this.text.asked();
+        if (slot == null) {
+            return CompilationStatus::Failed(error: GpuError::Refused(words: "out of memory for the request"));
+        }
+        int32 s = compilationPoll(c: slot);
+        if (s == SEAM_PENDING) { return CompilationStatus::Pending; }
+        if (s == SEAM_FAILED) {
+            InlineArray<uint8>#(512) buf = [0; 512];
+            int32 n = compilationMessage(c: slot, dst: addr(of: buf[0]), capacity: MESSAGE_BYTES);
+            string words = textOf(buf: buf, length: n);
+            return CompilationStatus::Failed(error: GpuError::Refused(words: give words));
+        }
+        return CompilationStatus::Ready(info: webInfo(slot: slot, source: this.text.wgsl()));
+    }
+}
+
+// Natively the messages are answered from what creation kept; on the web the browser is asked.
+@compileFor(ARCH_WASM32)
+fn bool answeredAtCreation() { return false; }
+@compileFor(!ARCH_WASM32)
+fn bool answeredAtCreation() { return true; }
+
+// The browser asked for a module's messages, once, as it is made. Natively the seam answers null without asking, since
+// wgpu-native ends the process on `GetCompilationInfo` (tests/facts).
+unsafe fn UnsafePtr askCompilation(UnsafePtr module) { return compilationRequest(module: module); }
+
+// The browser's messages, each placed in UTF-8 bytes: emdawnwebgpu hands on the browser's UTF-16 offsets and lengths
+// unconverted (its own TODO), so they are counted again against the WGSL.
+unsafe fn CompilationInfo webInfo(UnsafePtr slot, const ref string source) {
+    DynamicArray<CompilationMessage> list = DynamicArray.empty();
+    int32 n = compilationCount(c: slot);
+    int32 i = 0;
+    while (i < n) {
+        int32 type = 0;
+        uint64 line = 0;
+        uint64 linePos = 0;
+        uint64 offset = 0;
+        uint64 length = 0;
+        compilationPlace(c: slot, at: i, type: addr(of: type), line: addr(of: line), linePos: addr(of: linePos),
+                         offset: addr(of: offset), length: addr(of: length));
+        string words = textFrom(p: compilationText(c: slot, at: i), length: compilationTextLength(c: slot, at: i));
+        Place p = fromUtf16(source: source, line: line, offset: offset, length: length);
+        list.add(item: CompilationMessage.make(kind: messageKindOf(v: type), message: oneLine(words: words), line: p.line,
+                                               column: p.column, offset: p.offset, length: p.length));
+        i = i + 1;
+    }
+    return CompilationInfo.make(messages: give list);
+}
+
+// Natively: the error wgpu-native reported as the module was made, as one message, or none.
+fn CompilationInfo nativeInfo(const ref string source, const ref string observed) {
+    DynamicArray<CompilationMessage> list = DynamicArray.empty();
+    if (!observed.isEmpty()) {
+        Place p = fromNaga(source: source, words: observed);
+        list.add(item: CompilationMessage.make(kind: CompilationMessageKind::Error, message: oneLine(words: observed),
+                                               line: p.line, column: p.column, offset: p.offset, length: p.length));
+    }
+    return CompilationInfo.make(messages: give list);
+}
+
+// A message's place in UTF-8 bytes of the WGSL; all 0 for none.
+@generate(of)
+type value Place { public isize line; public isize column; public isize offset; public isize length; }
+
+fn Place nowhere() { return Place.of(line: 0, column: 0, offset: 0, length: 0); }
+
+// The bytes a UTF-8 character takes, from its first byte (a stray continuation byte counts as one).
+fn isize utf8Width(uint8 lead) {
+    if (lead >= 0xF0) { return 4; }
+    if (lead >= 0xE0) { return 3; }
+    if (lead >= 0xC0) { return 2; }
+    return 1;
+}
+
+// The byte offset in `source` reached by counting `units` UTF-16 code units from byte `from`: a character of four
+// UTF-8 bytes is two units (a surrogate pair), any other is one. Never past the end.
+fn isize afterUtf16(const ref string source, isize from, uint64 units) {
+    isize i = from;
+    isize n = source.length();
+    uint64 counted = 0;
+    while (i < n && counted < units) {
+        isize width = utf8Width(lead: source[i]);
+        counted = counted + (width == 4 ? 2 : 1);
+        i = i + width;
+    }
+    return i < n ? i : n;
+}
+
+// The byte offset in `source` reached by counting `chars` characters from byte `from`. Never past the end.
+fn isize afterChars(const ref string source, isize from, isize chars) {
+    isize i = from;
+    isize n = source.length();
+    isize counted = 0;
+    while (i < n && counted < chars) {
+        i = i + utf8Width(lead: source[i]);
+        counted = counted + 1;
+    }
+    return i < n ? i : n;
+}
+
+// The byte offset where the line holding byte `offset` begins.
+fn isize beginningOfLine(const ref string source, isize offset) {
+    isize i = offset;
+    while (i > 0 && source[i - 1] != 10) { i = i - 1; }
+    return i;
+}
+
+// The byte offset where line `line` (from 1) begins, or -1 when the source has fewer lines.
+fn isize lineBegins(const ref string source, isize line) {
+    if (line == 1) { return 0; }
+    isize seen = 1;
+    isize i = 0;
+    isize n = source.length();
+    while (i < n) {
+        if (source[i] == 10) {
+            seen = seen + 1;
+            if (seen == line) { return i + 1; }
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+// A browser's message placed in UTF-8 bytes. WebGPU gives its offset and length in UTF-16 code units, which
+// emdawnwebgpu passes on as webgpu.h's UTF-8 fields unconverted; the column follows from the offset. A line of 0 is a
+// message with no place.
+fn Place fromUtf16(const ref string source, uint64 line, uint64 offset, uint64 length) {
+    if (line == 0 || line > cast<uint64>(source.length()) + 1) { return nowhere(); }
+    isize start = afterUtf16(source: source, from: 0, units: offset);
+    isize end = afterUtf16(source: source, from: start, units: length);
+    isize begins = beginningOfLine(source: source, offset: start);
+    return Place.of(line: cast<isize>(line), column: start - begins + 1, offset: start, length: end - start);
+}
+
+// A number of decimal digits in `words` from byte `from`, and the byte after them.
+@generate(of)
+type value Digits { public isize value; public isize next; }
+
+fn Digits digitsAt(const ref string words, isize from) {
+    isize i = from;
+    isize v = 0;
+    isize n = words.length();
+    while (i < n && words[i] >= 48 && words[i] <= 57 && v < 100000000) {
+        v = v * 10 + cast<isize>(words[i] - 48);
+        i = i + 1;
+    }
+    return Digits.of(value: v, next: i);
+}
+
+// How many characters naga's carets mark: on the first line after the place whose `│` has only spaces before it (the
+// echoed source line has its number there) and whose first mark after it is `^`. 0 when none is found.
+fn isize nagaCarets(const ref string words, isize from) {
+    string bar = "\u{2502}";
+    isize n = words.length();
+    Optional<isize> nl = words.findFrom(substring: "\n", start: from);
+    isize i = match (nl) { case Some(value: x): x + 1; case None: n; };
+    while (i < n) {
+        Optional<isize> lineEnd = words.findFrom(substring: "\n", start: i);
+        isize end = match (lineEnd) { case Some(value: x): x; case None: n; };
+        Optional<isize> b = words.findFrom(substring: bar, start: i);
+        isize at = match (b) { case Some(value: x): x; case None: n; };
+        if (at < end) {
+            bool spaced = true;
+            isize k = i;
+            while (k < at) { if (words[k] != 32) { spaced = false; } k = k + 1; }
+            k = at + bar.length();
+            while (k < end && words[k] == 32) { k = k + 1; }
+            if (spaced && k < end && words[k] == 94) {
+                isize carets = 0;
+                while (k < end && words[k] == 94) { carets = carets + 1; k = k + 1; }
+                return carets;
+            }
+        }
+        i = end + 1;
+    }
+    return 0;
+}
+
+// naga's error placed in UTF-8 bytes. Its words carry the place as `wgsl:<line>:<column>`, the column counted in
+// characters (measured 2026-11-12: 27 after a two-byte é where the byte is the 28th, 19 after a four-byte emoji), and
+// mark its span with carets under the echoed source line, one a character. No place in its words: no place.
+fn Place fromNaga(const ref string source, const ref string words) {
+    Optional<isize> found = words.find(substring: "wgsl:");
+    isize at = match (found) { case Some(value: x): x + 5; case None: -1; };
+    if (at < 0) { return nowhere(); }
+    Digits line = digitsAt(words: words, from: at);
+    if (line.value == 0 || line.next >= words.length() || words[line.next] != 58) { return nowhere(); }
+    Digits column = digitsAt(words: words, from: line.next + 1);
+    if (column.value == 0) { return nowhere(); }
+    isize begins = lineBegins(source: source, line: line.value);
+    if (begins < 0) { return nowhere(); }
+    isize start = afterChars(source: source, from: begins, chars: column.value - 1);
+    isize end = afterChars(source: source, from: start, chars: nagaCarets(words: words, from: column.next));
+    return Place.of(line: line.value, column: start - begins + 1, offset: start, length: end - start);
+}
+
+// A message's words as one line, on every leg. naga's report, natively and in Firefox (whose WebGPU is wgpu's), runs over
+// several lines: its `Shader …` line, which names the module and says what is wrong ("Shader 'lit' parsing error: no
+// definition in scope for identifier: `nosuch`"), then the source line echoed and its carets, which the message's place
+// already gives. That line is the message; with none, its first line that is not blank (Dawn's is one line already).
+fn string oneLine(const ref string words) {
+    isize i = 0;
+    isize n = words.length();
+    string firstLine = "";
+    while (i < n) {
+        Optional<isize> lineEnd = words.findFrom(substring: "\n", start: i);
+        isize end = match (lineEnd) { case Some(value: x): x; case None: n; };
+        string line = words.substring(start: i, end: end);
+        string trimmed = line.trim();
+        if (trimmed.startsWith(prefix: "Shader ")) { return give trimmed; }
+        if (firstLine.isEmpty()) { firstLine = copy trimmed; }
+        i = end + 1;
+    }
+    return give firstLine;
 }
 
 // ---- recording -------------------------------------------------------------------------------------------------------
