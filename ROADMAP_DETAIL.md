@@ -5,19 +5,6 @@ when it comes up, and their answers are recorded here or, for a departure from k
 [AGENTS.gpu.md](AGENTS.gpu.md). When a row ships, its section goes: what was built is the [SPEC](SPEC.md), and how it
 was decided is the git log. `tools/check-roadmap.sh` holds every section to a row.
 
-<a id="firefox"></a>
-## GPU-14: Firefox's two differences
-
-Firefox's WebGPU, measured headless on 2026-11-12 with the pref kama's runner does not yet set (kyoten's KY-54;
-[AGENTS.gpu.md](AGENTS.gpu.md) item 11), differs from Dawn in two ways the gate had been skipping:
-- it refuses an RGBA16Float canvas with a JavaScript `TypeError` (Mozilla bug 1834395), which ends the program, while
-  the package lists RGBA16Float among the surface's formats;
-- it has no `maxImmediateSize`, which the tests assert is WebGPU's 64.
-
-Done: the surface lists only what its browser takes, a browser's exception from `configure` is refused rather than
-ending the program, and the tests hold no limit a browser lacks, each red then green in Firefox with the pref added
-by hand, and held by the gate once kama sets it.
-
 <a id="render-pipelines"></a>
 ## GPU-4: the render pipeline set
 
@@ -135,7 +122,8 @@ Done: `tests/` and the clear example green on each.
 kama's floor for a first publish is `tests/` green on every target the package claims, and `AGENTS.package.md` has
 the rest. Before it:
 - the web a claimed target that passes: built on 2026-11-11 ([AGENTS.gpu.md](AGENTS.gpu.md) item 10), in Chrome and
-  Edge, and in Firefox (`tests/` only, reporting its missing adapter, item 11) under `kama run`;
+  Edge, and in Firefox (`tests/` only, reporting its missing adapter, item 11) under `kama run`; Firefox's whole leg
+  once kama's runner gives headless Firefox WebGPU (kyoten's KY-54);
 - `@kama/window` published first, so this depends on its version and a consumer stops naming it beside `@kama/gpu`.
 
 The README's status and the manifest's description are rewritten for the registry, which cannot be changed after.

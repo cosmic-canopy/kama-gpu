@@ -5,6 +5,18 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Firefox's differences, measured with WebGPU there for the first time** (2026-11-12, kama 0.9.928; AGENTS.gpu.md
+  item 11): headless Firefox 160 has WebGPU once one pref keeps its GPU process (kyoten's KY-54, for `kama run` to
+  set), and `tests/` then passes all 75 cases in it.
+  - **On the web a surface lists only the canvas formats its browser takes:** the seam tries WebGPU's three on a canvas
+    of its own when the page's first device is granted, and Firefox's refusal of RGBA16Float (its bug 1834395) leaves
+    that format out.
+  - **A configure the browser refuses by throwing is `ConfigureError::NotOffered(words)`,** in the browser's words,
+    where the exception ended the program.
+  - The tests take `--no-immediates`, passed by Firefox's leg alone: Firefox has no `maxImmediateSize`, so the package
+    answers 0 there, and the run holds it to that 0. The cases on the web's timing make each error distinct, since
+    Firefox reports a device's uncaptured error once for each message.
+
 - **The web leg runs under `kama run`** (2026-11-12, kama 0.9.928; AGENTS.gpu.md item 11): `tests/` and
   `examples/clear` in Edge and Chrome as installed, and `tests/` in the pinned Firefox 160, which gives WebGPU no
   adapter here and so reports that and skips the cases that need one (`--adapter-optional`). `tools/webtest.mjs` stays

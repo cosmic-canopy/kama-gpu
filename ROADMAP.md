@@ -20,7 +20,6 @@ sections in the order `@kama/graphics` pulls them.
 
 | id | item | why |
 |---|---|---|
-| GPU-14 | **Firefox's two differences**: a surface lists only the formats its browser takes, and a browser's exception from `configure` is a refusal; the tests assume no limit a browser lacks | [detail](ROADMAP_DETAIL.md#firefox) |
 | GPU-4 | **The render pipeline set**, shaped by `@kama/graphics`' design pass: shader modules, layouts and bind groups, samplers, render pipelines, vertex and index buffers, depth and multisampled targets | [detail](ROADMAP_DETAIL.md#render-pipelines) |
 
 ## LATER: the rest of webgpu.h before 1.0

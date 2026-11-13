@@ -225,5 +225,14 @@ void gpuseam_surface_present(WGPUSurface surface);
 // linear form it was made to be viewed in. Undefined (0) is the texture's own. Built from the header's own
 // WGPU_TEXTURE_VIEW_DESCRIPTOR_INIT, so no "undefined" sentinel has to be mirrored in kama.
 WGPUTextureView gpuseam_texture_view_in(WGPUTexture texture, int32_t format);
+// Configure `surface` as `config` says: -1 when it is configured, else the length of the words (UTF-8, at most
+// `capacity` - 1 bytes, terminated in `words`) the browser refused it with by throwing. emdawnwebgpu lets an exception
+// out of a canvas's `configure` (Firefox 160's TypeError for an RGBA16Float canvas, its bug 1834395), which would end
+// the program. Natively wgpu-native reports a bad configure as a validation error, so the answer is always -1.
+int32_t gpuseam_surface_configure(WGPUSurface surface, const WGPUSurfaceConfiguration *config, char *words, int32_t capacity);
+// 1 when a canvas takes `format` (a WGPUTextureFormat), else 0. WebGPU has no question for it, and a browser may refuse
+// one of the three formats WebGPU says every canvas takes (Firefox 160 refuses RGBA16Float), so on the web the seam
+// tries the three on a canvas of its own, once, when the page's first device is granted. Until then, and natively, 1.
+int32_t gpuseam_surface_format_taken(int32_t format);
 
 #endif

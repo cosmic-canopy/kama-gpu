@@ -516,6 +516,28 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
        tests stop assuming a limit a browser does not have. **Stopgap until KY-54:** each red and green is shown by a
        run in Firefox with the pref added by hand; the gate holds them once kama sets it.
 
+    **Built on 2026-11-12 (kyoten's seventeenth session; GPU-14), test-first, red then green in Firefox with the pref
+    added by hand (kyoten's `.scratch/ff-webgpu-headless/ffrun.sh`), and the gate green:**
+    - **A surface lists only the canvas formats its browser takes.** When the page's first device is granted, the seam
+      (`js/gpuseam.js`) tries WebGPU's three canvas formats on a canvas of its own, never put in the page, inside a
+      validation scope, and `capabilities` leaves out what the browser refused. A canvas the page has not put anywhere
+      refuses RGBA16Float exactly as the page's own does (measured).
+    - **A configure the browser refuses by throwing is `NotOffered`,** in its words: the seam calls emdawnwebgpu's
+      `wgpuSurfaceConfigure` inside a `try` (`gpuseam_surface_configure`; natively it configures and answers -1).
+    - **`--no-immediates`,** passed by Firefox's leg alone, holds `maxImmediateSize` to exactly 0 there; run in Edge, the
+      same flag fails both limit cases (64, not 0), so the day Firefox reports immediates its run fails and the flag goes.
+    - **Found in the building, a third difference, within decision 2:** Firefox 160 reports a device's uncaptured error
+      once for each message, dropping a repeat (measured: errors A, B, A, C, B gave A, B and C; 70 identical gave 1;
+      70 that differ gave 70; a scope catches each). The cases on the web's timing made the same bad buffer each time,
+      so after the first Firefox dropped them all. Each now makes a buffer a distinct number of bytes past the device's
+      `maxBufferSize`, whose size every implementation names. The SPEC says what a program sees.
+    - **Mutations: 6 of 7 caught** in Firefox: the trial never made, every format taken, `--no-immediates` ignored, the
+      flood repeating one error, the passed-on error repeating an earlier one, and the trial and the catch both gone
+      (the program ends, no summary). The catch alone gone is equivalent while the trial runs: Firefox 160 refuses only
+      RGBA16Float, which the trial leaves out, so no configure reaches the browser that it throws on.
+
+    `tests/` is 75 cases in Firefox 160 with the pref, as in Edge and Chrome for Testing.
+
 12. **Decided on 2026-11-12, before it was built: the render pipeline set (GPU-4).** Measured first (kyoten's
     `.scratch/gpu4-pipelines/`, its `FINDINGS.md`): natively a C probe on wgpu-native v29.0.1.1 over Vulkan on the AMD
     Radeon 880M, one process per case; on the web a plain WebGPU page in headless Edge 157, and emdawnwebgpu's

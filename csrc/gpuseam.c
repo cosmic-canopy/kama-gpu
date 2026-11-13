@@ -617,6 +617,11 @@ static void request_free(gpuseam_device_request *r) {
 
 static const char CONSUMED_WORDS[] = "the adapter has already given a device: WebGPU gives an adapter one, so request another adapter";
 
+#if defined(__EMSCRIPTEN__)
+// js/gpuseam.js: try WebGPU's three canvas formats on a canvas of the seam's own with `device`, once a page.
+extern void gpuseam_web_learn_canvas_formats(WGPUDevice device);
+#endif
+
 static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStringView message, void *u1, void *u2) {
     (void)u2;
     gpuseam_device_request *r = (gpuseam_device_request *)u1;
@@ -640,6 +645,9 @@ static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStr
         outcome = GPUSEAM_FAILED;
     } else {
         r->device = device;
+#if defined(__EMSCRIPTEN__)
+        gpuseam_web_learn_canvas_formats(device);   // which canvas formats the browser takes, asked once a device exists
+#endif
     }
     int expected = GPUSEAM_PENDING;
     if (!atomic_compare_exchange_strong_explicit(&r->state, &expected, outcome, memory_order_acq_rel, memory_order_acquire)) {
@@ -839,7 +847,31 @@ _Static_assert(WGPU_LIMIT_U64_UNDEFINED == 0xFFFFFFFFFFFFFFFFull, "gpu.kama's LI
 #if defined(__EMSCRIPTEN__)
 // js/gpuseam.js: 1 when the canvas the selector names gives a WebGPU context.
 extern int32_t gpuseam_web_canvas_has_webgpu(const char *selector);
+// js/gpuseam.js: emdawnwebgpu's configure, its exception caught: -1, or the length of the words it threw.
+extern int32_t gpuseam_web_surface_configure(WGPUSurface surface, const WGPUSurfaceConfiguration *config, char *words,
+                                             int32_t capacity);
+// js/gpuseam.js: 0 when the browser refused `format` for a canvas of the seam's own, else 1.
+extern int32_t gpuseam_web_canvas_takes(int32_t format);
 #endif
+
+int32_t gpuseam_surface_configure(WGPUSurface surface, const WGPUSurfaceConfiguration *config, char *words, int32_t capacity) {
+#if defined(__EMSCRIPTEN__)
+    return gpuseam_web_surface_configure(surface, config, words, capacity);
+#else
+    (void)words; (void)capacity;
+    wgpuSurfaceConfigure(surface, config);
+    return -1;
+#endif
+}
+
+int32_t gpuseam_surface_format_taken(int32_t format) {
+#if defined(__EMSCRIPTEN__)
+    return gpuseam_web_canvas_takes(format);
+#else
+    (void)format;
+    return 1;
+#endif
+}
 
 WGPUSurface gpuseam_create_surface(WGPUInstance instance, int32_t kind, void *display, void *window) {
     WGPUSurfaceDescriptor d;

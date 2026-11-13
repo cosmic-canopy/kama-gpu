@@ -91,7 +91,9 @@ device, made with its request and handed to both of its callbacks.
   Every copy of a device shares one channel. Natively an error is in it when the call that caused it returns. On the
   web it arrives once the device's queue is next used, by the next tick: a submit, a `writeBuffer`, a map or a frame
   drawn lets it through, and while nothing is queued it waits (measured in Chrome 157). A program drawing every frame
-  sees its errors a frame later.
+  sees its errors a frame later. **Firefox 160 reports a device's uncaptured error once for each message:** a repeat of
+  words the device already reported is dropped by the browser and never reaches the channel (measured 2026-11-12), so
+  an error made every frame is seen once there. A scope still catches each.
 - **`device.lost() -> Optional<DeviceLoss>`,** with its `reason()` (a `LossReason`: `Unknown` or `Destroyed`) and its
   `message()`. A device whose instance went first is not lost. Natively wgpu-native reports no loss at all, of a
   destroy or a release, so `lost()` answers None there.
@@ -133,7 +135,8 @@ wgpu-native that changes it fails the gate by name:
 Measured, each held by the tests per leg:
 - wgpu-native answers a device request at once; a browser a tick or two later;
 - wgpu-native reports `maxBindGroupsPlusVertexBuffers` as 0 and its device's `maxImmediateSize` as 0 (immediates are
-  its own feature), where a browser reports 24 and 64, WebGPU's defaults;
+  its own feature), where Chromium reports 24 and 64, WebGPU's defaults. Firefox 160 has no `maxImmediateSize`, so the
+  package answers 0 there too, and Firefox's run holds it to that 0 (`--no-immediates`);
 - wgpu-native lists 14 of webgpu.h's 22 features, and not `CoreFeaturesAndLimits`, which a browser lists;
 - the words differ: wgpu-native's begin "Validation Error" and name the call, Dawn's name the object and the rule;
 - a command buffer whose `finish` failed runs nothing on either leg: natively the package never submits it, and a
@@ -189,7 +192,10 @@ A surface is what WebGPU presents into, made on an `@kama/window` window.
   The program drops the surface, and makes a new one on a live window if it wants one.
 - **`surface.capabilities(adapter:) -> Result<SurfaceCapabilities, GpuError>`:**
   - `formats()`, in the surface's order, which is its preference; a format the package does not name is left out,
-    never guessed;
+    never guessed. **On the web, a format the browser refuses for a canvas is left out too:** WebGPU says every canvas
+    takes BGRA8Unorm, RGBA8Unorm and RGBA16Float, and has no question for it, but Firefox 160 refuses RGBA16Float (its
+    bug 1834395). So the seam tries the three on a canvas of its own, once a page, when the page's first device is
+    granted, and until then lists all three;
   - `presentModes()`, `alphaModes()` and `usages()`.
 
   `SurfaceCapabilities.make(formats:, presentModes:, alphaModes:, usages:)` is public, so a test can hand in another
@@ -215,7 +221,9 @@ A surface is what WebGPU presents into, made on an `@kama/window` window.
   WebGPU sees it, since wgpu-native aborts the process on every invalid configure and a browser throws:
   - `NoArea`: the window has no area, as a minimised one has; the routine answer is to skip frames until it has one;
   - `TooLarge(most)`: past the device's `maxTextureDimension2D`, which `DeviceOptions` can raise up to the adapter's;
-  - `NotOffered(words)`: a choice the surface does not offer, named;
+  - `NotOffered(words)`: a choice the surface does not offer, named, or one the browser refused by throwing, in its
+    words: emdawnwebgpu lets the exception out, and the seam catches it, so it never ends the program. The surface keeps
+    the configure it had;
   - `Closed`: the window is closed;
   - `NoWindow`: an adopted surface, which has no window to size it, and which its maker configures.
 - **`surface.acquire() -> Result<SurfaceTexture, SurfaceError>`.** `SurfaceError` is:
@@ -259,11 +267,11 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
 - the xfail, an encoder used after `finish()`, which must be refused for the move;
-- the web leg: `tests/` and `examples/clear` built for the web, each with its own page, and run by `tools/webtest.mjs`
-  in every headless Chromium present (a Chrome for Testing pinned under `~/browsers`, Edge, Chrome): 74 cases on the
-  page's canvases, and the clear example's 60 frames on `#canvas`. The driver reads the console to the program's exit
-  status, which the page reports from emscripten's `onExit`; it is a stopgap until kama runs a wasm program in a
-  browser (kyoten's KY-50). Firefox, which speaks WebDriver BiDi, joins with `@kama/window`'s WIN-18.
+- the web leg, headless, on the page's canvases: `tests/` (75 cases) and `examples/clear` (60 frames on `#canvas`)
+  under `kama run --target WASM --headless` in Edge and Chrome as installed; `tests/` in the pinned Firefox 160, which
+  gives WebGPU no adapter under `kama run` until its runner sets one pref (kyoten's KY-54), so it reports that and skips
+  the cases that need one (`--adapter-optional`), and holds `maxImmediateSize` to 0 (`--no-immediates`); and both
+  through `tools/webtest.mjs` in the pinned Chrome for Testing, which does not run under `kama run` (kyoten's KY-53).
 
 What runs on one leg only: wgpu-native's own timing (an error in the channel when its call returns, a scope's pop ready
 at once, the seam's scopes) and its aborts natively; a window wider than `maxTextureDimension2D` on the web, since no

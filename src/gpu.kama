@@ -70,8 +70,8 @@ import {
     gpu::native::scopeDropPopped,
     gpu::native::SURFACE_OK, gpu::native::SURFACE_OCCLUDED, gpu::native::SURFACE_OUTDATED, gpu::native::SURFACE_LOST,
     gpu::native::SURFACE_TIMEOUT, gpu::native::createSurface, gpu::native::acquireSurface, gpu::native::presentSurface,
-    gpu::native::surfaceAddRef, gpu::native::surfaceRelease, gpu::native::surfaceConfigure,
-    gpu::native::surfaceGetCapabilities, gpu::native::surfaceCapabilitiesFreeMembers, gpu::native::textureViewIn,
+    gpu::native::surfaceAddRef, gpu::native::surfaceRelease, gpu::native::configureSurface,
+    gpu::native::surfaceFormatTaken, gpu::native::surfaceGetCapabilities, gpu::native::surfaceCapabilitiesFreeMembers, gpu::native::textureViewIn,
     gpu::native::WGPUSurfaceConfiguration, gpu::native::WGPUSurfaceCapabilities, gpu::native::WGPUStatus,
     gpu::native::WGPUCompositeAlphaMode, gpu::native::WGPUPresentMode,
     window::Window, window::NativeWindow, window::NativeKind, window::Size,
@@ -1548,7 +1548,8 @@ fn uint64 answeredUsages(uint64 got) {
 @compileFor(!ARCH_WASM32)
 fn uint64 answeredUsages(uint64 got) { return got; }
 
-// What `surface` offers `adapter`, read out of C and freed there at once.
+// What `surface` offers `adapter`, read out of C and freed there at once. A format the browser refused for a canvas
+// (Firefox 160's RGBA16Float, GPU-14) is not offered: the seam learns which, once the page's first device is granted.
 unsafe fn Result<SurfaceCapabilities, GpuError> capabilitiesOf(UnsafePtr surface, UnsafePtr adapter) {
     if (adapter == null) { return Result::Err(error: GpuError::Refused(words: "no adapter to ask what the surface offers")); }
     WGPUSurfaceCapabilities raw = WGPUSurfaceCapabilities.zero();
@@ -1561,7 +1562,8 @@ unsafe fn Result<SurfaceCapabilities, GpuError> capabilitiesOf(UnsafePtr surface
     isize i = 0;
     while (i < cast<isize>(raw.formatCount)) {
         Optional<TextureFormat> f = TextureFormat::fromValue(value: fs[i]);
-        match (f) { case Some(value: x): { formats.add(item: x); } case None: { } };
+        bool taken = surfaceFormatTaken(format: fs[i]) != 0;
+        match (f) { case Some(value: x): { if (taken) { formats.add(item: x); } } case None: { } };
         i = i + 1;
     }
     DynamicArray<PresentMode> presents = DynamicArray.empty();
@@ -1709,7 +1711,15 @@ type resource Surface implements Copyable<This>(bare: give) {
         }
         c.alphaMode = alphaValue(m: config.alpha);
         c.presentMode = presentValue(m: config.present);
-        surfaceConfigure(surface: this.raw(), config: cast<UnsafePtr>(addr(of: c)));
+        // A browser may refuse by throwing (GPU-14), which the seam catches: the program hears it, and the surface keeps
+        // whatever configure it had.
+        InlineArray<uint8>#(512) said = [0; 512];
+        int32 n = configureSurface(surface: this.raw(), config: cast<UnsafePtr>(addr(of: c)), words: addr(of: said[0]),
+                                   capacity: MESSAGE_BYTES);
+        if (n >= 0) {
+            string words = textOf(buf: said, length: n);
+            return Result::Err(error: ConfigureError::NotOffered(words: give words));
+        }
         this.state.configured(view: config.viewFormat.value(), block: device.stateBlock());
         return Result::Ok(value: Unit::Unit);
     }
