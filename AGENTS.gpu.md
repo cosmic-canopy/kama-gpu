@@ -1054,7 +1054,40 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
         says.
 
     **Part 3 is done.** Part 4 is next: the render pass and textures by description. It takes over three mutations part
-    3 could not catch (the depth bias slope, the stencil faces, the step mode), and question 10 is open with the owner.
+    3 could not catch (the depth bias slope, the stencil faces, the step mode).
+
+    **Built on 2026-11-13 (kyoten's nineteenth session), on kama 0.9.940: decision 10,** test-first, in one commit:
+    - **The refusals, in `pipelineRefusal`, so both ways of making a pipeline share them:** more vertex buffer slots
+      than the device's `maxVertexBuffers`, and alpha to coverage at a sample count of 1, each in words that say what
+      to do instead.
+    - **Fact 30** (`unwritten`): wgpu-native takes a colour target the fragment stage never writes, with a write mask
+      that is not zero. It is red when that pipeline is one wgpu refuses (an RGB9E5 target, then restored).
+    - **The cases:**
+      - the run's device asks for its adapter's `maxVertexBuffers` (16 natively here, 8 in each browser), so that
+        many slots is taken and one more is refused in the package's words;
+      - alpha to coverage at one sample is refused in the package's words, and at four samples is taken;
+      - a target the fragment stage never writes, with no channel written, is taken on every leg, which is the SPEC's
+        answer for an unwritten target.
+
+      Red first: natively nothing for either refusal, in Edge Dawn's words, and in Firefox Dawn-like words for the
+      slots and nothing for alpha to coverage.
+    - **Measured on the way, every leg** (a temporary case, then removed): an unwritten target with a mask is refused by
+      Edge, Chrome for Testing and Firefox 160, so only wgpu-native v29.0.1.1 takes it. Firefox's WebGPU, on a later
+      wgpu, counts the empty slots too, and takes alpha to coverage at one sample. So of the three, only alpha to
+      coverage is still a gap in wgpu itself, and the draft issue (kyoten's `.scratch/gpu4-part3/wgpu-issue.md`) says
+      so.
+    - `tests/` is 210 cases natively, 187 in Edge, Firefox and Chrome for Testing; `tools/check-facts.sh` holds 30 facts.
+    - **Mutations: 9 of 9 caught,** and fact 30's own:
+      - the slot check gone, natively and in Edge;
+      - a count at the limit refused;
+      - WebGPU's 8 in place of the device's limit, which only the native leg's 16 shows;
+      - one slot past the limit taken;
+      - alpha to coverage unchecked, refused at any count, or one sample refused without it;
+      - every target's mask dropped, which the unwritten target shows in Edge.
+    - **Seen once in the gate, Firefox's first:** Firefox 160 failed to start its content process ("Failed to launch tab
+      subprocess @SB::LA::SpawnTarget", Error -2147024809) and never asked for the clear's page. `kama run` named it
+      after 60 s. Three runs of the clear alone and the next whole suite passed. It is watched, not loosened: a second
+      one is investigated.
 
 ## Where the truth is
 

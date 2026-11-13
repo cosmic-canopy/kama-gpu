@@ -108,7 +108,7 @@ type resource PipelineRun {
         else if (this.stage == 1) { this.awaitAdapter(); }
         else if (this.stage == 2) { this.awaitDevice(); }
         else if (this.stage == 10) { this.goodPipelines(); }
-        else if (this.stage == 11) { this.awaitNone(name: "pipelines WebGPU takes are made with no error: auto and explicit layouts, vertex buffers, a constant, depth, stencil, a blend, no channel written, an empty target, a strip, four samples, and depth alone", next: 20); }
+        else if (this.stage == 11) { this.awaitNone(name: "pipelines WebGPU takes are made with no error: auto and explicit layouts, vertex buffers, a constant, depth, stencil, a blend, no channel written, an empty target, a strip, four samples, depth alone, as many vertex buffer slots as the device's maxVertexBuffers, alpha to coverage at four samples, and a target the fragment never writes with no channel written", next: 20); }
         else if (this.stage == 20) { this.drawn(kind: 0, next: 21); }
         else if (this.stage == 21) { this.awaitDrawn(name: "a pipeline at WebGPU's defaults draws its fragment's colour, through a copy of it once the pipeline it was copied from is gone: one sample, every sample, every channel, a triangle list", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 30); }
         else if (this.stage == 30) { this.drawn(kind: 1, next: 31); }
@@ -182,7 +182,11 @@ type resource PipelineRun {
         else if (this.stage == 410) { this.fromCopiedModule(); }
         else if (this.stage == 411) { this.awaitNone(name: "a pipeline made from a module's copy, once the module it was copied from is gone, is made with no error", next: 420); }
         else if (this.stage == 420) { this.compressedTexture(); }
-        else if (this.stage == 421) { this.awaitOne(name: "a BC texture on a device without TextureCompressionBC is a validation error in the package's words, not the end of the program", label: "BC1RGBAUnorm", says: "TextureCompressionBC", next: 500); }
+        else if (this.stage == 421) { this.awaitOne(name: "a BC texture on a device without TextureCompressionBC is a validation error in the package's words, not the end of the program", label: "BC1RGBAUnorm", says: "TextureCompressionBC", next: 422); }
+        else if (this.stage == 422) { this.misused(kind: 30, next: 423); }
+        else if (this.stage == 423) { this.awaitOne(name: "vertex buffer slots past the device's maxVertexBuffers, all but one with no attribute, are a validation error in the package's words, where wgpu-native takes them", label: "too many slots", says: "maxVertexBuffers", next: 424); }
+        else if (this.stage == 424) { this.misused(kind: 31, next: 425); }
+        else if (this.stage == 425) { this.awaitOne(name: "alpha to coverage at one sample is a validation error in the package's words, where wgpu-native takes it", label: "coverage at one sample", says: "alpha to coverage", next: 500); }
         else if (this.stage == 500) { this.asyncFirst(); }
         else if (this.stage == 501) { this.awaitAsyncReady(); }
         else if (this.stage == 502) { this.drawnAsync(); }
@@ -261,6 +265,9 @@ type resource PipelineRun {
             case Ready(adapter: a): {
                 DeviceOptions two = readOptions();
                 two.compileWorkers = ASYNC_WORKERS;
+                // the adapter's most vertex buffers, past WebGPU's 8 where it has more (16 natively here): decision
+                // 10's limit is the device's, so a device asked for more takes more
+                two.limits.maxVertexBuffers = a.limits().maxVertexBuffers;
                 this.deviceRequest = Optional::Some(value: a.requestDevice(options: two));
                 this.next(to: 2);
             }
@@ -968,7 +975,7 @@ type resource PipelineRun {
     }
 }
 
-comptime int32 GOOD_KINDS = 14;
+comptime int32 GOOD_KINDS = 17;
 comptime int32 ASYNC_WORKERS = 2;    // the pipeline run's device's compile isolates
 comptime int64 ASYNC_WAIT_MS = 20000; // the longest an asynchronous case waits
 comptime int32 MANY_REQUESTS = 300;  // past a compile pool's channel, which holds 256
@@ -1064,9 +1071,24 @@ unsafe fn RenderPipelineDescriptor uniformDescriptor(ref Device d, ref ShaderMod
 // Pipelines WebGPU takes: 0 auto, 1 an explicit layout, 2 a vertex buffer, 3 a fragment constant, 4 depth, 5 an
 // alpha blend, 6 no channel written, 7 an empty target before one the shader writes, 8 a strip with an index format,
 // 9 depth alone, 10 stencil, 11 four samples, 12 a vertex buffer stepped per instance, 13 Stencil8 with no depth write
-// and no depth test (wgpu-native ends the process on a depth write there, so its `false` must reach it).
+// and no depth test (wgpu-native ends the process on a depth write there, so its `false` must reach it), 14 as many
+// vertex buffer slots as the device's maxVertexBuffers, 15 alpha to coverage at four samples, and 16 a target the
+// fragment stage never writes, with no channel written: what a program means by an unwritten target (decision 10).
 unsafe fn RenderPipelineDescriptor goodDescriptor(ref Device d, ref ShaderModule shaders, int32 kind) {
     if (kind == 1) { return uniformDescriptor(d: d, shaders: shaders, explicit: true); }
+    if (kind == 14) { return slotted(shaders: shaders, count: cast<isize>(d.limits().maxVertexBuffers), label: "good 14"); }
+    if (kind == 16) {
+        VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs0");
+        FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs");
+        f.emptyTarget();
+        ColorTargetState unwritten = ColorTargetState.make(format: TextureFormat::RGBA8Unorm);
+        unwritten.writeMask = ColorWriteMask::None;
+        f.target(state: unwritten);
+        RenderPipelineDescriptor kept = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+        kept.fragment(state: give f);
+        kept.label(text: "good 16");
+        return kept;
+    }
     if (kind == 7) {
         VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs0");
         FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs1");
@@ -1128,6 +1150,10 @@ unsafe fn RenderPipelineDescriptor goodDescriptor(ref Device d, ref ShaderModule
         result.depthStencil(state: s);
     }
     if (kind == 11) { result.multisampleMut().count = 4; }
+    if (kind == 15) {
+        result.multisampleMut().count = 4;
+        result.multisampleMut().alphaToCoverageEnabled = true;
+    }
     if (kind == 13) {
         result.depthStencil(state: DepthStencilState.make(format: TextureFormat::Stencil8, depthWriteEnabled: false, depthCompare: CompareFunction::Always));
     }
@@ -1164,9 +1190,32 @@ unsafe fn RenderPipelineDescriptor drawnDescriptor(ref ShaderModule shaders, int
     return d;
 }
 
-// A pipeline WebGPU refuses (0 to 10), or the package refuses first (20 to 29), each labelled for its case.
+// `vs` reading location 0 from one buffer, then buffer slots with no attribute up to `count` in all.
+unsafe fn RenderPipelineDescriptor slotted(ref ShaderModule shaders, isize count, const ref string label) {
+    VertexBufferLayout used = VertexBufferLayout.make(arrayStride: 8);
+    used.attribute(format: VertexFormat::Float32x2, offset: 0, shaderLocation: 0);
+    VertexState v = VertexState.make(module: copy shaders, entryPoint: "vs");
+    v.buffer(layout: give used);
+    isize n = 1;
+    while (n < count) {
+        v.buffer(layout: VertexBufferLayout.make(arrayStride: 8));
+        n = n + 1;
+    }
+    FragmentState f = FragmentState.make(module: copy shaders, entryPoint: "fs");
+    f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+    RenderPipelineDescriptor result = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
+    result.fragment(state: give f);
+    result.label(text: copy label);
+    return result;
+}
+
+// A pipeline WebGPU refuses (0 to 10), or the package refuses first (20 to 31), each labelled for its case.
 unsafe fn RenderPipelineDescriptor misusedDescriptor(ref Device d, ref ShaderModule shaders, int32 kind) {
     if (kind == 0) { return plainDescriptor(shaders: shaders, entry: "nosuch", label: "missing entry"); }
+    if (kind == 30) {
+        isize most = cast<isize>(d.limits().maxVertexBuffers);
+        return slotted(shaders: shaders, count: most + 1, label: "too many slots");
+    }
     if (kind == 13) {
         // fsu reads a uniform at group 0's binding 0; this layout puts a read-only storage buffer there
         VertexState sv = VertexState.make(module: copy shaders, entryPoint: "vs0");
@@ -1236,6 +1285,7 @@ unsafe fn RenderPipelineDescriptor misusedDescriptor(ref Device d, ref ShaderMod
     RenderPipelineDescriptor result = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: give v);
     result.fragment(state: give f);
     if (kind == 2) { result.multisampleMut().count = 3; label = "three samples"; }
+    if (kind == 31) { result.multisampleMut().alphaToCoverageEnabled = true; label = "coverage at one sample"; }
     if (kind == 11) { result.primitiveMut().unclippedDepth = true; label = "unclipped"; }
     if (kind == 12) {
         result.depthStencil(state: DepthStencilState.make(format: TextureFormat::Stencil8, depthWriteEnabled: false, depthCompare: CompareFunction::Less));

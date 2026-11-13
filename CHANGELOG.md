@@ -5,6 +5,11 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Changed: two pipelines wgpu-native took are refused on both legs** (2026-11-13, kama 0.9.940; AGENTS.gpu.md item
+  12, decision 10), as WebGPU refuses them, so a pipeline made natively is one a browser makes too: more vertex buffer
+  slots than the device's `maxVertexBuffers` (wgpu-native left the slots with no attribute uncounted), and alpha to
+  coverage at a sample count of 1. A device that needs more vertex buffers asks for them in `DeviceOptions.limits`.
+
 - **New: `device.createRenderPipelineAsync(descriptor:)`** (2026-11-13, kama 0.9.938; GPU-4's third part,
   AGENTS.gpu.md item 12, decisions 2 and 3): a polled `PipelineRequest`, whose failure lands in the request alone as a
   `PipelineError` carrying each stage's compilation messages. Natively the package compiles on isolates of its own

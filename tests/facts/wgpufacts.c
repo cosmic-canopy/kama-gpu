@@ -297,6 +297,46 @@ static void wgsl_error(void) {
     wgpuDeviceRelease(d);
 }
 
+// Taken in v29.0.1.1, where WebGPU refuses it (Dawn: "Color target has no corresponding fragment stage output but
+// writeMask … is not zero"): a colour target the fragment stage never writes, with a write mask that is not zero. The
+// package cannot tell it without the stage's outputs, so the SPEC documents it and what a program means instead, a
+// write mask of None (AGENTS.gpu.md item 12, decision 10). Firefox 160's WebGPU, on a later wgpu, refuses it, so the
+// day this fails, wgpu-native refuses it too, and the SPEC's note on wgpu-native goes.
+static void unwritten_target(void) {
+    WGPUDevice d = device_for(&g_a, 1);
+    WGPUShaderModule m = wgsl_module(d,
+        "@vertex fn vs() -> @builtin(position) vec4f { return vec4f(0.0, 0.0, 0.0, 1.0); }\n"
+        "@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0); }\n", "facts");
+    WGPUColorTargetState targets[2];
+    memset(targets, 0, sizeof targets);
+    targets[0].format = WGPUTextureFormat_Undefined;   // an empty slot at location 0, which the stage writes
+    targets[1].format = WGPUTextureFormat_RGBA8Unorm;  // location 1, which it does not
+    targets[1].writeMask = WGPUColorWriteMask_All;
+    WGPUFragmentState fs;
+    memset(&fs, 0, sizeof fs);
+    fs.module = m;
+    fs.entryPoint.data = "fs";
+    fs.entryPoint.length = 2;
+    fs.targetCount = 2;
+    fs.targets = targets;
+    WGPURenderPipelineDescriptor pd;
+    memset(&pd, 0, sizeof pd);
+    pd.vertex.module = m;
+    pd.vertex.entryPoint.data = "vs";
+    pd.vertex.entryPoint.length = 2;
+    pd.primitive.topology = WGPUPrimitiveTopology_TriangleList;
+    pd.multisample.count = 1;
+    pd.multisample.mask = 0xFFFFFFFF;
+    pd.fragment = &fs;
+    WGPURenderPipeline p = wgpuDeviceCreateRenderPipeline(d, &pd);
+    events();
+    fact(g_a.count == 0, "a colour target the fragment stage never writes, with a write mask, is taken (WebGPU refuses it)",
+         g_words);
+    wgpuRenderPipelineRelease(p);
+    wgpuShaderModuleRelease(m);
+    wgpuDeviceRelease(d);
+}
+
 // ---- the aborts: the seam's guards are why none is reachable from the safe API -------------------------------------
 
 static void abort_no_handler(void) {
@@ -411,6 +451,7 @@ static const entry CASES[] = {
     { "afterrelease", after_release },
     { "noloss", no_loss },
     { "wgsl", wgsl_error },
+    { "unwritten", unwritten_target },
     { "abort-nohandler", abort_no_handler },
     { "abort-internal", abort_internal_filter },
     { "abort-emptypop", abort_empty_pop },

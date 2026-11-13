@@ -363,6 +363,21 @@ Dawn's is. Firefox reports places in UTF-16 units as Dawn does, the first error 
   The pipeline handed back is made with no fragment stage, no depth, no vertex buffer and no constant, which WebGPU
   refuses on both legs, under a quiet section, so it is invalid. A stride or an attribute offset past 2^53 - 1 is
   clamped.
+- **What wgpu-native takes and WebGPU refuses is refused on both legs, in the package's words** (decision 10), so a
+  pipeline made natively is one a browser makes too:
+  - more vertex buffer slots than the device's `maxVertexBuffers`, counting slots with no attribute, which wgpu-native
+    leaves uncounted. The limit is the device's: WebGPU's 8, or what `DeviceOptions.limits` asked for, up to the
+    adapter's;
+  - alpha to coverage at a sample count of 1. A fragment stage's `discard` keeps or drops a fragment exactly, and alpha
+    to coverage with multisampling is taken.
+
+  Firefox 160 takes alpha to coverage at one sample too, as wgpu-native does, so the refusal holds it there as well;
+  it counts the slots, as Dawn does.
+- **A colour target the fragment stage never writes must write no channel** (`ColorWriteMask::None`), or be an empty
+  slot (`emptyTarget()`). With a write mask that is not zero, Edge, Chrome for Testing and Firefox 160 refuse it as a
+  validation error naming the label, while wgpu-native takes it and leaves the target's pixels undefined (a fact,
+  below). The package cannot tell it, since
+  that needs the stage's outputs.
 - What WebGPU refuses is a validation error naming the label:
   - a missing entry point, or a layout that does not match the shaders;
   - a stride not a multiple of 4 or past the limit;
@@ -484,10 +499,10 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 `tools/test.sh` is the gate. It runs:
 - `tools/check-bindings.sh`: the bindings, `TextureFormat` and `COVERAGE.md` against what the headers and the safe API
   make, the coverage rules on their fixture, and the constants;
-- `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 29 facts, natively, its asynchronous
-  pipeline call's abort among them;
+- `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 30 facts, natively, its asynchronous
+  pipeline call's abort and its taking a colour target the fragment stage never writes among them;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 208 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 210 cases natively with a display, debug and release.
   Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
@@ -497,7 +512,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
-- the web leg, headless, on the page's canvases: `tests/` (185 cases) and `examples/clear` (60 frames on `#canvas`)
+- the web leg, headless, on the page's canvases: `tests/` (187 cases) and `examples/clear` (60 frames on `#canvas`)
   under `kama run --target WASM --headless` in Edge, Chrome as installed and the pinned Firefox 160, each with the
   printErrors check. Firefox's run holds `maxImmediateSize` to 0 (`--no-immediates`), a WGSL warning to no message
   (`--no-shader-warnings`), and a buffer of 2^53 - 256 bytes to an out-of-memory error, which is how Firefox reports it

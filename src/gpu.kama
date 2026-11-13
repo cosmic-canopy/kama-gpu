@@ -1257,12 +1257,22 @@ type resource Device implements Copyable<This>(bare: give) {
 
     // Why the package refuses `descriptor` on this device, or "" (decision 9): a pipeline constant or a depth bias that
     // is not a finite number, a format or a blend factor whose feature the device lacks (a browser throws on each), and
-    // a depth write to a format with no depth (wgpu-native ends the process on it). The rest is WebGPU's validation.
+    // a depth write to a format with no depth (wgpu-native ends the process on it). Then what wgpu-native takes and
+    // WebGPU refuses (decision 10): more vertex buffer slots than the device's maxVertexBuffers, which wgpu-native leaves
+    // uncounted when they carry no attribute, and alpha to coverage at one sample. The rest is WebGPU's validation.
     unsafe const fn string pipelineRefusal(const ref RenderPipelineDescriptor descriptor) {
         string what = "the render pipeline '" + descriptor.labelled + "'";
         string vertexConstants = constantRefusal(names: descriptor.vertexState.constantNames,
                                                  values: descriptor.vertexState.constantValues, what: what);
         if (!vertexConstants.isEmpty()) { return vertexConstants; }
+        isize slots = descriptor.vertexState.bufferList.length();
+        isize most = cast<isize>(this.limits().maxVertexBuffers);
+        if (slots > most) {
+            return "${what} has ${slots} vertex buffer slots, past the device's maxVertexBuffers of ${most} (a device asks for more in DeviceOptions.limits, up to its adapter's): WebGPU refuses it";
+        }
+        if (descriptor.multisampleState.alphaToCoverageEnabled && descriptor.multisampleState.count == 1) {
+            return "${what} turns on alpha to coverage at a sample count of 1, where it needs multisampling (a fragment stage's discard keeps or drops a fragment exactly): WebGPU refuses it";
+        }
         match (descriptor.depthState) {
             case Some(value: s): {
                 float64 slope = cast<float64>(s.depthBiasSlopeScale);
