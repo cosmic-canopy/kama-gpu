@@ -32,7 +32,7 @@ import {
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::WindowOptions, window::Size, window::NativeWindow,
-    addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly, heapInUse,
+    addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly, readOptions, heapInUse,
     ShaderRun, Verdicts, BindingRun, PipelineRun,
 };
 
@@ -761,8 +761,8 @@ type resource Check implements App {
         Adapter whole = match (pool.take()) { case Some(value: a): give a; case None: { return; } };
         Adapter lacks = match (pool.take()) { case Some(value: a): give a; case None: { return; } };
         Adapter both = match (pool.take()) { case Some(value: a): give a; case None: { return; } };
-        this.pairFirst = Optional::Some(value: both.requestDevice(options: DeviceOptions.defaults()));
-        this.pairSecond = Optional::Some(value: both.requestDevice(options: DeviceOptions.defaults()));
+        this.pairFirst = Optional::Some(value: both.requestDevice(options: readOptions()));
+        this.pairSecond = Optional::Some(value: both.requestDevice(options: readOptions()));
         this.open = this.open + 2;
         AdapterInfo info = primary.info();
         Backend backend = info.backend();
@@ -775,12 +775,12 @@ type resource Check implements App {
         string below = meets(have: limits, want: defaults, lacked: noImmediates());
         this.verdict(name: "the adapter's limits meet WebGPU's defaults", why: below);
 
-        this.request = Optional::Some(value: primary.requestDevice(options: DeviceOptions.defaults()));
+        this.request = Optional::Some(value: primary.requestDevice(options: readOptions()));
         this.open = this.open + 1;
 
         uint32 top = limits.maxTextureDimension2D;
         if (top > defaults.maxTextureDimension2D) {
-            DeviceOptions up = DeviceOptions.defaults();
+            DeviceOptions up = readOptions();
             up.limits.maxTextureDimension2D = top;
             this.raisedTo = top;
             this.raised = Optional::Some(value: raising.requestDevice(options: up));
@@ -789,7 +789,7 @@ type resource Check implements App {
             println(s: "skip a raised limit: the adapter's maxTextureDimension2D is WebGPU's default, ${top}");
         }
 
-        DeviceOptions pastLimit = DeviceOptions.defaults();
+        DeviceOptions pastLimit = readOptions();
         pastLimit.limits.maxTextureDimension2D = top + 1;
         this.beyond = Optional::Some(value: past.requestDevice(options: pastLimit));
         this.open = this.open + 1;
@@ -797,7 +797,7 @@ type resource Check implements App {
 
         FeatureSet has = primary.features();
         this.verdict(name: "the adapter answers its features", why: answered(has: has));
-        DeviceOptions all = DeviceOptions.defaults();
+        DeviceOptions all = readOptions();
         all.features = has;
         this.offered = has;
         this.every = Optional::Some(value: whole.requestDevice(options: all));
@@ -805,7 +805,7 @@ type resource Check implements App {
         Optional<Feature> missing = lackedBy(has: has);
         match (missing) {
             case Some(value: f): {
-                DeviceOptions wants = DeviceOptions.defaults();
+                DeviceOptions wants = readOptions();
                 wants.features = wants.features.with(feature: f);
                 this.lacking = Optional::Some(value: lacks.requestDevice(options: wants));
                 this.open = this.open + 1;
@@ -830,9 +830,9 @@ type resource Check implements App {
                     this.verdict(name: "a device and its queue, from the adapter", why: "");
                     match (this.adapter) {
                         case Some(value: a): {
-                            this.again = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                            this.again = Optional::Some(value: a.requestDevice(options: readOptions()));
                             Adapter twin = copy a;
-                            this.viaCopy = Optional::Some(value: twin.requestDevice(options: DeviceOptions.defaults()));
+                            this.viaCopy = Optional::Some(value: twin.requestDevice(options: readOptions()));
                             this.open = this.open + 2;
                         }
                         case None: { }
@@ -889,7 +889,7 @@ type resource Check implements App {
                                  why: why.isEmpty() ? "refused with no words" : "");
                     match (this.refusedAdapter) {
                         case Some(value: a): {
-                            this.afterRefusal = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                            this.afterRefusal = Optional::Some(value: a.requestDevice(options: readOptions()));
                             this.open = this.open + 1;
                         }
                         case None: { }
@@ -1331,7 +1331,7 @@ type resource SurfaceRun {
                 // wgpu-native ends the process on this acquire (measured 3 of 3, 2026-11-10), and a browser throws.
                 t.verdict(name: "an acquire before any configure is refused as NotConfigured, not aborted",
                           why: refusedAs(surface: s, want: "NotConfigured"));
-                this.deviceRequest = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: readOptions()));
                 this.caps = Optional::Some(value: give c);
                 this.adapter = Optional::Some(value: give a);
                 this.stage = 2;
@@ -2028,8 +2028,8 @@ type resource ErrorRun {
                 match (give two) {
                     case None: { t.verdict(name: "two adapters for the error cases", why: "one: " + failure); this.next(to: 99); }
                     case Some(value: b): {
-                        this.requestA = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
-                        this.requestB = Optional::Some(value: b.requestDevice(options: DeviceOptions.defaults()));
+                        this.requestA = Optional::Some(value: a.requestDevice(options: readOptions()));
+                        this.requestB = Optional::Some(value: b.requestDevice(options: readOptions()));
                         this.next(to: 2);
                     }
                 };
@@ -2478,7 +2478,7 @@ unsafe fn void errorCases(ref Check t, ref Instance instance) {
 unsafe fn Optional<Device> deviceNow(ref Check t, ref Instance instance, const ref string purpose) {
     Optional<Adapter> fresh = adapterNow(t: t, instance: instance, purpose: purpose);
     Adapter adapter = match (give fresh) { case Some(value: a): give a; case None: { return Optional::None; } };
-    DeviceRequest request = adapter.requestDevice(options: DeviceOptions.defaults());
+    DeviceRequest request = adapter.requestDevice(options: readOptions());
     int32 polls = 0;
     while (polls < 1000) {
         DeviceStatus s = request.poll();
@@ -2613,7 +2613,7 @@ unsafe fn void errorCases(ref Check t, ref Instance instance) {
 unsafe fn void spoiledCases(ref Check t, ref Instance instance) {
     Optional<Adapter> fresh = adapterNow(t: t, instance: instance, purpose: "a device for the finish cases");
     Adapter adapter = match (give fresh) { case Some(value: a): give a; case None: { return; } };
-    DeviceRequest request = adapter.requestDevice(options: DeviceOptions.defaults());
+    DeviceRequest request = adapter.requestDevice(options: readOptions());
     int32 polls = 0;
     while (polls < 1000) {
         DeviceStatus s = request.poll();

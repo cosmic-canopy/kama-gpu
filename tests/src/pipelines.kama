@@ -22,7 +22,8 @@ import {
     gpu::MultisampleState, gpu::StencilFaceState, gpu::DepthStencilState, gpu::BlendComponent, gpu::BlendState,
     gpu::ColorTargetState, gpu::VertexBufferLayout, gpu::VertexState, gpu::FragmentState, gpu::Layout,
     gpu::RenderPipelineDescriptor, gpu::RenderPipeline,
-    Verdicts,
+    gpu::ErrorScope, gpu::ErrorFilter, gpu::ScopePop, gpu::PopStatus, gpu::SamplerDescriptor, gpu::Sampler,
+    Verdicts, readOptions,
 };
 export { PipelineRun };
 
@@ -73,10 +74,18 @@ type resource PipelineRun {
     Optional<RenderPipeline> refusedPipeline = Optional::None;  // a refused pipeline, for a use of it
     Optional<Buffer> readback = Optional::None;                 // a drawn target's copy
     Optional<BufferRead> reading = Optional::None;
+    // a second device, at the default options, which prints its errors (tools/test.sh holds its output)
+    Optional<AdapterRequest> printingAdapter = Optional::None;
+    Optional<DeviceRequest> printingRequest = Optional::None;
+    Optional<Device> printing = Optional::None;
+    Optional<Queue> printingQueue = Optional::None;
+    Optional<ScopePop> printingPop = Optional::None;
+    DynamicArray<string> printedWords;   // what the printing device's channel has held, across ticks
 
     public ctor make(bool adapterOptional) {
         this.optional = adapterOptional;
         this.found = Verdicts.make();
+        this.printedWords = DynamicArray.empty();
     }
 
     public fn ref Verdicts verdicts() { return this.found; }
@@ -162,7 +171,12 @@ type resource PipelineRun {
         else if (this.stage == 410) { this.fromCopiedModule(); }
         else if (this.stage == 411) { this.awaitNone(name: "a pipeline made from a module's copy, once the module it was copied from is gone, is made with no error", next: 420); }
         else if (this.stage == 420) { this.compressedTexture(); }
-        else if (this.stage == 421) { this.awaitOne(name: "a BC texture on a device without TextureCompressionBC is a validation error in the package's words, not the end of the program", label: "BC1RGBAUnorm", says: "TextureCompressionBC", next: 999); }
+        else if (this.stage == 421) { this.awaitOne(name: "a BC texture on a device without TextureCompressionBC is a validation error in the package's words, not the end of the program", label: "BC1RGBAUnorm", says: "TextureCompressionBC", next: 430); }
+        else if (this.stage == 430) { this.askPrinting(); }
+        else if (this.stage == 431) { this.awaitPrintingAdapter(); }
+        else if (this.stage == 432) { this.awaitPrinting(); }
+        else if (this.stage == 440) { this.provokePrinted(); }
+        else if (this.stage == 441) { this.awaitPrinted(); }
         return this.stage >= 999;
     }
 
@@ -186,6 +200,8 @@ type resource PipelineRun {
         this.found.add(name: "ColorWriteMask's has asks for every channel", why: has ? "" : "has() answered wrong");
         string held = defaultsHeld();
         this.found.add(name: "a pipeline's parts start at WebGPU's defaults, not at zero", why: give held);
+        DeviceOptions standard = DeviceOptions.defaults();
+        this.found.add(name: "a device prints its errors by default", why: standard.printErrors ? "" : "printErrors is off");
     }
 
     unsafe fn void open() {
@@ -211,7 +227,7 @@ type resource PipelineRun {
         match (give s) {
             case Pending: { }
             case Ready(adapter: a): {
-                this.deviceRequest = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: readOptions()));
                 this.next(to: 2);
             }
             case Failed(error: e): {
@@ -477,6 +493,117 @@ type resource PipelineRun {
         this.next(to: 411);
     }
 
+    // A second adapter, for a device at the default options, which prints its errors.
+    unsafe fn void askPrinting() {
+        match (this.instance) {
+            case Some(value: inst): {
+                this.printingAdapter = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.make(power: PowerPreference::Default)));
+                this.next(to: 431);
+            }
+            case None: { this.next(to: 999); }
+        };
+    }
+
+    unsafe fn void awaitPrintingAdapter() {
+        AdapterStatus s = match (this.printingAdapter) {
+            case Some(value: r): r.poll();
+            case None: AdapterStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.printingAdapter = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(adapter: a): {
+                this.printingRequest = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                this.next(to: 432);
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "an adapter for the printing device", why: give why); this.next(to: 999); }
+        };
+    }
+
+    unsafe fn void awaitPrinting() {
+        DeviceStatus s = match (this.printingRequest) {
+            case Some(value: r): r.poll();
+            case None: DeviceStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.printingRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(device: d, queue: q): {
+                this.printing = Optional::Some(value: give d);
+                this.printingQueue = Optional::Some(value: give q);
+                this.next(to: 440);
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "the printing device", why: give why); this.next(to: 999); }
+        };
+    }
+
+    // On the printing device: one error left to its channel, which it prints; one a scope catches, which it does not;
+    // and one caught by a scope dropped without its pop, which goes to the channel and is printed.
+    unsafe fn void provokePrinted() {
+        Optional<ScopePop> popped = Optional::None;
+        match (this.printing) {
+            case Some(value: d): {
+                SamplerDescriptor left = SamplerDescriptor.make();
+                left.lodClamp(min: 5.0, max: 1.0);
+                left.label(text: "printed by default");
+                Sampler a = d.createSampler(descriptor: give left);
+                ErrorScope catching = d.pushErrorScope(filter: ErrorFilter::Validation);
+                SamplerDescriptor kept = SamplerDescriptor.make();
+                kept.lodClamp(min: 5.0, max: 1.0);
+                kept.label(text: "caught by a scope, never printed");
+                Sampler b = d.createSampler(descriptor: give kept);
+                Result<ScopePop, GpuError> ended = give catching.pop();
+                match (give ended) {
+                    case Ok(value: p): { popped = Optional::Some(value: give p); }
+                    case Err(error: e): { }
+                };
+                abandonScope(d: d);
+                match (this.printingQueue) {
+                    case Some(value: q): { CommandEncoder enc = d.createCommandEncoder(); CommandBuffer cb = give enc.finish(); q.submit(commands: give cb); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.printingPop = give popped;
+        this.next(to: 441);
+    }
+
+    // The printing device's channel holds the two errors it printed, and the scope that was popped holds the other.
+    unsafe fn void awaitPrinted() {
+        match (this.printing) {
+            case Some(value: d): {
+                DeviceErrors errs = d.takeErrors();
+                isize i = 0;
+                while (i < errs.reports().length()) {
+                    bool validation = match (errs.reports()[i].kind()) { case Validation: true; case _: false; };
+                    string words = errs.reports()[i].message();
+                    this.printedWords.add(item: validation ? copy words : "not a validation error: " + words);
+                    i = i + 1;
+                }
+            }
+            case None: { }
+        };
+        PopStatus s = PopStatus::Pending;
+        match (this.printingPop) { case Some(value: p): { s = p.poll(); } case None: { } };
+        bool scopePending = match (s) { case Pending: true; case _: false; };
+        if ((this.printedWords.length() < 2 || scopePending) && this.waited < SETTLE) { return; }
+        string why = bothNamed(words: this.printedWords, first: "printed by default", second: "printed from an abandoned scope");
+        string scoped = match (give s) {
+            case Pending: "the scope's pop was not answered";
+            case Ready(caught: c): match (c) { case Some(value: r): ""; case None: "the scope caught nothing"; };
+            case Failed(error: e): e.message();
+        };
+        if (why.isEmpty()) { why = copy scoped; }
+        this.found.add(name: "a device at the default options keeps in its channel what it prints, a popped scope keeps its own error, and an abandoned scope's goes to the channel", why: give why);
+        this.printingPop = Optional::None;
+        this.printing = Optional::None;
+        this.printingQueue = Optional::None;
+        this.next(to: 999);
+    }
+
     // A BC texture on this device, which was given no feature.
     unsafe fn void compressedTexture() {
         match (this.device) {
@@ -734,6 +861,29 @@ unsafe fn RenderPipelineDescriptor misusedDescriptor(ref Device d, ref ShaderMod
     }
     result.label(text: give label);
     return result;
+}
+
+// A scope pushed on `d`, an error made in it, and the scope dropped without its pop: what it caught goes to the channel.
+unsafe fn void abandonScope(ref Device d) {
+    ErrorScope dropped = d.pushErrorScope(filter: ErrorFilter::Validation);
+    SamplerDescriptor orphaned = SamplerDescriptor.make();
+    orphaned.lodClamp(min: 5.0, max: 1.0);
+    orphaned.label(text: "printed from an abandoned scope");
+    Sampler c = d.createSampler(descriptor: give orphaned);
+}
+
+// "" when `words` are two validation errors' words, one naming `first` and the other `second`.
+fn string bothNamed(const ref DynamicArray<string> words, const ref string first, const ref string second) {
+    isize n = words.length();
+    if (n != 2) { return "want two errors in the channel, not ${n}"; }
+    bool a = words[0].contains(substring: first) || words[1].contains(substring: first);
+    bool b = words[0].contains(substring: second) || words[1].contains(substring: second);
+    if (!a || !b) {
+        string w0 = copy words[0];
+        string w1 = copy words[1];
+        return "the channel's two errors do not name both labels: ${w0} / ${w1}";
+    }
+    return "";
 }
 
 // "" when each of the parts starts at WebGPU's defaults.

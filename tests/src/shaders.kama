@@ -15,6 +15,7 @@ import {
     gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer,
     gpu::ShaderModuleDescriptor, gpu::ShaderModule, gpu::CompilationRequest, gpu::CompilationStatus,
     gpu::CompilationInfo, gpu::CompilationMessage, gpu::CompilationMessageKind,
+    readOptions,
 };
 export { ShaderRun, Verdicts };
 
@@ -207,7 +208,7 @@ type resource ShaderRun {
         match (give s) {
             case Pending: { }
             case Ready(adapter: a): {
-                this.deviceRequest = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: readOptions()));
                 this.next(to: 2);
             }
             case Failed(error: e): {

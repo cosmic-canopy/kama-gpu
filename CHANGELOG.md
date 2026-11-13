@@ -5,6 +5,10 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: `DeviceOptions.printErrors`, on by default** (2026-11-13, kama 0.9.938; GPU-4's third part, AGENTS.gpu.md
+  item 12, decision 3, item 2): each error the device's channel takes is printed to stderr as it arrives, so an error
+  nobody reads is never silent. A program that reads its channel turns it off.
+
 - **New: render pipelines** (2026-11-13, kama 0.9.938; GPU-4's third part, AGENTS.gpu.md item 12, decisions 1, 2, 6
   and 9):
   - `device.createRenderPipeline(descriptor:)` and `RenderPipeline`, with `getBindGroupLayout(index:)`.

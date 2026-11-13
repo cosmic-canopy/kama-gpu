@@ -96,6 +96,11 @@ device, made with its request and handed to both of its callbacks.
     later ones its cascade), and counts the rest;
   - `watched()`, false for an adopted device, whose errors reach its maker's callback;
   - `isEmpty()`.
+- **An error nobody reads is never silent: `DeviceOptions.printErrors`, on by default,** prints each report to stderr
+  as the channel takes it, as `@kama/gpu: a validation error: <words>` (`an out-of-memory error`, `an internal error`,
+  `an error` for the other kinds), the words whole. The report stays in the channel for `takeErrors()`. What a popped
+  scope caught is not printed; what a scope dropped unpopped caught goes to the channel, and is. On the web stderr is
+  the browser's console. A program that reads its channel itself turns it off.
 
   Every copy of a device shares one channel. Natively an error is in it when the call that caused it returns. On the
   web it arrives once the device's queue is next used, by the next tick: a submit, a `writeBuffer`, a map or a frame
@@ -461,14 +466,16 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   make, the coverage rules on their fixture, and the constants;
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 28 facts, natively;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 191 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 193 cases natively with a display, debug and release.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
+- `printErrors`, held from outside the program: each run's output holds the printing device's two errors, printed
+  once each, and nothing of the error a popped scope caught, since every other device the tests open turns printing off;
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
-- the web leg, headless, on the page's canvases: `tests/` (168 cases) and `examples/clear` (60 frames on `#canvas`)
+- the web leg, headless, on the page's canvases: `tests/` (170 cases) and `examples/clear` (60 frames on `#canvas`)
   under `kama run --target WASM --headless` in Edge and Chrome as installed; `tests/` in the pinned Firefox 160, which
   gives WebGPU no adapter under `kama run` until its runner sets one pref (kyoten's KY-54), so it reports that and skips
   the cases that need one (`--adapter-optional`), holds `maxImmediateSize` to 0 (`--no-immediates`), a WGSL

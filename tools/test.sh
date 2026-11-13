@@ -33,6 +33,24 @@ export PATH="$KAMA_WGPU_DIR/lib:$PATH"
 
 failed=0
 step() { echo; echo "== $*"; }
+# printErrors (AGENTS.gpu.md item 12, decision 3, item 2): a tests run's output holds the two validation errors the
+# printing device's channel takes, each printed once under its own header (Dawn's words name a label twice): one left to
+# the channel, and one caught by a scope dropped without its pop. The error a popped scope caught is never printed. Every
+# other device the tests open reads its own channel and prints nothing, so the run prints exactly these two.
+printed() {
+    local log="$1" leg="$2" headers validation left orphaned scoped
+    headers="$(grep -c '^@kama/gpu: ' "$log" || true)"
+    validation="$(grep -c '^@kama/gpu: a validation error: ' "$log" || true)"
+    left="$(grep -c 'printed by default' "$log" || true)"
+    orphaned="$(grep -c 'printed from an abandoned scope' "$log" || true)"
+    scoped="$(grep -c 'never printed' "$log" || true)"
+    if [ "$headers" = 2 ] && [ "$validation" = 2 ] && [ "$left" -ge 1 ] && [ "$orphaned" -ge 1 ] && [ "$scoped" = 0 ]; then
+        echo "ok   printErrors printed the channel's two errors once each, and the popped scope's never ($leg)"
+    else
+        echo "FAIL printErrors ($leg): ${headers} printed (${validation} as validation errors), the channel's named ${left} and ${orphaned} times, the popped scope's ${scoped}"
+        failed=1
+    fi
+}
 # A browser run, bounded where `timeout` exists: `kama run` has no time limit, and a browser that never asks for the page
 # waits for ever (kyoten's KY-53).
 bounded() { if command -v timeout >/dev/null 2>&1; then timeout 300 "$@"; else "$@"; fi; }
@@ -57,7 +75,8 @@ for mode in debug release; do
     [ "$mode" = release ] && flag="--release"
     out="tests/out/native-$mode/gputests$EXE"
     if "$KAMA" build tests/kama.json $flag -o "$out" > "tests/out/build-$mode.log" 2>&1; then
-        "$out" || failed=1
+        "$out" 2>&1 | tee "tests/out/run-$mode.log" || failed=1
+        printed "tests/out/run-$mode.log" "native, $mode"
     else
         tail -20 "tests/out/build-$mode.log"
         failed=1
@@ -125,9 +144,11 @@ else
             if [[ "${name,,}" == *firefox* ]]; then
                 echo "-- kama run, $browser (no WebGPU adapter here: the cases that need one say so)"
                 KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless -- --adapter-optional --no-immediates --no-shader-warnings --huge-buffer-out-of-memory || failed=1
+                echo "skip the printErrors check in $name: with no adapter, no device prints"
             else
                 echo "-- kama run, $browser"
-                KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless || failed=1
+                KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless 2>&1 | tee tests/out/run-web.log || failed=1
+                printed tests/out/run-web.log "$name"
                 echo "-- kama run, $browser: examples/clear on #canvas for 60 frames"
                 KAMA_BROWSER="$browser" bounded "$KAMA" run examples/clear/kama.json --target WASM --headless -- --frames 60 || failed=1
             fi
@@ -139,7 +160,8 @@ else
     if browsers="$(node tools/browsers.mjs driver 2>/dev/null)"; then
         while IFS= read -r browser; do
             echo "-- the driver, $browser"
-            node tools/webtest.mjs tests/out/web gputests.html --browser "$browser" || failed=1
+            node tools/webtest.mjs tests/out/web gputests.html --browser "$browser" 2>&1 | tee tests/out/run-driver.log || failed=1
+            printed tests/out/run-driver.log "the driver"
             echo "-- the driver, $browser: examples/clear on #canvas for 60 frames"
             node tools/webtest.mjs tests/out/clear-web "clear.html?arg=--frames&arg=60" --browser "$browser" || failed=1
         done <<< "$browsers"

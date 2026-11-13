@@ -20,7 +20,7 @@ import {
     gpu::StorageTextureBindingLayout, gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::BindGroup,
     gpu::BindGroupDescriptor, gpu::BindingResource, gpu::BufferBinding, gpu::BufferRead, gpu::ReadStatus,
     std::collections::DynamicArray,
-    Verdicts,
+    Verdicts, readOptions,
 };
 export { BindingRun };
 
@@ -165,7 +165,7 @@ type resource BindingRun {
             case Ready(adapter: a): {
                 // TextureCompressionBC when the adapter offers it, for a BC texture taken; every other feature is left out,
                 // so the formats that need one are refused
-                DeviceOptions options = DeviceOptions.defaults();
+                DeviceOptions options = readOptions();
                 this.givenBC = a.features().has(feature: Feature::TextureCompressionBC);
                 if (this.givenBC) { options.features = options.features.with(feature: Feature::TextureCompressionBC); }
                 this.deviceRequest = Optional::Some(value: a.requestDevice(options: options));

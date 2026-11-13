@@ -48,7 +48,7 @@ extern fn UnsafePtr gpuseam_adapter_mark_new();
 extern fn void gpuseam_adapter_mark_hold(UnsafePtr mark);
 extern fn void gpuseam_adapter_mark_release(UnsafePtr mark);
 extern fn UnsafePtr gpuseam_adapter_request_device(UnsafePtr instance, UnsafePtr adapter, UnsafePtr mark, UnsafePtr limits,
-                                                   UnsafePtr<int32> features, int32 feature_count);
+                                                   UnsafePtr<int32> features, int32 feature_count, int32 print_errors);
 extern fn int32 gpuseam_device_request_consumed(UnsafePtr request);
 extern fn int32 gpuseam_device_request_poll(UnsafePtr request);
 extern fn UnsafePtr gpuseam_device_request_take_device(UnsafePtr request);
@@ -116,9 +116,9 @@ unsafe fn UnsafePtr adapterMarkNew() { return gpuseam_adapter_mark_new(); }
 unsafe fn void adapterMarkHold(UnsafePtr mark) { gpuseam_adapter_mark_hold(mark: mark); }
 unsafe fn void adapterMarkRelease(UnsafePtr mark) { gpuseam_adapter_mark_release(mark: mark); }
 unsafe fn UnsafePtr requestDeviceOf(UnsafePtr instance, UnsafePtr adapter, UnsafePtr mark, UnsafePtr limits,
-                                         UnsafePtr<int32> features, int32 featureCount) {
+                                         UnsafePtr<int32> features, int32 featureCount, int32 printErrors) {
     return gpuseam_adapter_request_device(instance: instance, adapter: adapter, mark: mark, limits: limits,
-                                          features: features, feature_count: featureCount);
+                                          features: features, feature_count: featureCount, print_errors: printErrors);
 }
 unsafe fn int32 deviceRequestConsumed(UnsafePtr request) { return gpuseam_device_request_consumed(request: request); }
 unsafe fn int32 deviceRequestPoll(UnsafePtr request) { return gpuseam_device_request_poll(request: request); }

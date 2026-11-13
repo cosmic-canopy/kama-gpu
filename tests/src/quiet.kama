@@ -1,11 +1,20 @@
 // The options every system window the tests open takes: unfocused, so a test run never takes the keyboard from someone
 // typing (the owner, 2026-11-10: "it fights for focus"; @kama/window's WIN-16).
 
-import { window::WindowOptions };
-export { quietly };
+import { window::WindowOptions, gpu::DeviceOptions };
+export { quietly, readOptions };
 
 fn WindowOptions quietly() {
     WindowOptions o = WindowOptions.make();
     o.focused = false;
+    return o;
+}
+
+// The options of a device whose channel the tests read themselves: WebGPU's defaults with printErrors off, so a run's
+// output holds only what a case says. The one device that prints is the pipeline run's last (tools/test.sh holds its
+// line).
+fn DeviceOptions readOptions() {
+    DeviceOptions o = DeviceOptions.defaults();
+    o.printErrors = false;
     return o;
 }

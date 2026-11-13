@@ -67,6 +67,7 @@ struct gpuseam_state {
     int32_t lost_length;
     gpuseam_scope *top;                 // its error scopes, the innermost first, of every thread (each holds the block)
     WGPUQueue queue;                    // natively, a reference on the device's queue, which a map flushes first
+    int32_t print;                      // DeviceOptions.printErrors: each report the channel takes is printed to stderr
 };
 
 struct gpuseam_scope {
@@ -168,6 +169,28 @@ static gpuseam_report report_of(int32_t kind, WGPUStringView v) {
     return r;
 }
 
+// printErrors (AGENTS.gpu.md item 12, decision 3, item 2): the line a report the channel takes is printed as, made
+// while the state's lock is held and printed once it is let go, so no thread waits on a write to stderr. NULL when the
+// device does not print, or the line cannot be allocated.
+static char *printed_line(const gpuseam_state *s, const gpuseam_report *r) {
+    if (s == NULL || !s->print) return NULL;
+    const char *kind = r->kind == GPUSEAM_KIND_VALIDATION ? "a validation error"
+                     : r->kind == GPUSEAM_KIND_OUT_OF_MEMORY ? "an out-of-memory error"
+                     : r->kind == GPUSEAM_KIND_INTERNAL ? "an internal error" : "an error";
+    size_t n = strlen("@kama/gpu: : \n") + strlen(kind) + (size_t)r->length + 1;
+    char *line = (char *)malloc(n);
+    if (line == NULL) return NULL;
+    snprintf(line, n, "@kama/gpu: %s: %.*s\n", kind, (int)r->length, r->message != NULL ? r->message : "");
+    return line;
+}
+
+static void print_line(char *line) {
+    if (line == NULL) return;
+    fputs(line, stderr);
+    fflush(stderr);
+    free(line);
+}
+
 // Into the ring, under the lock: kept while there is room, the oldest first, and counted once it is full, since the first
 // error is usually the cause and the later ones its cascade. The report is moved: its message is the ring's, or freed.
 static void ring_put(gpuseam_state *s, gpuseam_report *r) {
@@ -254,8 +277,10 @@ static void on_uncaptured_error(WGPUDevice const *device, WGPUErrorType type, WG
         return;
     }
 #endif
+    char *line = printed_line(s, &r);
     ring_put(s, &r);
     state_unlock(s);
+    print_line(line);
 }
 
 static void on_device_lost(WGPUDevice const *device, WGPUDeviceLostReason reason, WGPUStringView message, void *u1, void *u2) {
@@ -347,6 +372,7 @@ static gpuseam_scope *collapse(gpuseam_state *s, const void *thread) {
         unlink_scope(s, sc);
 #ifndef __EMSCRIPTEN__
         if (sc->caught) {
+            print_line(printed_line(s, &sc->error));   // a scope abandoned out of order that caught an error: rare
             ring_put(s, &sc->error);
             sc->caught = 0;
         }
@@ -380,8 +406,10 @@ static void on_orphan_popped(WGPUPopErrorScopeStatus status, WGPUErrorType type,
     if (status == WGPUPopErrorScopeStatus_Success && type != WGPUErrorType_NoError) {
         gpuseam_report r = report_of(kind_of(type), message);
         state_lock(sc->state);
+        char *line = printed_line(sc->state, &r);
         ring_put(sc->state, &r);
         state_unlock(sc->state);
+        print_line(line);
     }
     scope_free(sc);
 }
@@ -786,7 +814,8 @@ static void on_device(WGPURequestDeviceStatus status, WGPUDevice device, WGPUStr
 
 gpuseam_device_request *gpuseam_adapter_request_device(WGPUInstance instance, WGPUAdapter adapter,
                                                        gpuseam_adapter_mark *mark, const WGPULimits *limits,
-                                                       const int32_t *features, int32_t feature_count) {
+                                                       const int32_t *features, int32_t feature_count,
+                                                       int32_t print_errors) {
     gpuseam_device_request *r = (gpuseam_device_request *)calloc(1, sizeof *r);
     if (r == NULL) return NULL;
     gpuseam_adapter_mark_hold(mark);
@@ -799,6 +828,7 @@ gpuseam_device_request *gpuseam_adapter_request_device(WGPUInstance instance, WG
     }
     r->errors = state_new(1);
     if (r->errors == NULL) { gpuseam_adapter_mark_release(mark); free(r); return NULL; }
+    r->errors->print = print_errors != 0;
 #ifdef __EMSCRIPTEN__
     gpuseam_state_hold(r->errors);   // the lost callback's, released when it fires
 #endif

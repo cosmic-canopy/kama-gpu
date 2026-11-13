@@ -681,6 +681,11 @@ fn WGPULimits required(const ref Limits want) {
 type value DeviceOptions {
     public Limits limits = Limits.defaults();
     public FeatureSet features = FeatureSet.empty();
+    // Each error the device reports to its channel is also printed to stderr as it arrives (AGENTS.gpu.md item 12,
+    // decision 3, item 2), so an error nobody reads is never silent. An error a scope catches, and a failed
+    // asynchronous pipeline's, which its request carries, are not printed. A program that reads the channel itself
+    // turns it off.
+    public bool printErrors = true;
 
     public ctor defaults() { }
 }
@@ -989,7 +994,8 @@ type resource DeviceRequest {
             if (options.features.has(feature: f)) { names[cast<isize>(count)] = featureValue(f: f); count = count + 1; }
         }
         this.slot = requestDeviceOf(instance: instance, adapter: adapter, mark: mark, limits: cast<UnsafePtr>(addr(of: limits)),
-                                    features: addr(of: names[0]), featureCount: count);
+                                    features: addr(of: names[0]), featureCount: count,
+                                    printErrors: options.printErrors ? 1 : 0);
     }
 
     // Pending until the device has answered; then Ready once, handing the device and its queue over, or Failed with

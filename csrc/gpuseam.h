@@ -93,7 +93,8 @@ typedef struct gpuseam_device_request gpuseam_device_request;
 // reference on each while it lives. NULL only when the slot cannot be allocated.
 gpuseam_device_request *gpuseam_adapter_request_device(WGPUInstance instance, WGPUAdapter adapter,
                                                        gpuseam_adapter_mark *mark, const WGPULimits *limits,
-                                                       const int32_t *features, int32_t feature_count);
+                                                       const int32_t *features, int32_t feature_count,
+                                                       int32_t print_errors);
 // GPUSEAM_PENDING, _READY or _FAILED, after processing the instance's events when it has one.
 int32_t gpuseam_device_request_poll(gpuseam_device_request *request);
 // A READY request's device, handed over once (NULL after).

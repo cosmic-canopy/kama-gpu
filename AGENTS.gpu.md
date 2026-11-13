@@ -932,6 +932,26 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
     - **Asked of the owner, not yet answered:** question 10, what wgpu-native takes that WebGPU refuses (9 vertex
       buffers, alpha to coverage at one sample, a target the fragment never writes with a mask not zero).
 
+    **Built on 2026-11-13 (kyoten's nineteenth session), part 3's third step: `DeviceOptions.printErrors`** (decision
+    3, item 2), test-first:
+    - On by default. The seam keeps the flag in the device's state block, and prints each report the channel takes to
+      stderr as `@kama/gpu: a validation error: <words>` (the words whole), at each of the three places a report reaches
+      the channel: the uncaptured callback, a native orphan's catch, and the web's orphan answer. The line is made under
+      the state's lock and printed after it is let go, but for the rare native orphan, which prints inside it.
+    - What a popped scope caught is not printed, and the report stays in the channel for `takeErrors()`.
+    - The tests' devices read their own channels, so they turn it off (`readOptions()`, tests/src/quiet.kama). One
+      device at the defaults, the pipeline run's last, leaves an error to its channel, has a scope catch another, and
+      drops a third scope unpopped with an error in it. `tools/test.sh` keeps each run's output and holds it to two
+      validation errors printed once each, naming the two labels, and none of the popped scope's (the gate's Firefox,
+      with no adapter, prints nothing and says so).
+    - **Decided in the building:** the check counts the printed headers, not the label's lines, since Dawn's words name
+      a label twice.
+    - `tests/` is 193 cases natively, 170 in Edge and Chrome for Testing.
+    - **Mutations: 12 of 12 caught,** judged by the cases and the gate's check: the flag never set, set for every
+      device, not handed over, or off by default; a popped scope's error printed too; each of the three paths not
+      printing (the channel's natively and in Edge, the orphan's natively and in Edge); the kind's words wrong; the
+      words cut; and the tests' own devices printing.
+
 ## Where the truth is
 
 - **This package's own documents,** above: the SPEC, the ROADMAP and its detail, COVERAGE.md, and the CHANGELOG.
