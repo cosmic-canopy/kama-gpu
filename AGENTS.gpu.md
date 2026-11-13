@@ -724,6 +724,19 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       - `tests/` is 111 cases natively, 90 in Edge and Chrome for Testing, and 21 in Firefox.
       - **Mutations: 12 of 12 caught,** once the stage case asked a `has` of two flags where only one is held: "has any
         flag" passed it until then.
+    - **Buffers by description (decision 7), and decision 9's clamp on their size:**
+      - `BufferDescriptor.make(size:, usage:)` with `label(text:)`, and `device.createBuffer(descriptor:)`. Labels reach
+        webgpu.h through `labelOf`, borrowed from the description for the call.
+      - A size past 2^53 - 1 is clamped to `SIZE_LIMIT`, 2^53 - 256.
+      - Red first: in Edge a buffer of 2^60 bytes ended the program (`Aborted(Assertion failed)`, emdawnwebgpu's).
+      - The cases: a buffer's label names it in its error's words (natively `badly used`, on the web's timing
+        `past the largest`), and a buffer of 2^60 bytes is one validation error on both legs.
+      - `tests/` is 115 cases natively, 92 in Edge and Chrome for Testing, and 21 in Firefox.
+      - **Mutations: 6 of 6 caught:**
+        - the label not handed over, and a label of no bytes (the label cases);
+        - the size not clamped, and a clamp that lets anything through (only in Edge, where the program ended: natively
+          wgpu-native refuses 2^60 itself);
+        - the size and the usage not the description's.
 
 ## Where the truth is
 

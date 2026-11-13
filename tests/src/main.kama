@@ -24,7 +24,7 @@ import {
     gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::AdapterInfo,
     gpu::Backend, gpu::Limits, gpu::Feature, gpu::FeatureSet, gpu::DeviceOptions,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError,
-    gpu::PowerPreference, gpu::Buffer, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::Texture,
+    gpu::PowerPreference, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::Texture,
     gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass,
     gpu::CommandBuffer, gpu::Color,
     gpu::DeviceErrors, gpu::GpuErrorReport, gpu::GpuErrorKind, gpu::DeviceLoss, gpu::LossReason,
@@ -961,7 +961,8 @@ type resource Check implements App {
                                               usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc);
         TextureView view = target.createView();
         uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
-        Buffer copy = device.createBuffer(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
+        Buffer copy = device.createBuffer(descriptor: BufferDescriptor.make(size: bytes,
+                                                                            usage: BufferUsage::MapRead | BufferUsage::CopyDst));
         CommandEncoder encoder = device.createCommandEncoder();
         RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: RED, g: GREEN, b: BLUE, a: 1.0));
         give pass.end();
@@ -1464,7 +1465,8 @@ unsafe fn Result<GreyRead, GpuError> startGreyRead(ref Surface surface, ref Devi
     TextureView view = frame.view();
     Texture texture = frame.texture();
     uint64 bytes = cast<uint64>(ROW) * cast<uint64>(PATCH);
-    Buffer buffer = device.createBuffer(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
+    Buffer buffer = device.createBuffer(descriptor: BufferDescriptor.make(size: bytes,
+                                                                        usage: BufferUsage::MapRead | BufferUsage::CopyDst));
     CommandEncoder encoder = device.createCommandEncoder();
     RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: 0.5, g: 0.5, b: 0.5, a: 1.0));
     give pass.end();
@@ -1941,6 +1943,8 @@ type resource ErrorRun {
         else if (this.stage == 51) { this.fullRing(t: t); }
         else if (this.stage == 60) { this.spoil(); }
         else if (this.stage == 61) { this.spoiled(t: t); }
+        else if (this.stage == 70) { this.provokeHuge(); }
+        else if (this.stage == 71) { this.hugeRefused(t: t); }
         return this.stage >= 99;
     }
 
@@ -2064,6 +2068,7 @@ type resource ErrorRun {
                     println(s: "info the error, ${ticks} tick(s) after the flush: ${words}");
                 }
                 t.verdict(name: "an error reaches its own device's channel once the device's queue is used", why: one);
+                t.verdict(name: "a buffer's label names it in its error's words", why: namedIn(errs: errs, label: "past the largest"));
                 match (this.deviceB) {
                     case Some(value: b): {
                         DeviceErrors other = b.takeErrors();
@@ -2294,6 +2299,27 @@ type resource ErrorRun {
         };
         t.verdict(name: "a command buffer whose finish failed runs nothing: its error is in the channel, and on the web the browser's refusal of its submit",
                   why: why);
+        this.next(to: 70);
+    }
+
+    // A buffer of 2^60 bytes, which the browser's JavaScript API throws on: a validation error once the package clamps it.
+    unsafe fn void provokeHuge() {
+        match (this.deviceA) { case Some(value: d): { Buffer huge = hugeBuffer(device: d); } case None: { } };
+        this.flush();
+        this.next(to: 71);
+    }
+
+    unsafe fn void hugeRefused(ref Check t) {
+        Optional<DeviceErrors> got = this.drainA();
+        int32 ticks = this.waited;
+        if (!arrived(got: got)) {
+            if (ticks < SETTLE_TICKS) { return; }
+            t.verdict(name: "a buffer of 2^60 bytes is a validation error, not the end of the program", why: "nothing within ${ticks} ticks");
+            this.next(to: 99);
+            return;
+        }
+        string why = match (got) { case Some(value: errs): holds(errs: errs, want: 1, kind: GpuErrorKind::Validation); case None: "none"; };
+        t.verdict(name: "a buffer of 2^60 bytes is a validation error, not the end of the program", why: why);
         this.next(to: 99);
     }
 }
@@ -2351,12 +2377,30 @@ fn string lossSaid(const ref Optional<DeviceLoss> loss) {
 // 2026-11-12), so the cases on the web's timing make each error they wait for distinct.
 unsafe fn Buffer pastLargest(ref Device device, uint64 by) {
     Limits l = device.limits();
-    return device.createBuffer(size: l.maxBufferSize + by, usage: BufferUsage::CopyDst);
+    BufferDescriptor d = BufferDescriptor.make(size: l.maxBufferSize + by, usage: BufferUsage::CopyDst);
+    d.label(text: "past the largest");
+    return device.createBuffer(descriptor: give d);
 }
 
 // MapRead may be combined only with CopyDst: a validation error.
 unsafe fn Buffer badBuffer(ref Device device) {
-    return device.createBuffer(size: 16, usage: BufferUsage::MapRead | BufferUsage::Storage);
+    BufferDescriptor d = BufferDescriptor.make(size: 16, usage: BufferUsage::MapRead | BufferUsage::Storage);
+    d.label(text: "badly used");
+    return device.createBuffer(descriptor: give d);
+}
+
+// A buffer of 2^60 bytes, past what WebGPU's JavaScript API takes (2^53 - 1, which a browser throws on): a validation
+// error on both legs, never the end of the program (AGENTS.gpu.md item 12, decision 9).
+unsafe fn Buffer hugeBuffer(ref Device device) {
+    return device.createBuffer(descriptor: BufferDescriptor.make(size: 1152921504606846976, usage: BufferUsage::CopyDst));
+}
+
+// "" when `errs` holds one error whose words name `label`.
+fn string namedIn(const ref DeviceErrors errs, const ref string label) {
+    if (errs.reports().length() != 1) { return errorsSaid(errs: errs); }
+    string words = errs.reports()[0].message();
+    if (!words.contains(substring: label)) { return "its words do not name `${label}`: ${words}"; }
+    return "";
 }
 
 // A texture with no width: a validation error in other words.
@@ -2368,7 +2412,8 @@ unsafe fn Texture badTexture(ref Device device) {
 unsafe fn CommandEncoder badCopy(ref Device device) {
     Texture source = device.createTexture(width: 4, height: 4, format: TextureFormat::RGBA8Unorm,
                                           usage: TextureUsage::TextureBinding);
-    Buffer target = device.createBuffer(size: cast<uint64>(ROW) * 4, usage: BufferUsage::CopyDst);
+    Buffer target = device.createBuffer(descriptor: BufferDescriptor.make(size: cast<uint64>(ROW) * 4,
+                                                                        usage: BufferUsage::CopyDst));
     CommandEncoder encoder = device.createCommandEncoder();
     encoder.copyTextureToBuffer(texture: source, buffer: target, width: 4, height: 4, bytesPerRow: ROW);
     return give encoder;
@@ -2439,9 +2484,14 @@ unsafe fn void errorCases(ref Check t, ref Instance instance) {
         if (!words.contains(substring: "MAP") || !words.contains(substring: "STORAGE)")) { one = "in other words: ${words}"; }
     }
     t.verdict(name: "an uncaptured error is in its device's channel when the call returns, whole, in WebGPU's words", why: one);
+    t.verdict(name: "a buffer's label names it in its error's words", why: namedIn(errs: got, label: "badly used"));
     t.verdict(name: "a device's channel is watched", why: got.watched() ? "" : "watched() is false");
     DeviceErrors again = a.takeErrors();
     t.verdict(name: "a drain empties the channel", why: errorsSaid(errs: again));
+    Buffer huge = hugeBuffer(device: a);
+    DeviceErrors past = a.takeErrors();
+    t.verdict(name: "a buffer of 2^60 bytes is a validation error, not the end of the program",
+              why: holds(errs: past, want: 1, kind: GpuErrorKind::Validation));
 
     Buffer onB = badBuffer(device: b);
     DeviceErrors onA = a.takeErrors();

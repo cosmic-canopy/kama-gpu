@@ -5,6 +5,13 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Breaking: buffers are made from a description** (2026-11-12, kama 0.9.938; GPU-4's second part, AGENTS.gpu.md
+  item 12, decisions 7 and 9):
+  - `device.createBuffer(descriptor: BufferDescriptor.make(size:, usage:))`, with `label(text:)`, replaces
+    `createBuffer(size:, usage:)`.
+  - A buffer's label names it in the implementation's error words.
+  - A size past 2^53 - 1 is now a validation error on the web too, where the browser threw and ended the program.
+
 - **Breaking: each of WebGPU's flag sets is a type of its own** (2026-11-12, kama 0.9.938; GPU-4's second part,
   AGENTS.gpu.md item 12, decision 6).
   - `BufferUsage`, `TextureUsage` and the new `ShaderStage` are `type value`s, no longer `uint64` constants. Each is

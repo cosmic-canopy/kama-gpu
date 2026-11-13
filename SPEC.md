@@ -67,7 +67,7 @@ top level. Natively kama finds wgpu-native's SDK at `$KAMA_WGPU_DIR`. Everything
   what it asks for.
 - **A `Device`** holds its adapter, which a surface's `configure` asks again before each configure:
   - `limits()` and `features()`;
-  - `createBuffer(size:, usage:)`, `createTexture(width:, height:, format:, usage:)` and `createCommandEncoder()`;
+  - `createBuffer(descriptor:)`, `createTexture(width:, height:, format:, usage:)` and `createCommandEncoder()`;
   - `poll(wait:)`: natively it finishes what it can and fires the device's callbacks, `wait` blocking until its queue
     is empty; on the web it does nothing, since the browser's event loop does it between frames.
 - **`Device.adopt(raw:, adapter:)`** takes a device made elsewhere, with the adapter it came from. It keeps the callbacks
@@ -164,7 +164,10 @@ The sets:
 
 ## Buffers
 
-- **`device.createBuffer(size:, usage:)`,** `usage` a `BufferUsage`.
+- **`device.createBuffer(descriptor:)`,** from WebGPU's description: `BufferDescriptor.make(size:, usage:)`, `usage` a
+  `BufferUsage`, and `label(text:)`, which the implementation's words name the buffer by. A size past 2^53 - 1 is
+  clamped to 2^53 - 256, which no device reaches, so the device refuses it as it refuses any size past its limits,
+  where a browser would throw and end the program.
 - **`buffer.size()`.**
 - **`buffer.mapRead(offset:, size:) -> BufferRead`,** polled to `ReadStatus` (`Pending`, `Ready` or `Failed(error)`),
   then `bytes()` copies the mapped range out. Dropping the read unmaps the buffer.

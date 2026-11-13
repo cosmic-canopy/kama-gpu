@@ -3,11 +3,11 @@
 // a binding's shader stages are wanted are each refused as unrelated types, though webgpu.h gives all three the same
 // numbers (TextureUsage CopyDst, BufferUsage MapWrite and ShaderStage Fragment are each 2). And no empty set can be
 // written: WebGPU refuses a buffer or a texture with no usage.
-import { gpu::Device, gpu::Buffer, gpu::Texture, gpu::TextureFormat, gpu::BufferUsage, gpu::TextureUsage, gpu::ShaderStage };
+import { gpu::BufferDescriptor, gpu::BufferUsage, gpu::TextureUsage, gpu::ShaderStage };
 
-unsafe fn void misuse(ref Device device) {
-    Buffer a = device.createBuffer(size: 64, usage: TextureUsage::CopyDst);
-    Buffer b = device.createBuffer(size: 64, usage: BufferUsage::Vertex | TextureUsage::CopyDst);
+fn void misuse() {
+    BufferDescriptor a = BufferDescriptor.make(size: 64, usage: TextureUsage::CopyDst);
+    BufferDescriptor b = BufferDescriptor.make(size: 64, usage: BufferUsage::Vertex | TextureUsage::CopyDst);
     ShaderStage seen = ShaderStage::Vertex | BufferUsage::MapWrite;
     TextureUsage none = TextureUsage.fromBits(bits: 0);
 }

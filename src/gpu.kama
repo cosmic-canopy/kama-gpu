@@ -46,7 +46,7 @@ import {
     gpu::native::commandBufferAddRef, gpu::native::commandBufferRelease,
     gpu::native::WGPUBufferDescriptor, gpu::native::WGPUTextureDescriptor, gpu::native::WGPURenderPassDescriptor,
     gpu::native::WGPURenderPassColorAttachment, gpu::native::WGPUTexelCopyTextureInfo,
-    gpu::native::WGPUTexelCopyBufferInfo, gpu::native::WGPUExtent3D,
+    gpu::native::WGPUTexelCopyBufferInfo, gpu::native::WGPUExtent3D, gpu::native::WGPUStringView,
     gpu::native::WGPUBufferUsage, gpu::native::WGPUTextureUsage, gpu::native::WGPUShaderStage, gpu::native::WGPUMapMode,
     gpu::native::WGPUTextureDimension, gpu::native::WGPULoadOp,
     gpu::native::WGPUStoreOp, gpu::native::WGPUTextureAspect, gpu::native::WGPUPowerPreference,
@@ -86,7 +86,7 @@ export {
     Instance, Adapter, AdapterOptions, AdapterRequest, AdapterStatus, AdapterInfo, Backend, AdapterKind,
     Limits, Feature, FeatureSet, DeviceOptions,
     Device, Queue, DeviceRequest, DeviceStatus, GpuError, PowerPreference,
-    Buffer, BufferUsage, BufferRead, ReadStatus,
+    Buffer, BufferDescriptor, BufferUsage, BufferRead, ReadStatus,
     Texture, TextureUsage, TextureView, ShaderStage,
     CommandEncoder, RenderPass, CommandBuffer, Color,
     Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
@@ -101,6 +101,13 @@ comptime uint32 DEPTH_SLICE_UNDEFINED = 0xFFFFFFFF;
 // webgpu.h's WGPU_LIMIT_U32_UNDEFINED and _U64_UNDEFINED: a limit a request leaves to WebGPU's default. Asserted likewise.
 comptime uint32 LIMIT_U32_UNDEFINED = 0xFFFFFFFF;
 comptime uint64 LIMIT_U64_UNDEFINED = 0xFFFFFFFFFFFFFFFF;
+// The largest size or offset the package hands WebGPU: 2^53 - 256, a multiple of every alignment WebGPU has, which no
+// device reaches. WebGPU's JavaScript API throws on a 64-bit number past 2^53 - 1, which ends a web program, and
+// wgpu-native reads UINT64_MAX as "the whole size", so a larger one is clamped to this, and the device refuses it as it
+// refuses any size past its limits (AGENTS.gpu.md item 12, decision 9).
+comptime uint64 SIZE_LIMIT = 9007199254740736;
+
+fn uint64 inRange(uint64 v) { return v > SIZE_LIMIT ? SIZE_LIMIT : v; }
 // The most features a set holds or a query copies out: webgpu.h names 22, and an implementation may add its own.
 comptime int32 FEATURES_MAX = 64;
 
@@ -1009,11 +1016,12 @@ type resource Device implements Copyable<This>(bare: give) {
         return featuresFrom(names: names, count: n);
     }
 
-    // A buffer of `size` bytes for `usage`.
-    public unsafe fn Buffer createBuffer(uint64 size, BufferUsage usage) {
+    // A buffer as `descriptor` describes it (WebGPU's `createBuffer`; AGENTS.gpu.md item 12, decision 7).
+    public unsafe fn Buffer createBuffer(BufferDescriptor descriptor) {
         WGPUBufferDescriptor d = WGPUBufferDescriptor.zero();
-        d.size = size;
-        d.usage = usage.bits();
+        d.size = inRange(v: descriptor.size());
+        d.usage = descriptor.usage().bits();
+        d.label = labelOf(text: descriptor.labelText());
         return Buffer.fromDevice(raw: deviceCreateBuffer(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))),
                                  block: this.hold.raw());
     }
@@ -1104,6 +1112,31 @@ type resource Queue implements Copyable<This>(bare: give) {
 }
 
 // ---- buffers ---------------------------------------------------------------------------------------------------------
+
+// webgpu.h's view of a label: its bytes, borrowed from `text`, which must outlive the call it is handed to.
+unsafe fn WGPUStringView labelOf(const ref string text) {
+    WGPUStringView v = WGPUStringView.zero();
+    v.data = cast<UnsafeConstPtr<cchar>>(text.cstr());
+    v.length = cast<usize>(text.length());
+    return v;
+}
+
+// WebGPU's `GPUBufferDescriptor` (AGENTS.gpu.md item 12, decision 7): the size and the usages, which WebGPU requires,
+// and a label, which the implementation's words name the buffer by. `mappedAtCreation` joins it in GPU-8.
+type resource BufferDescriptor {
+    uint64 bytes;
+    BufferUsage uses;
+    string labelled = "";
+
+    public ctor make(uint64 size, BufferUsage usage) {
+        this.bytes = size;
+        this.uses = usage;
+    }
+    public fn void label(string text) { this.labelled = give text; }
+    public const fn uint64 size() { return this.bytes; }
+    public const fn BufferUsage usage() { return this.uses; }
+    public const fn const ref string labelText() { return this.labelled; }
+}
 
 type resource Buffer implements Copyable<This>(bare: give) {
     UnsafePtr handle;
