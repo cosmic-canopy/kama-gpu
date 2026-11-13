@@ -644,6 +644,50 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
 
     `tests/` is 109 cases natively, and 88 in Edge, Chrome for Testing and Firefox with the pref.
 
+    **Decided on 2026-11-12 (kyoten's eighteenth session), before part 2 was built, each as recommended** (asked in full
+    in the chat; the owner: "All as recommended"):
+    6. **Each of WebGPU's flag sets is a type of its own,** as kama's SPEC says a set of flags is (`std::fs::Permissions`):
+       `BufferUsage`, `TextureUsage` and `ShaderStage` now, and `ColorWriteMask` in part 3; `MapMode` stays inside the
+       package.
+       - The problem: as `uint64` constants, `createBuffer(size: 64, usage: BufferUsage::Vertex | TextureUsage::CopyDst)`
+         compiled. `TextureUsage::CopyDst` is 2, which on a buffer is MapWrite, so WebGPU reported a usage the author
+         never wrote. A binding's visibility would silently have read `BufferUsage::MapWrite` as Fragment, since webgpu.h
+         gives all three the number 2.
+       - The answer: each member is a set of one, joined with `|` and read with `has(flags:)`. `bits()` is webgpu.h's
+         number. There is no empty set, since WebGPU refuses a buffer or a texture with no usage. Call sites read as they
+         did. Rust's wgpu (`BufferUsages`, `ShaderStages`) and Dawn's C++ type them too.
+       - The cost: the package is unpublished, so it is now or never.
+    7. **Buffers are made from a description:** `device.createBuffer(descriptor: BufferDescriptor.make(size:, usage:))`,
+       with `label(text:)`, replaces `createBuffer(size:, usage:)`. Decision 5's reason applies, one way to make each
+       handle. Decision 1's applies too: Dawn's and wgpu's errors name a handle by its label, and most of part 2's are
+       about a buffer. It is a `type resource`, since it owns a string; `mappedAtCreation` joins it in GPU-8.
+    8. **A sampler's description, by decision 1's rule:** `SamplerDescriptor.make()` holds WebGPU's defaults. Its parts
+       are set in the groups WebGPU's validation relates: `addressModes(u:, v:, w:)`, `filters(mag:, min:, mipmap:)`,
+       `lodClamp(min:, max:)`, `compare(function:)`, `maxAnisotropy(count:)` and `label(text:)`. Then
+       `device.createSampler(descriptor:)`.
+       - The alternative refused: a `type value` of the parts with the label given apart, which would be two ways to
+         label a handle.
+       - Not closed by a type: anisotropy above 1 with a nearest filter stays WebGPU's validation error.
+
+    **Measured before part 2 was built** (kyoten's `.scratch/gpu4-part2/FINDINGS.md`): wgpu-native v29.0.1.1 natively,
+    one process per case, and plain WebGPU in headless Edge 157, with emdawnwebgpu read. It catches no JavaScript
+    exception, so a throw out of WebGPU ends a wasm program.
+    - **Ends the program on one leg:**
+      - a `writeBuffer` of a byte count not a multiple of 4 (the web throws);
+      - a size or offset above 2^53 − 1 (the web throws; natively `minBindingSize` = `UINT64_MAX`, its `WHOLE_SIZE`,
+        aborts);
+      - a buffer binding of size 0 (natively);
+      - a non-finite LOD clamp or clear colour (the web throws; natively a NaN clamp is taken silently).
+
+      2^53 − 256 is refused cleanly on both legs wherever a size or offset goes.
+    - **Ends the process natively, and part 2's types make it unwritable:** a layout entry with no kind, a group entry
+      with no resource, an `Undefined` view dimension, a storage texture with no format, and a null group in a pipeline
+      layout. Unknown stage bits are refused on the web and taken natively.
+    - **Everything else is a validation error on both legs, naming the label.**
+    - **Natively a write is not seen by a map until a submit,** even an empty one. A wait is not enough; on the web the
+      map sees it.
+    - **A label reaches the error's words on both legs,** and a scope keeps the first error in call order.
+
 ## Where the truth is
 
 - **This package's own documents,** above: the SPEC, the ROADMAP and its detail, COVERAGE.md, and the CHANGELOG.
