@@ -41,6 +41,9 @@ import {
     gpu::native::queueAddRef, gpu::native::queueRelease, gpu::native::queueSubmit, gpu::native::queueWriteBuffer,
     gpu::native::bufferAddRef, gpu::native::bufferRelease, gpu::native::bufferGetSize,
     gpu::native::textureAddRef, gpu::native::textureRelease, gpu::native::textureCreateView,
+    gpu::native::textureGetWidth, gpu::native::textureGetHeight, gpu::native::textureGetDepthOrArrayLayers,
+    gpu::native::textureGetMipLevelCount, gpu::native::textureGetSampleCount, gpu::native::textureGetDimension,
+    gpu::native::textureGetFormat, gpu::native::textureGetUsage,
     gpu::native::textureViewAddRef, gpu::native::textureViewRelease,
     gpu::native::commandEncoderAddRef, gpu::native::commandEncoderRelease, gpu::native::commandEncoderBeginRenderPass,
     gpu::native::commandEncoderCopyTextureToBuffer, gpu::native::encoderFinish,
@@ -115,7 +118,7 @@ export {
     Limits, Feature, FeatureSet, DeviceOptions,
     Device, Queue, DeviceRequest, DeviceStatus, GpuError, PowerPreference,
     Buffer, BufferDescriptor, BufferUsage, BufferRead, ReadStatus,
-    Texture, TextureUsage, TextureView, ShaderStage,
+    Texture, TextureDescriptor, TextureDimension, TextureUsage, TextureView, ShaderStage,
     CommandEncoder, RenderPass, CommandBuffer, Color,
     Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
     GpuErrorKind, GpuErrorReport, DeviceErrors, DeviceLoss, LossReason, ErrorFilter, ErrorScope, ScopePop, PopStatus,
@@ -739,6 +742,7 @@ type value TextureUsage {
 
     ctor fromBits(uint64 bits) { this.mask = bits; }
     friend capabilitiesOf[fromBits];
+    friend Texture::usage[fromBits];
 
     public comptime TextureUsage CopySrc = TextureUsage.fromBits(bits: WGPUTextureUsage::CopySrc);
     public comptime TextureUsage CopyDst = TextureUsage.fromBits(bits: WGPUTextureUsage::CopyDst);
@@ -1146,28 +1150,49 @@ type resource Device implements Copyable<This>(bare: give) {
                                  block: this.hold.raw());
     }
 
-    // A 2D texture, one mip level, one sample. A format whose feature the device was not given is refused in the
-    // package's words, where a browser throws (decision 9).
-    public unsafe fn Texture createTexture(uint32 width, uint32 height, TextureFormat format, TextureUsage usage) {
+    // A texture as `descriptor` describes it (WebGPU's `createTexture`; AGENTS.gpu.md item 12, decision 5). It is handed
+    // back at once, its error reported as every error is, to the device's channel or a scope. A format whose feature the
+    // device was not given, as the texture's or a view format, is refused in the package's words, where a browser
+    // throws (decision 9), and the texture handed back is invalid.
+    public unsafe fn Texture createTexture(TextureDescriptor descriptor) {
+        DynamicArray<int32> views = DynamicArray.empty();
+        string what = "the texture '" + descriptor.labelled + "'";
+        string refused = this.formatRefusal(format: descriptor.form, what: what);
+        isize i = 0;
+        while (i < descriptor.viewed.length()) {
+            TextureFormat v = descriptor.viewed[i];
+            views.add(item: v.value());
+            if (refused.isEmpty()) { refused = this.formatRefusal(format: v, what: "a view format of " + what); }
+            i = i + 1;
+        }
         WGPUTextureDescriptor d = WGPUTextureDescriptor.zero();
-        d.usage = usage.bits();
-        d.dimension = WGPUTextureDimension::N2D;
-        d.size.width = width;
-        d.size.height = height;
-        d.size.depthOrArrayLayers = 1;
-        d.format = format.value();
-        d.mipLevelCount = 1;
-        d.sampleCount = 1;
-        string refused = this.formatRefusal(format: format, what: "a texture");
+        d.label = labelOf(text: descriptor.labelled);
+        d.usage = descriptor.uses.bits();
+        d.dimension = textureDimensionValue(d: descriptor.dim);
+        d.size.width = descriptor.wide;
+        d.size.height = descriptor.high;
+        d.size.depthOrArrayLayers = descriptor.layers;
+        d.format = descriptor.form.value();
+        d.mipLevelCount = descriptor.mips;
+        d.sampleCount = descriptor.samples;
+        d.viewFormatCount = cast<usize>(views.length());
+        d.viewFormats = views.length() > 0 ? cast<UnsafePtr>(views.dataPtr()) : null;
         if (refused.isEmpty()) {
             return Texture.fromDevice(raw: deviceCreateTexture(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d))),
                                       block: this.hold.raw());
         }
-        // the handle handed back is invalid: an empty RGBA8Unorm texture, which WebGPU refuses, its error dropped
+        // the handle handed back is invalid: an empty 2D RGBA8Unorm texture with no view formats, which WebGPU refuses,
+        // its error dropped
         this.refuse(words: refused);
         TextureFormat plain = TextureFormat::RGBA8Unorm;
         d.format = plain.value();
+        d.dimension = WGPUTextureDimension::N2D;
         d.size.width = 0;
+        d.size.depthOrArrayLayers = 1;
+        d.mipLevelCount = 1;
+        d.sampleCount = 1;
+        d.viewFormatCount = 0;
+        d.viewFormats = null;
         quietBegin(device: this.handle);
         UnsafePtr raw = deviceCreateTexture(device: this.handle, descriptor: cast<UnsafePtr>(addr(of: d)));
         quietEnd(device: this.handle);
@@ -1576,6 +1601,57 @@ type resource BufferRead {
 
 // ---- textures --------------------------------------------------------------------------------------------------------
 
+// A texture's dimension (WebGPU's `GPUTextureDimension`).
+type enum TextureDimension { D1, D2, D3 }
+
+fn int32 textureDimensionValue(TextureDimension d) {
+    return match (d) {
+        case D1: WGPUTextureDimension::N1D;
+        case D2: WGPUTextureDimension::N2D;
+        case D3: WGPUTextureDimension::N3D;
+    };
+}
+
+// webgpu.h's number as a dimension; its `Undefined` means 2D, by its own sentinel rule.
+fn TextureDimension textureDimensionFrom(int32 v) {
+    if (v == WGPUTextureDimension::N1D) { return TextureDimension::D1; }
+    if (v == WGPUTextureDimension::N3D) { return TextureDimension::D3; }
+    return TextureDimension::D2;
+}
+
+// WebGPU's `GPUTextureDescriptor` (AGENTS.gpu.md item 12, decisions 1 and 5): `width` × `height`, one layer, 2D, one
+// mip level and one sample unless its parts say otherwise. A view format is a format a view of the texture may take
+// besides its own: its sRGB or linear twin.
+type resource TextureDescriptor {
+    uint32 wide;
+    uint32 high;
+    uint32 layers = 1;
+    TextureDimension dim = TextureDimension::D2;
+    uint32 mips = 1;
+    uint32 samples = 1;
+    TextureFormat form;
+    TextureUsage uses;
+    DynamicArray<TextureFormat> viewed = DynamicArray.empty();
+    string labelled = "";
+
+    friend Device::createTexture[wide, high, layers, dim, mips, samples, form, uses, viewed, labelled];
+
+    public ctor make(uint32 width, uint32 height, TextureFormat format, TextureUsage usage) {
+        this.wide = width;
+        this.high = height;
+        this.form = format;
+        this.uses = usage;
+    }
+    // The depth of a 3D texture, or the array layers of a 1D or 2D one.
+    public fn void depthOrArrayLayers(uint32 count) { this.layers = count; }
+    public fn void dimension(TextureDimension kind) { this.dim = kind; }
+    public fn void mipLevelCount(uint32 count) { this.mips = count; }
+    public fn void sampleCount(uint32 count) { this.samples = count; }
+    // Adds a format a view of the texture may take.
+    public fn void viewFormat(TextureFormat format) { this.viewed.add(item: format); }
+    public fn void label(string text) { this.labelled = give text; }
+}
+
 type resource Texture implements Copyable<This>(bare: give) {
     UnsafePtr handle;
     StateHold hold = StateHold.empty();   // its device's state, which its errors reach
@@ -1600,6 +1676,22 @@ type resource Texture implements Copyable<This>(bare: give) {
     public unsafe fn TextureView createView() {
         return TextureView.fromDevice(raw: textureCreateView(texture: this.handle, descriptor: null), block: this.hold.raw());
     }
+
+    // WebGPU's `GPUTexture` attributes: what the texture was made with, as the backend holds it, whether or not the
+    // backend took it. A texture the package refused answers its substitute's (decision 9): 0 wide, in RGBA8Unorm.
+    public unsafe const fn uint32 width() { return textureGetWidth(texture: this.handle); }
+    public unsafe const fn uint32 height() { return textureGetHeight(texture: this.handle); }
+    public unsafe const fn uint32 depthOrArrayLayers() { return textureGetDepthOrArrayLayers(texture: this.handle); }
+    public unsafe const fn uint32 mipLevelCount() { return textureGetMipLevelCount(texture: this.handle); }
+    public unsafe const fn uint32 sampleCount() { return textureGetSampleCount(texture: this.handle); }
+    public unsafe const fn TextureDimension dimension() {
+        return textureDimensionFrom(v: textureGetDimension(texture: this.handle));
+    }
+    // `None` only for a format webgpu.h names none for: an implementation's own, on a texture made elsewhere.
+    public unsafe const fn Optional<TextureFormat> format() {
+        return TextureFormat::fromValue(value: textureGetFormat(texture: this.handle));
+    }
+    public unsafe const fn TextureUsage usage() { return TextureUsage.fromBits(bits: textureGetUsage(texture: this.handle)); }
 
     unsafe ~Texture() { if (this.handle != null) { textureRelease(texture: this.handle); } }
 }

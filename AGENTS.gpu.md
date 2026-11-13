@@ -38,13 +38,14 @@ in; *as an engine renderer* they stay out.
 ## Where things stand
 
 **[SPEC.md](SPEC.md) is what the package is, [ROADMAP.md](ROADMAP.md) what comes next, and [COVERAGE.md](COVERAGE.md)
-which of webgpu.h it calls.** In short (2026-11-13, kama 0.9.938): offscreen work and a surface on a window run natively
-on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 79 of webgpu.h's 206 functions, a device's
+which of webgpu.h it calls.** In short (2026-11-13, kama 0.9.943): offscreen work and a surface on a window run natively
+on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 87 of webgpu.h's 206 functions, a device's
 errors reach its own holders (GPU-1), a surface holds its window (GPU-2), an acquire before a configure is refused
 (GPU-13), an adapter gives one device and a surface is configured at its window's size (GPU-3), and Firefox's
 differences from Dawn are handled (GPU-14). GPU-4, the render pipeline set, is decided (item 12) and under way: parts 1
 to 3 are built (shader modules; layouts, bind groups, samplers and `writeBuffer`; render pipelines both ways, with
-`printErrors`), and parts 4 and 5 are next. `tools/test.sh` passes before every commit.
+`printErrors`). Part 4 is decided (decisions 11 to 14) and under way: textures by description are built, and the pass
+and views by description come next, then part 5. `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
 
@@ -1088,6 +1089,108 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       subprocess @SB::LA::SpawnTarget", Error -2147024809) and never asked for the clear's page. `kama run` named it
       after 60 s. Three runs of the clear alone and the next whole suite passed. It is watched, not loosened: a second
       one is investigated.
+
+    **Measured before part 4 was built** (kyoten's `.scratch/gpu4-part4/FINDINGS.md`, 2026-11-13, kyoten's twentieth
+    session).
+    - **How:** 149 misuses of a texture's description, a view's, a render pass's and the pass's commands. Natively it ran
+      one process per case on wgpu-native v29.0.1.1. On the web it ran in headless Edge 157, passing what emdawnwebgpu
+      passes for each C value, from `library_webgpu.js` read.
+    - **Every pass error lands at `encoder.finish()`, on both legs,** for the description and every command WebGPU
+      validates. A second `end()` errors in its own call. A command after `end()` errors in its call natively, and at
+      `finish` on the web.
+    - **Ends the program on one leg:**
+      - natively taken, on the web thrown: a NaN or infinite clear colour, blend constant or viewport value;
+      - natively a validation error, on the web thrown: a NaN or infinite depth clear value; a vertex or index buffer's
+        offset or size past 2^53 - 1; and a vertex slot, a group index or a scissor value at 2^31 or above (emdawnwebgpu
+        hands them to JavaScript negative, since `convertToU31` only asserts in a debug build);
+      - a view format whose feature the device lacks: natively a validation error, on the web a throw;
+      - **a depth attachment that loads, or is read-only:** emdawnwebgpu passes webgpu.h's "no clear value", NaN, to a
+        `float` that throws. Both legs take 0 there (measured), so the package passes 0;
+      - natively a panic: a vertex buffer set to null (WebGPU's unbind), and a view whose mip or layer count is 0;
+      - an `Undefined` format, load op, store op or index format: natively a panic, on the web a throw.
+    - **wgpu-native takes, and WebGPU refuses:** stencil ops on a depth-only format, and a view usage the texture lacks.
+      Decision 10 refuses both, since the package can tell them.
+    - **Natively a texture's getters answer its description even when the texture is invalid,** as WebGPU's attributes
+      do.
+    - **Asked of the owner after the probe:** questions 11 to 14, decided below.
+
+
+    **Decided by the owner on 2026-11-13 (kyoten's twentieth session), each as recommended.** They were asked in full
+    in the chat after part 4's probe. The owner: "11. Yes 12. Yes 13. Yes 14. Yes. I will take your recommendation on
+    all 4 questions".
+    11. **The pass brings eight commands:**
+        - `setVertexBuffer` and `setIndexBuffer`, over part 2's `BufferBinding` (`whole`, `range`, `rest`);
+        - `setBindGroup`, and `setBindGroupWithOffsets(index:, group:, offsets:)` for dynamic offsets, since kama has
+          no overloading;
+        - `setBlendConstant`, `drawIndexed`, `setViewport`, `setScissorRect` and `setStencilReference`.
+
+        **There is no unbind.** Natively a null vertex buffer ends the process. An unbind is not a capability either: a
+        draw needs every slot its pipeline reads, and ignores the rest.
+
+        Indirect draws and bundles stay in GPU-7, occlusion queries in GPU-6, and debug markers in GPU-8.
+    12. **Views by description, in part 4.** `texture.createView(descriptor: TextureViewDescriptor.make())` replaces
+        `createView()`, as decision 8 did for samplers and as Rust's wgpu does.
+        - kama has no overloading and no default arguments (both checked with the compiler), so the two forms cannot
+          both exist.
+        - The descriptor sets `format`, `dimension`, `mips(base:, count:)`, `layers(base:, count:)`, `aspect`, `usage`
+          and `label`.
+        - A count of 0 is refused in the package's words, since natively it ends the process.
+    13. **The depth-stencil attachment is typed per aspect:**
+        - `DepthLoad { Clear(value), Load }` and `DepthAccess { ReadOnly, ReadWrite(load, store) }`, with their stencil
+          twins;
+        - set on `DepthStencilAttachment.make(view:)` with `depth(access:)` and `stencil(access:)`;
+        - `DepthStencilAttachment.clearingDepth(view:, value:)` for the common case, as decision 5's
+          `ColorAttachment.clearing`.
+
+        **Unwritable:** read-only with ops, writable without them, and a clear with no value. The package passes a
+        clear value of 0 wherever none is given, so emdawnwebgpu's NaN never reaches a browser.
+
+        **What is still checked when it runs:**
+        - an aspect the view's format lacks is refused (decision 10);
+        - a NaN value is refused (decision 9);
+        - a missing aspect, or a value outside [0, 1], is WebGPU's validation error.
+    14. **A refusal inside a pass is reported at `encoder.finish()`,** where WebGPU reports every encoding error
+        (measured on both legs).
+        - The refused command never reaches the backend, and the encoder is spoiled, so its command buffer never runs.
+        - The refusal is reported in place of the backend's error, unless the backend found an earlier one. That
+          earlier error is then the one reported, as in WebGPU's order.
+        - A scope around `finish()` catches the refusal, as it catches every other encoding error.
+
+    **Built on 2026-11-13 (kyoten's twentieth session), part 4's first step: textures by description** (decisions 1, 5
+    and 9), on kama 0.9.943, test-first. Red against a stub that lowered what the old call did: 13 of the 17 new cases
+    failed.
+    - **The API:**
+      - `TextureDescriptor.make(width:, height:, format:, usage:)`, with `depthOrArrayLayers(count:)`,
+        `dimension(kind:)` (a new `TextureDimension`: `D1`, `D2`, `D3`), `mipLevelCount(count:)`,
+        `sampleCount(count:)`, `viewFormat(format:)` and `label(text:)`;
+      - `device.createTexture(descriptor:)` replaces `createTexture(width:, height:, format:, usage:)`;
+      - the texture's format and every view format are held to their features. The refusal's words name the label,
+        and the substitute is an empty 2D RGBA8Unorm texture with no view formats, under a quiet section.
+    - **Brought forward from GPU-8: WebGPU's `GPUTexture` attributes,** `width()`, `height()`, `depthOrArrayLayers()`,
+      `mipLevelCount()`, `sampleCount()`, `dimension()`, `format()` (an `Optional`, `None` only for a format webgpu.h
+      names none for) and `usage()`. Only reading a texture back proves each field of its description reaches the
+      backend, and decision 10's refusals in steps 2 and 3 need a texture's format and usage. A refused texture answers
+      its substitute's attributes.
+    - **Decided in the building, by decision 1's rule, for the owner to object to:** `make` takes the height too, though
+      WebGPU defaults it to 1, since nearly every texture is 2D and `Extent3D` would make that common case two
+      statements. A 1D texture says `height: 1`.
+    - **The cases** (`BindingRun`, before the queue is dropped):
+      - eight textures WebGPU takes, each read back as described (2D, mipped, multisampled, 3D, 1D, layered, depth, and
+        an sRGB twin as a view format), and the channel empty;
+      - a texture 0 wide, more mips than its size, multisampled mips, a 3D depth texture, an incompatible view format,
+        and a 3D BC texture on a device given BC alone: each a validation error naming its label;
+      - a view format whose feature the device lacks, after a twin: refused in the package's words, naming the label;
+      - the textures refused for a view format and for their own format each answer the substitute's attributes.
+    - **Mutations: 25 of 25 caught,** 24 natively and one in Edge. They cover:
+      - the view-format refusal gone, or looking at the first view format alone;
+      - the words without the label;
+      - each field of the lowering lost (the label, dimension, height, layers, mips, samples, view formats, usage);
+      - the refusal not reported, its substitute not quieted, valid, or keeping its format. The last was caught once a
+        case read the attributes of a texture refused for its own format;
+      - each getter wrong, and each way a dimension crosses webgpu.h;
+      - in Edge, the substitute keeping its view formats: the browser threw for ETC2, which ended the program.
+    - **Results:** `tests/` is 228 cases natively, debug and release, and 205 in Edge, in Firefox and in Chrome for
+      Testing. COVERAGE.md: 87 of 206.
 
 ## Where the truth is
 

@@ -5,6 +5,14 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Changed, breaking: a texture is made from its description** (2026-11-13, kama 0.9.943; GPU-4's fourth part,
+  AGENTS.gpu.md item 12, decisions 1, 5 and 9). `device.createTexture(descriptor: TextureDescriptor.make(width:,
+  height:, format:, usage:))` replaces `createTexture(width:, height:, format:, usage:)`, and the description's parts
+  give layers, a `TextureDimension`, mip levels, a sample count, view formats and a label. A view format whose feature
+  the device was not given is refused in the package's words, as the texture's own format already was.
+  - **New:** `texture.width()`, `height()`, `depthOrArrayLayers()`, `mipLevelCount()`, `sampleCount()`,
+    `dimension()`, `format()` and `usage()`, WebGPU's `GPUTexture` attributes.
+
 - **Changed: two pipelines wgpu-native took are refused on both legs** (2026-11-13, kama 0.9.940; AGENTS.gpu.md item
   12, decision 10), as WebGPU refuses them, so a pipeline made natively is one a browser makes too: more vertex buffer
   slots than the device's `maxVertexBuffers` (wgpu-native left the slots with no attribute uncounted), and alpha to

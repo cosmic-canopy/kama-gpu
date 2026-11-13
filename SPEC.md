@@ -76,7 +76,7 @@ top level. Natively kama finds wgpu-native's SDK at `$KAMA_WGPU_DIR`. Everything
   what it asks for.
 - **A `Device`** holds its adapter, which a surface's `configure` asks again before each configure:
   - `limits()` and `features()`;
-  - `createBuffer(descriptor:)`, `createTexture(width:, height:, format:, usage:)` and `createCommandEncoder()`;
+  - `createBuffer(descriptor:)`, `createTexture(descriptor:)` and `createCommandEncoder()`;
   - `poll(wait:)`: natively it finishes what it can and fires the device's callbacks, `wait` blocking until its queue
     is empty; on the web it does nothing, since the browser's event loop does it between frames.
 - **`Device.adopt(raw:, adapter:)`** takes a device made elsewhere, with the adapter it came from. It keeps the callbacks
@@ -190,11 +190,27 @@ The sets:
 
 ## Textures and views
 
-- **`device.createTexture(width:, height:, format:, usage:)`:** a 2D texture, one mip level, one sample, `usage` a
-  `TextureUsage`.
+- **`device.createTexture(descriptor:)`,** from a `TextureDescriptor`, WebGPU's `GPUTextureDescriptor`.
+  - `TextureDescriptor.make(width:, height:, format:, usage:)` is a 2D texture of one layer, one mip level and one
+    sample, `usage` a `TextureUsage`. Its parts:
+    - `depthOrArrayLayers(count:)`: a 3D texture's depth, or the array layers of a 1D or 2D one;
+    - `dimension(kind:)`, a `TextureDimension` (`D1`, `D2` or `D3`);
+    - `mipLevelCount(count:)` and `sampleCount(count:)`;
+    - `viewFormat(format:)`, which adds a format a view of the texture may take besides its own (its sRGB or linear
+      twin);
+    - `label(text:)`.
+  - It is handed back at once. What WebGPU refuses is a validation error naming the label, to the device's channel or
+    a scope: a size of 0 or past the device's limits, more mip levels than the size has, a multisampled texture with
+    mips, layers, 3D or storage, a 3D depth texture, a view format that is not a twin, and a 3D BC or ASTC texture
+    without its Sliced3D feature.
   - **A format whose feature the device was not given is refused in the package's words** (its `requiredFeature()`,
-    below), where a browser throws, which ends a web program, and wgpu-native reports a validation error. The texture
-    handed back is made empty in RGBA8Unorm under a quiet section, so it is invalid.
+    below), as the texture's format or as a view format, where a browser throws, which ends a web program, and
+    wgpu-native reports a validation error. The texture handed back is made empty, 2D, in RGBA8Unorm with no view
+    formats, under a quiet section, so it is invalid.
+- **`texture.width()`, `height()`, `depthOrArrayLayers()`, `mipLevelCount()`, `sampleCount()`, `dimension()`,
+  `format()` and `usage()`:** WebGPU's `GPUTexture` attributes, as the backend holds them, whether or not it took the
+  texture. `format()` is `None` only for a format webgpu.h names none for, on a texture made elsewhere. A texture the
+  package refused answers its substitute's: 0 wide, 2D, in RGBA8Unorm.
 - **`texture.createView()`,** in the texture's own format.
 - **`TextureFormat` names every format webgpu.h has (101),** the same numbers on both legs:
   - `value()`, webgpu.h's number, and `TextureFormat::fromValue(value:)`, `None` for a number webgpu.h names no
@@ -502,7 +518,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 30 facts, natively, its asynchronous
   pipeline call's abort and its taking a colour target the fragment stage never writes among them;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 210 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 228 cases natively with a display, debug and release.
   Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
@@ -512,7 +528,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
-- the web leg, headless, on the page's canvases: `tests/` (187 cases) and `examples/clear` (60 frames on `#canvas`)
+- the web leg, headless, on the page's canvases: `tests/` (205 cases) and `examples/clear` (60 frames on `#canvas`)
   under `kama run --target WASM --headless` in Edge, Chrome as installed and the pinned Firefox 160, each with the
   printErrors check. Firefox's run holds `maxImmediateSize` to 0 (`--no-immediates`), a WGSL warning to no message
   (`--no-shader-warnings`), and a buffer of 2^53 - 256 bytes to an out-of-memory error, which is how Firefox reports it

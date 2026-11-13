@@ -13,7 +13,7 @@ From three headers, each by the sha256 of its text with LF line endings:
 - wgpu-native's wgpu.h `7bd23656d394f620a804b1f174444ea17082b6d330a2fca0c0e6b1121ec4b284`
 - emdawnwebgpu's webgpu.h `40e7ecd9647dc922e69d17d888d7038fbd5eb10277621eb414c8ffc278e353be`
 
-**webgpu.h: 79 of 206 called.** On both legs, 79 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
+**webgpu.h: 87 of 206 called.** On both legs, 87 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
 
 **wgpu.h, wgpu-native's own extensions, apart: 1 of 22 called.**
 
@@ -81,7 +81,7 @@ From three headers, each by the sha256 of its text with LF line endings:
 | `wgpuBufferRelease` | both | yes |
 | `wgpuDeviceCreateBuffer` | both | yes |
 
-### Textures and views, 6 of 21
+### Textures and views, 14 of 21
 
 | Function | Legs | Called |
 |---|---|---|
@@ -91,15 +91,15 @@ From three headers, each by the sha256 of its text with LF line endings:
 | `wgpuExternalTextureRelease` | both | no |
 | `wgpuTextureCreateView` | both | yes |
 | `wgpuTextureDestroy` | both | no |
-| `wgpuTextureGetDepthOrArrayLayers` | both | no |
-| `wgpuTextureGetDimension` | both | no |
-| `wgpuTextureGetFormat` | both | no |
-| `wgpuTextureGetHeight` | both | no |
-| `wgpuTextureGetMipLevelCount` | both | no |
-| `wgpuTextureGetSampleCount` | both | no |
+| `wgpuTextureGetDepthOrArrayLayers` | both | yes |
+| `wgpuTextureGetDimension` | both | yes |
+| `wgpuTextureGetFormat` | both | yes |
+| `wgpuTextureGetHeight` | both | yes |
+| `wgpuTextureGetMipLevelCount` | both | yes |
+| `wgpuTextureGetSampleCount` | both | yes |
 | `wgpuTextureGetTextureBindingViewDimension` | both | no |
-| `wgpuTextureGetUsage` | both | no |
-| `wgpuTextureGetWidth` | both | no |
+| `wgpuTextureGetUsage` | both | yes |
+| `wgpuTextureGetWidth` | both | yes |
 | `wgpuTextureSetLabel` | both | no |
 | `wgpuTextureAddRef` | both | yes |
 | `wgpuTextureRelease` | both | yes |

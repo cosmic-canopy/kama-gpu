@@ -13,7 +13,7 @@ import {
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::DeviceOptions, gpu::GpuError,
     gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer,
     gpu::Sampler, gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::CompareFunction,
-    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::Texture, gpu::TextureView, gpu::TextureFormat,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::Texture, gpu::TextureDescriptor, gpu::TextureDimension, gpu::TextureView, gpu::TextureFormat,
     gpu::TextureUsage, gpu::ShaderStage, gpu::Feature,
     gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
     gpu::BufferBindingType, gpu::SamplerBindingLayout, gpu::SamplerBindingType, gpu::TextureBindingLayout,
@@ -32,9 +32,50 @@ fn float32 divided(float32 by) {
     float32 one = 1.0;
     return one / by;
 }
+// What a refusal's substitute texture answers: 0 wide, 2D, in RGBA8Unorm; or why not.
+unsafe fn string attributesOfSubstitute(const ref Texture t) {
+    uint32 w = t.width();
+    if (w != 0) { return "it is ${w} wide"; }
+    if (t.dimension() != TextureDimension::D2) { return "it is not 2D"; }
+    Optional<TextureFormat> f = t.format();
+    return match (f) {
+        case Some(value: got): got == TextureFormat::RGBA8Unorm ? "" : "its format is " + got.name();
+        case None: "its format is none webgpu.h names";
+    };
+}
+
 fn float32 notANumber() {
     float32 zero = 0.0;
     return zero / zero;
+}
+
+// One texture made from `descriptor` on `d`, held in `held`, and its attributes held to what was described.
+unsafe fn void madeAsDescribed(ref Device d, TextureDescriptor descriptor, string label, uint32 width, uint32 height, uint32 layers,
+                         TextureDimension dimension, uint32 mips, uint32 samples, TextureFormat format, TextureUsage usage,
+                         ref DynamicArray<Texture> held, ref Verdicts found) {
+    descriptor.label(text: copy label);
+    Texture t = d.createTexture(descriptor: give descriptor);
+    string why = "";
+    uint32 w = t.width();
+    uint32 h = t.height();
+    uint32 l = t.depthOrArrayLayers();
+    uint32 m = t.mipLevelCount();
+    uint32 s = t.sampleCount();
+    if (w != width || h != height || l != layers) { why = "its size reads ${w}x${h}x${l}, not ${width}x${height}x${layers}"; }
+    else if (t.dimension() != dimension) { why = "its dimension is not the one described"; }
+    else if (m != mips) { why = "it has ${m} mip levels, not ${mips}"; }
+    else if (s != samples) { why = "it has ${s} samples, not ${samples}"; }
+    else if (t.usage() != usage) { why = "its usage is not the one described"; }
+    else {
+        Optional<TextureFormat> f = t.format();
+        why = match (f) {
+            case Some(value: got): got == format ? "" : "its format is " + got.name() + ", not " + format.name();
+            case None: "its format is none webgpu.h names";
+        };
+    }
+    string name = format.name();
+    found.add(name: "a texture's description reaches the backend: its attributes read back as described ('" + label + "', " + name + " ${width}x${height}x${layers})", why: give why);
+    held.add(item: give t);
 }
 
 type resource BindingRun {
@@ -53,6 +94,7 @@ type resource BindingRun {
     bool givenBC = false;   // the device was given TextureCompressionBC, which its adapter offered
     Optional<BindGroupLayout> refusedLayout = Optional::None;   // a layout refused for its storage format
     Optional<Texture> refusedTexture = Optional::None;   // a texture refused for its format, for a view
+    DynamicArray<Texture> heldTextures = DynamicArray.empty();   // the textures WebGPU takes, until the channel is seen empty
 
     public ctor make(bool adapterOptional) {
         this.optional = adapterOptional;
@@ -122,7 +164,8 @@ type resource BindingRun {
         else if (this.stage == 250) { this.givenFormat(); }
         else if (this.stage == 251) { this.awaitNone(name: "a BC texture is taken on a device given TextureCompressionBC", next: 260); }
         else if (this.stage == 260) { this.gatedTexture(format: TextureFormat::ETC2RGB8Unorm, usage: TextureUsage::TextureBinding, next: 261); }
-        else if (this.stage == 261) { this.awaitOne(name: "an ETC2 texture on a device without TextureCompressionETC2 is a validation error in the package's words, not the end of the program", label: "ETC2RGB8Unorm", says: "TextureCompressionETC2", next: 262); }
+        else if (this.stage == 261) { this.awaitOne(name: "an ETC2 texture on a device without TextureCompressionETC2 is a validation error in the package's words, not the end of the program", label: "ETC2RGB8Unorm", says: "TextureCompressionETC2", next: 265); }
+        else if (this.stage == 265) { this.refusedOwnFormat(); }
         else if (this.stage == 262) { this.viewOfRefused(); }
         else if (this.stage == 263) { this.awaitOne(name: "the texture a refusal hands back is invalid: a view of it is a validation error", label: "", says: "", next: 270); }
         else if (this.stage == 270) { this.gatedTexture(format: TextureFormat::ASTC4x4Unorm, usage: TextureUsage::TextureBinding, next: 271); }
@@ -134,7 +177,25 @@ type resource BindingRun {
         else if (this.stage == 300) { this.gatedStorage(); }
         else if (this.stage == 301) { this.awaitOne(name: "a storage texture layout in a format whose feature the device lacks is a validation error in the package's words, not the end of the program", label: "sixteen-bit storage", says: "TextureFormatsTier1", next: 302); }
         else if (this.stage == 302) { this.ofRefusedLayout(); }
-        else if (this.stage == 303) { this.awaitOne(name: "the layout a refusal hands back is invalid: a pipeline layout of it is a validation error naming its label", label: "of a refused layout", says: "", next: 240); }
+        else if (this.stage == 303) { this.awaitOne(name: "the layout a refusal hands back is invalid: a pipeline layout of it is a validation error naming its label", label: "of a refused layout", says: "", next: 310); }
+        // textures by description (decision 5), before the queue is dropped at 241
+        else if (this.stage == 310) { this.goodTextures(); }
+        else if (this.stage == 311) { this.awaitNone(name: "textures WebGPU takes are made from their descriptions with no error: 2D, mipped, multisampled, 3D, 1D, layered, depth, and with an sRGB view format", next: 320); }
+        else if (this.stage == 320) { this.badTexture(kind: 1, label: "empty"); }
+        else if (this.stage == 321) { this.awaitOne(name: "a texture 0 wide is a validation error naming its label", label: "empty", says: "", next: 330); }
+        else if (this.stage == 330) { this.badTexture(kind: 2, label: "too many mips"); }
+        else if (this.stage == 331) { this.awaitOne(name: "a texture with more mip levels than its size has is a validation error naming its label", label: "too many mips", says: "", next: 340); }
+        else if (this.stage == 340) { this.badTexture(kind: 3, label: "multisampled mips"); }
+        else if (this.stage == 341) { this.awaitOne(name: "a multisampled texture with mip levels is a validation error naming its label", label: "multisampled mips", says: "", next: 350); }
+        else if (this.stage == 350) { this.badTexture(kind: 4, label: "depth volume"); }
+        else if (this.stage == 351) { this.awaitOne(name: "a 3D depth texture is a validation error naming its label", label: "depth volume", says: "", next: 360); }
+        else if (this.stage == 360) { this.badTexture(kind: 5, label: "incompatible view"); }
+        else if (this.stage == 361) { this.awaitOne(name: "a view format that is not the texture's sRGB or linear twin is a validation error naming its label", label: "incompatible view", says: "", next: 370); }
+        else if (this.stage == 370) { this.badTexture(kind: 6, label: "gated view"); }
+        else if (this.stage == 371) { this.awaitOne(name: "a view format whose feature the device lacks is a validation error in the package's words, not the end of the program", label: "gated view", says: "a view format of the texture 'gated view' uses the texture format ETC2RGB8Unorm", next: 372); }
+        else if (this.stage == 372) { this.refusedAttributes(); }
+        else if (this.stage == 380) { this.bcVolume(); }
+        else if (this.stage == 381) { this.awaitOne(name: "a 3D BC texture on a device without TextureCompressionBCSliced3D is a validation error naming its label", label: "bc volume", says: "", next: 240); }
         return this.stage >= 999;
     }
 
@@ -320,7 +381,7 @@ type resource BindingRun {
                 tl.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Texture(layout: TextureBindingLayout.make()));
                 tl.label(text: "a texture");
                 BindGroupLayout textureLayout = d.createBindGroupLayout(descriptor: give tl);
-                Texture image = d.createTexture(width: 4, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding);
+                Texture image = d.createTexture(descriptor: TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding));
                 BindGroupDescriptor textured = BindGroupDescriptor.make(layout: give textureLayout);
                 textured.entry(binding: 0, resource: BindingResource::Texture(view: image.createView()));
                 textured.label(text: "textured");
@@ -438,7 +499,7 @@ type resource BindingRun {
             return;
         }
         match (this.device) {
-            case Some(value: d): { Texture image = d.createTexture(width: 4, height: 4, format: TextureFormat::BC1RGBAUnorm, usage: TextureUsage::TextureBinding); }
+            case Some(value: d): { Texture image = d.createTexture(descriptor: TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::BC1RGBAUnorm, usage: TextureUsage::TextureBinding)); }
             case None: { }
         };
         this.flush();
@@ -449,7 +510,7 @@ type resource BindingRun {
     unsafe fn void gatedTexture(TextureFormat format, TextureUsage usage, int32 next) {
         Optional<Texture> made = Optional::None;
         match (this.device) {
-            case Some(value: d): { made = Optional::Some(value: d.createTexture(width: 4, height: 4, format: format, usage: usage)); }
+            case Some(value: d): { made = Optional::Some(value: d.createTexture(descriptor: TextureDescriptor.make(width: 4, height: 4, format: format, usage: usage))); }
             case None: { }
         };
         this.refusedTexture = give made;
@@ -466,6 +527,122 @@ type resource BindingRun {
         };
         this.flush();
         this.next(to: 263);
+    }
+
+    // Textures WebGPU takes, each read back through WebGPU's `GPUTexture` attributes as it was described; held until
+    // the channel is seen empty.
+    unsafe fn void goodTextures() {
+        match (this.device) {
+            case Some(value: d): {
+                TextureDescriptor plain = TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding);
+                madeAsDescribed(d: d, descriptor: give plain, label: "plain", width: 4, height: 4, layers: 1, dimension: TextureDimension::D2, mips: 1, samples: 1,
+                          format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding, held: ref this.heldTextures, found: ref this.found);
+                TextureDescriptor mipped = TextureDescriptor.make(width: 8, height: 8, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding | TextureUsage::CopyDst);
+                mipped.mipLevelCount(count: 4);
+                madeAsDescribed(d: d, descriptor: give mipped, label: "mipped", width: 8, height: 8, layers: 1, dimension: TextureDimension::D2, mips: 4, samples: 1,
+                          format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding | TextureUsage::CopyDst, held: ref this.heldTextures, found: ref this.found);
+                TextureDescriptor multisampled = TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::BGRA8Unorm, usage: TextureUsage::RenderAttachment);
+                multisampled.sampleCount(count: 4);
+                madeAsDescribed(d: d, descriptor: give multisampled, label: "multisampled", width: 4, height: 4, layers: 1, dimension: TextureDimension::D2, mips: 1, samples: 4,
+                          format: TextureFormat::BGRA8Unorm, usage: TextureUsage::RenderAttachment, held: ref this.heldTextures, found: ref this.found);
+                TextureDescriptor volume = TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding);
+                volume.dimension(kind: TextureDimension::D3);
+                volume.depthOrArrayLayers(count: 3);
+                madeAsDescribed(d: d, descriptor: give volume, label: "volume", width: 4, height: 4, layers: 3, dimension: TextureDimension::D3, mips: 1, samples: 1,
+                          format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding, held: ref this.heldTextures, found: ref this.found);
+                TextureDescriptor line = TextureDescriptor.make(width: 16, height: 1, format: TextureFormat::R8Unorm, usage: TextureUsage::TextureBinding | TextureUsage::CopySrc);
+                line.dimension(kind: TextureDimension::D1);
+                madeAsDescribed(d: d, descriptor: give line, label: "line", width: 16, height: 1, layers: 1, dimension: TextureDimension::D1, mips: 1, samples: 1,
+                          format: TextureFormat::R8Unorm, usage: TextureUsage::TextureBinding | TextureUsage::CopySrc, held: ref this.heldTextures, found: ref this.found);
+                TextureDescriptor layered = TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::RGBA16Float, usage: TextureUsage::TextureBinding);
+                layered.depthOrArrayLayers(count: 6);
+                madeAsDescribed(d: d, descriptor: give layered, label: "layered", width: 4, height: 4, layers: 6, dimension: TextureDimension::D2, mips: 1, samples: 1,
+                          format: TextureFormat::RGBA16Float, usage: TextureUsage::TextureBinding, held: ref this.heldTextures, found: ref this.found);
+                TextureDescriptor depth = TextureDescriptor.make(width: 8, height: 8, format: TextureFormat::Depth24Plus, usage: TextureUsage::RenderAttachment | TextureUsage::TextureBinding);
+                depth.mipLevelCount(count: 2);
+                madeAsDescribed(d: d, descriptor: give depth, label: "depth", width: 8, height: 8, layers: 1, dimension: TextureDimension::D2, mips: 2, samples: 1,
+                          format: TextureFormat::Depth24Plus, usage: TextureUsage::RenderAttachment | TextureUsage::TextureBinding, held: ref this.heldTextures, found: ref this.found);
+                TextureDescriptor twin = TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding);
+                twin.viewFormat(format: TextureFormat::RGBA8UnormSrgb);
+                madeAsDescribed(d: d, descriptor: give twin, label: "srgb views", width: 4, height: 4, layers: 1, dimension: TextureDimension::D2, mips: 1, samples: 1,
+                          format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding, held: ref this.heldTextures, found: ref this.found);
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 311);
+    }
+
+    // A texture WebGPU refuses, made from a description wrong in one way (`kind`), named `label`, and kept.
+    unsafe fn void badTexture(int32 kind, string label) {
+        this.heldTextures = DynamicArray.empty();
+        TextureDescriptor t = TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding);
+        if (kind == 1) { t = TextureDescriptor.make(width: 0, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding); }
+        else if (kind == 2) { t.mipLevelCount(count: 4); }
+        else if (kind == 3) {
+            t = TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::RenderAttachment);
+            t.sampleCount(count: 4);
+            t.mipLevelCount(count: 2);
+        }
+        else if (kind == 4) {
+            t = TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::Depth24Plus, usage: TextureUsage::TextureBinding);
+            t.dimension(kind: TextureDimension::D3);
+        }
+        else if (kind == 5) { t.viewFormat(format: TextureFormat::R8Unorm); }
+        else if (kind == 6) {
+            t.viewFormat(format: TextureFormat::RGBA8UnormSrgb);   // a twin first, so every view format is looked at
+            t.viewFormat(format: TextureFormat::ETC2RGB8Unorm);
+        }
+        t.label(text: give label);
+        Optional<Texture> made = Optional::None;
+        match (this.device) {
+            case Some(value: d): { made = Optional::Some(value: d.createTexture(descriptor: give t)); }
+            case None: { TextureDescriptor unused = give t; }
+        };
+        this.refusedTexture = give made;
+        this.flush();
+        this.next(to: this.stage + 1);
+    }
+
+    // The texture refused for its own format (ETC2) answers its substitute's attributes, not its description's; it is
+    // kept for the view made of it next.
+    unsafe fn void refusedOwnFormat() {
+        string why = match (this.refusedTexture) {
+            case Some(value: t): attributesOfSubstitute(t: t);
+            case None: "no texture was handed back";
+        };
+        this.found.add(name: "a texture refused for its own format answers its substitute's attributes: 0 wide, 2D, in RGBA8Unorm, not ETC2", why: give why);
+        this.next(to: 262);
+    }
+
+    // The texture a view-format refusal handed back answers its substitute's attributes: 0 wide, in RGBA8Unorm.
+    unsafe fn void refusedAttributes() {
+        string why = match (this.refusedTexture) {
+            case Some(value: t): attributesOfSubstitute(t: t);
+            case None: "no texture was handed back";
+        };
+        this.found.add(name: "a refused texture answers its substitute's attributes: 0 wide, 2D, in RGBA8Unorm", why: give why);
+        this.refusedTexture = Optional::None;
+        this.next(to: 380);
+    }
+
+    // A 3D BC texture on a device given TextureCompressionBC alone: WebGPU's validation error. Skipped, and said so,
+    // where the adapter has no BC.
+    unsafe fn void bcVolume() {
+        if (!this.givenBC) {
+            println(s: "skip a 3D BC texture: this adapter does not offer TextureCompressionBC");
+            this.next(to: 240);
+            return;
+        }
+        TextureDescriptor t = TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::BC1RGBAUnorm, usage: TextureUsage::TextureBinding);
+        t.dimension(kind: TextureDimension::D3);
+        t.label(text: "bc volume");
+        match (this.device) {
+            case Some(value: d): { Texture made = d.createTexture(descriptor: give t); }
+            case None: { TextureDescriptor unused = give t; }
+        };
+        this.flush();
+        this.next(to: 381);
     }
 
     // A storage texture layout in RGBA16Snorm, whose feature the device was not given; the layout kept for a pipeline layout.

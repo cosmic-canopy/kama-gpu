@@ -24,7 +24,7 @@ import {
     gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::AdapterInfo,
     gpu::Backend, gpu::Limits, gpu::Feature, gpu::FeatureSet, gpu::DeviceOptions,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError,
-    gpu::PowerPreference, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::Texture,
+    gpu::PowerPreference, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::Texture, gpu::TextureDescriptor,
     gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass,
     gpu::CommandBuffer, gpu::Color,
     gpu::DeviceErrors, gpu::GpuErrorReport, gpu::GpuErrorKind, gpu::DeviceLoss, gpu::LossReason,
@@ -1003,8 +1003,8 @@ type resource Check implements App {
 
     // Clear a texture, copy it to a buffer, and ask for the buffer's bytes.
     unsafe fn void render(ref Device device, ref Queue queue) {
-        Texture target = device.createTexture(width: SIDE, height: SIDE, format: TextureFormat::RGBA8Unorm,
-                                              usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc);
+        Texture target = device.createTexture(descriptor: TextureDescriptor.make(width: SIDE, height: SIDE, format: TextureFormat::RGBA8Unorm,
+                                              usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc));
         TextureView view = target.createView();
         uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
         Buffer copy = device.createBuffer(descriptor: BufferDescriptor.make(size: bytes,
@@ -2454,13 +2454,13 @@ fn string namedIn(const ref DeviceErrors errs, const ref string label) {
 
 // A texture with no width: a validation error in other words.
 unsafe fn Texture badTexture(ref Device device) {
-    return device.createTexture(width: 0, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding);
+    return device.createTexture(descriptor: TextureDescriptor.make(width: 0, height: 4, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::TextureBinding));
 }
 
 // An encoder holding a copy out of a texture made without CopySrc: an error its finish reports.
 unsafe fn CommandEncoder badCopy(ref Device device) {
-    Texture source = device.createTexture(width: 4, height: 4, format: TextureFormat::RGBA8Unorm,
-                                          usage: TextureUsage::TextureBinding);
+    Texture source = device.createTexture(descriptor: TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::RGBA8Unorm,
+                                          usage: TextureUsage::TextureBinding));
     Buffer target = device.createBuffer(descriptor: BufferDescriptor.make(size: cast<uint64>(ROW) * 4,
                                                                         usage: BufferUsage::CopyDst));
     CommandEncoder encoder = device.createCommandEncoder();

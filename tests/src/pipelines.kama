@@ -12,7 +12,7 @@ import {
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::DeviceOptions, gpu::GpuError,
     gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::Color,
     gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus,
-    gpu::Texture, gpu::TextureView, gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::CompareFunction,
+    gpu::Texture, gpu::TextureDescriptor, gpu::TextureView, gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::CompareFunction,
     gpu::ShaderModuleDescriptor, gpu::ShaderModule,
     gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
     gpu::BufferBindingType, gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindingResource,
@@ -381,8 +381,8 @@ type resource PipelineRun {
                 match (this.shaders) {
                     case Some(value: m): {
                         RenderPipeline p = copiedPipeline(d: d, descriptor: drawnDescriptor(shaders: m, kind: kind));
-                        Texture target = d.createTexture(width: SIDE, height: SIDE, format: TextureFormat::RGBA8Unorm,
-                                                         usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc);
+                        Texture target = d.createTexture(descriptor: TextureDescriptor.make(width: SIDE, height: SIDE, format: TextureFormat::RGBA8Unorm,
+                                                         usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc));
                         TextureView view = target.createView();
                         uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
                         Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
@@ -590,8 +590,8 @@ type resource PipelineRun {
             case Some(value: d): {
                 match (give held) {
                     case Some(value: p): {
-                        Texture target = d.createTexture(width: SIDE, height: SIDE, format: TextureFormat::RGBA8Unorm,
-                                                         usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc);
+                        Texture target = d.createTexture(descriptor: TextureDescriptor.make(width: SIDE, height: SIDE, format: TextureFormat::RGBA8Unorm,
+                                                         usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc));
                         TextureView view = target.createView();
                         uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
                         Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
@@ -967,7 +967,7 @@ type resource PipelineRun {
     // A BC texture on this device, which was given no feature.
     unsafe fn void compressedTexture() {
         match (this.device) {
-            case Some(value: d): { Texture image = d.createTexture(width: 4, height: 4, format: TextureFormat::BC1RGBAUnorm, usage: TextureUsage::TextureBinding); }
+            case Some(value: d): { Texture image = d.createTexture(descriptor: TextureDescriptor.make(width: 4, height: 4, format: TextureFormat::BC1RGBAUnorm, usage: TextureUsage::TextureBinding)); }
             case None: { }
         };
         this.flush();
