@@ -5,6 +5,12 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Fixed: a lost device's next submit or map ended the process natively** (2026-11-14, kama 0.9.947; AGENTS.gpu.md
+  item 13). wgpu-native panics at a submit to a lost or destroyed device, and a map makes an empty submit first. Now the
+  package asks before each whether the device can still take work: a submit to one that cannot goes nowhere, a map of
+  its buffer fails, and `device.lost()` answers, as in a browser. Found on the fallback adapter, where a read-only depth
+  pass loses wgpu-native v29's D3D12 device unless the depth texture can also be bound.
+
 - **New: the fallback adapter** (2026-11-14, kama 0.9.947; GPU-15, AGENTS.gpu.md item 13).
   `AdapterOptions.forceFallbackAdapter(on:)`, WebGPU's `forceFallbackAdapter`: only a fallback adapter may answer, a
   software one (WARP natively on Windows and in Firefox, SwiftShader in Chromium started with WebGPU's flags), whose

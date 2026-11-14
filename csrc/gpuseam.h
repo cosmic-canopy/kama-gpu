@@ -141,9 +141,13 @@ gpuseam_state *gpuseam_state_unwatched(void);
 // Another holder, or one fewer: the block is freed with its last. Both take NULL.
 void gpuseam_state_hold(gpuseam_state *state);
 void gpuseam_state_release(gpuseam_state *state);
-// Natively, the device's queue, held by its state, which a map flushes first (WebGPU has a map see every earlier
-// write; wgpu-native keeps them until the next submit). Kept once; nothing on the web.
-void gpuseam_state_keep_queue(gpuseam_state *state, WGPUQueue queue);
+// Natively, the device and its queue, held by its state: a map flushes the queue first (WebGPU has a map see every
+// earlier write; wgpu-native keeps them until the next submit), and every submit asks the device whether it can still
+// take work. Kept once; nothing on the web.
+void gpuseam_state_keep(gpuseam_state *state, WGPUDevice device, WGPUQueue queue);
+// A command buffer submitted, natively only once the device is known to take work: a submit to a lost or destroyed
+// device goes nowhere, as in a browser, where wgpu-native would end the process, and the loss is recorded.
+void gpuseam_queue_submit(WGPUQueue queue, gpuseam_state *state, WGPUCommandBuffer commands);
 
 // What a backend would end the program on, refused by the package and reported as a validation error where WebGPU
 // reports one, in `message`'s words (UTF-8, `length` bytes): it rides a call `device` refuses (AGENTS.gpu.md item 12,

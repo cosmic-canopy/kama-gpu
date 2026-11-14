@@ -121,8 +121,12 @@ device, made with its request and handed to both of its callbacks.
   words the device already reported is dropped by the browser and never reaches the channel (measured 2026-11-12), so
   an error made every frame is seen once there. A scope still catches each.
 - **`device.lost() -> Optional<DeviceLoss>`,** with its `reason()` (a `LossReason`: `Unknown` or `Destroyed`) and its
-  `message()`. A device whose instance went first is not lost. Natively wgpu-native reports no loss at all, of a
-  destroy or a release, so `lost()` answers None there.
+  `message()`. A device whose instance went first is not lost. Natively wgpu-native reports no loss of a destroy or a
+  release, and a real loss only at a later call; so the package also asks, before every submit and every map, whether
+  the device can still take work, and records the loss the first time it cannot, in wgpu-native's words.
+- **A device that can no longer take work never ends the program.** Natively a submit to it, or a map of one of its
+  buffers, would end the process inside wgpu-native, so the package skips the submit, as a browser drops one, and fails
+  the map at once; `lost()` then answers. On the web the browser does the same.
 - **Every handle made from a device holds its state block:** a queue, a buffer, a texture, a view, an encoder, a pass,
   a command buffer and a surface's frame. wgpu-native reports a handle's error to its device's callback after the
   device's last release, so the block lives until the last of them is dropped, and its errors land in a block nobody
@@ -157,9 +161,11 @@ wgpu-native that changes it fails the gate by name:
 - a WGSL error is reported inside `wgpuDeviceCreateShaderModule`, as a validation error whose words place it as
   `wgsl:<line>:<column>`, the column in characters, mark its span with a caret a character, and name the module's label
   in a `Shader` line;
-- six calls end the process, each matched by its panic's words: an error on a device with no uncaptured callback,
+- an empty command encoder's finish reports nothing on a working device, and on a destroyed one reports the loss inside
+  the call, in "Parent device is lost";
+- seven calls end the process, each matched by its panic's words: an error on a device with no uncaptured callback,
   an `Internal` error scope pushed, an error scope popped with none pushed, `wgpuInstanceWaitAny`, a command buffer
-  whose `finish` failed submitted, and `wgpuShaderModuleGetCompilationInfo`.
+  whose `finish` failed submitted, an empty submit to a destroyed device, and `wgpuShaderModuleGetCompilationInfo`.
 
 Measured, each held by the tests per leg:
 - wgpu-native answers a device request at once; a browser a tick or two later;
@@ -496,7 +502,8 @@ Dawn's is. Firefox reports places in UTF-16 units as Dawn does, the first error 
   to the device's channel or the innermost scope that catches it (natively inside the call, measured).
 - **`queue.submit(commands:)`,** which consumes the command buffer. Natively a command buffer whose `finish` reported
   an error is not submitted, since wgpu-native ends the process on that submit: its error is in the channel or a scope
-  already, and a browser refuses the same submit after reporting it.
+  already, and a browser refuses the same submit after reporting it. Nor is one submitted to a device that can no
+  longer take work, which a browser drops.
 - **`queue.writeBuffer(buffer:, offset:, data:)`,** `data` a `ConstView<uint8>`, which kama's byte views give only over a
   type proved free of padding and pointers (`value.bytes()`, `list.view()`).
   - The write lands before any later submit's work, and any later map sees it, on both legs. Natively the device's

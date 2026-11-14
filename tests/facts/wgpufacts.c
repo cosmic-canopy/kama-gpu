@@ -384,6 +384,41 @@ static void abort_submit_failed(void) {
     did_not_abort("submitting a command buffer whose finish failed aborts");
 }
 
+// What the seam asks before every submit (AGENTS.gpu.md item 13, takes_work): an empty encoder's finish reports nothing on
+// a working device, and on a lost one reports the loss inside the call, in "Parent device is lost". A destroy stands in
+// for a loss, as a read-only depth pass on D3D12 loses a device the same way (kyoten's .scratch/warp-lost/).
+static void lost_finish(void) {
+    WGPUDevice d = device_for(&g_a, 1);
+    g_in_call = 1;
+    WGPUCommandEncoder e = wgpuDeviceCreateCommandEncoder(d, NULL);
+    WGPUCommandBuffer cb = wgpuCommandEncoderFinish(e, NULL);
+    g_in_call = 0;
+    fact(g_a.count == 0, "an empty encoder's finish reports nothing on a working device", "it reported an error");
+    wgpuCommandBufferRelease(cb);
+    wgpuCommandEncoderRelease(e);
+    wgpuDeviceDestroy(d);
+    g_in_call = 1;
+    e = wgpuDeviceCreateCommandEncoder(d, NULL);
+    cb = wgpuCommandEncoderFinish(e, NULL);
+    g_in_call = 0;
+    fact(g_a.count >= 1 && g_a.in_call == g_a.count, "on a destroyed device it reports the loss inside the call",
+         "not reported there");
+    fact(strstr(g_words, "Parent device is lost") != NULL, "in wgpu-native's words, \"Parent device is lost\"", g_words);
+    wgpuCommandBufferRelease(cb);
+    wgpuCommandEncoderRelease(e);
+    wgpuDeviceRelease(d);
+}
+
+// Why the seam asks: a submit to a device that can no longer take work ends the process, an empty one (a map's flush)
+// included, where a browser drops it.
+static void abort_lost_submit(void) {
+    WGPUDevice d = device_for(&g_a, 1);
+    WGPUQueue q = wgpuDeviceGetQueue(d);
+    wgpuDeviceDestroy(d);
+    wgpuQueueSubmit(q, 0, NULL);
+    did_not_abort("an empty submit to a destroyed device aborts");
+}
+
 static void on_compilation_info(WGPUCompilationInfoRequestStatus s, WGPUCompilationInfo const *info, void *u1, void *u2) {
     (void)s; (void)info; (void)u1; (void)u2;
 }
@@ -457,6 +492,8 @@ static const entry CASES[] = {
     { "abort-emptypop", abort_empty_pop },
     { "abort-waitany", abort_wait_any },
     { "abort-submit", abort_submit_failed },
+    { "lostfinish", lost_finish },
+    { "abort-lostsubmit", abort_lost_submit },
     { "abort-compilationinfo", abort_compilation_info },
     { "abort-pipelineasync", abort_render_pipeline_async },
 };

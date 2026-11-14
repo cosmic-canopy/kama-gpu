@@ -33,7 +33,7 @@ import {
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::WindowOptions, window::Size, window::NativeWindow,
     addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly, readOptions, heapInUse,
-    ShaderRun, Verdicts, BindingRun, PipelineRun, PassRun, FallbackRun,
+    ShaderRun, Verdicts, BindingRun, PipelineRun, PassRun, FallbackRun, LostRun,
 };
 
 comptime uint32 SIDE = 64;
@@ -591,7 +591,7 @@ type resource Check implements App {
     Optional<Queue> queue = Optional::None;
     Optional<Buffer> readback = Optional::None;
     Optional<BufferRead> read = Optional::None;
-    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 the error cases, 5 the shader cases, 6 the binding cases, 7 the pipeline cases, 8 the pass cases, 9 the fallback cases, 10 done
+    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 the error cases, 5 the shader cases, 6 the binding cases, 7 the pipeline cases, 8 the pass cases, 9 the fallback cases, 10 the lost-device cases, 11 done
     Optional<SurfaceRun> surfaces = Optional::None;
     Optional<ErrorRun> errorRun = Optional::None;
     Optional<ShaderRun> shaderRun = Optional::None;
@@ -599,6 +599,7 @@ type resource Check implements App {
     Optional<PipelineRun> pipelineRun = Optional::None;
     Optional<PassRun> passRun = Optional::None;
     Optional<FallbackRun> fallbackRun = Optional::None;
+    Optional<LostRun> lostRun = Optional::None;
     Instant began = monotonicNow();
     int32 runs = 0;
     int32 failures = 0;
@@ -668,7 +669,8 @@ type resource Check implements App {
         if (this.stage == 7) { this.pipelineStep(); }
         if (this.stage == 8) { this.passStep(); }
         if (this.stage == 9) { this.fallbackStep(); }
-        if (this.stage == 10) { return this.finish(); }
+        if (this.stage == 10) { this.lostStep(); }
+        if (this.stage == 11) { return this.finish(); }
         return 1;
     }
 
@@ -775,6 +777,23 @@ type resource Check implements App {
         pending.verdicts().clear();
         this.fallbackRun = Optional::Some(value: give pending);
         if (done) { this.fallbackRun = Optional::None; this.stage = 10; }
+    }
+
+    // A device that can no longer take work never ends the program (tests/src/lost.kama), a step this tick.
+    unsafe fn void lostStep() {
+        Optional<LostRun> taken = replace(place: this.lostRun, with: Optional::None);
+        LostRun pending = match (give taken) { case Some(value: r): give r; case None: LostRun.make(adapterOptional: adapterOptional(), noFallbackAdapter: noFallbackAdapter()); };
+        bool done = pending.step();
+        isize i = 0;
+        while (i < pending.verdicts().count()) {
+            string name = pending.verdicts().nameAt(at: i);
+            string why = pending.verdicts().whyAt(at: i);
+            this.verdict(name: name, why: why);
+            i = i + 1;
+        }
+        pending.verdicts().clear();
+        this.lostRun = Optional::Some(value: give pending);
+        if (done) { this.lostRun = Optional::None; this.stage = 11; }
     }
 
     unsafe fn void awaitAdapter() {

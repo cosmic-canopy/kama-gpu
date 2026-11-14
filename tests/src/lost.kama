@@ -1,0 +1,317 @@
+// A device that can no longer take work never ends the program (AGENTS.gpu.md item 13; item 12's decision 9, nothing a
+// program passes ends it): natively wgpu-native ends the process in a panic at any submit to a lost or destroyed
+// device, a map's own included (kyoten's .scratch/warp-lost/), where a browser treats one as a no-op. A step a tick on
+// every leg:
+// - a device destroyed through its raw handle, as a test stands in for a loss: a map asked of it fails, a command buffer
+//   finished before the loss is not submitted after it, and the device says it is lost;
+// - a real loss: on the fallback adapter, a pass that tests a stored depth through a read-only attachment, then its
+//   copy mapped. wgpu-native v29's D3D12 loses the device there (WARP natively on Windows), and every other leg draws
+//   it; either way the program goes on, and the texel is drawn or the device says it is lost.
+//
+// They report through `Verdicts`, which the check reads each tick, as the pass cases do.
+
+import {
+    core::println,
+    std::collections::DynamicArray, std::memory::replace,
+    gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::PowerPreference,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::DeviceLoss,
+    gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::Color,
+    gpu::RenderPassDescriptor, gpu::ColorAttachment, gpu::LoadOp, gpu::StoreOp, gpu::DepthStencilAttachment,
+    gpu::DepthAccess,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus,
+    gpu::Texture, gpu::TextureDescriptor, gpu::TextureViewDescriptor, gpu::TextureView, gpu::TextureFormat,
+    gpu::TextureUsage, gpu::CompareFunction, gpu::ShaderModuleDescriptor, gpu::ShaderModule,
+    gpu::DepthStencilState, gpu::ColorTargetState, gpu::VertexState, gpu::FragmentState, gpu::Layout,
+    gpu::RenderPipelineDescriptor, gpu::RenderPipeline,
+    Verdicts, readOptions, destroyDevice,
+};
+export { LostRun };
+
+comptime int32 SETTLE = 120;   // the most ticks a request, a map or a loss is waited for
+comptime uint32 SIDE = 4;      // a target is SIDE by SIDE texels
+comptime uint32 ROW = 256;     // a copied row's bytes: WebGPU's alignment
+
+// A triangle over the whole target at a depth of 0.25, in (1, 0.5, 0.25, 1).
+fn string lostWgsl() {
+    return "@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {\n"
+        + "  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));\n"
+        + "  return vec4f(p[i], 0.25, 1.0); }\n"
+        + "@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.25, 1.0); }\n";
+}
+
+fn string lossSaid(const ref Optional<DeviceLoss> loss) {
+    return match (loss) {
+        case Some(value: l): "lost: " + l.message();
+        case None: "not lost";
+    };
+}
+
+type resource LostRun {
+    int32 stage = 0;
+    int32 waited = 0;
+    bool optional;     // `--adapter-optional`: no adapter here at all is a skip
+    bool none;         // `--no-fallback-adapter`: this leg offers no fallback adapter, so the real loss is not tried
+    Verdicts found;
+    Optional<Instance> instance = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+    Optional<Buffer> readback = Optional::None;
+    Optional<BufferRead> reading = Optional::None;
+    Optional<CommandBuffer> early = Optional::None;   // finished before its device was destroyed
+
+    public ctor make(bool adapterOptional, bool noFallbackAdapter) {
+        this.optional = adapterOptional;
+        this.none = noFallbackAdapter;
+        this.found = Verdicts.make();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // One tick's step: true once every case has run.
+    public unsafe fn bool step() {
+        this.waited = this.waited + 1;
+        if (this.stage == 0) { this.open(fallback: false, next: 1); }
+        else if (this.stage == 1) { this.awaitAdapter(next: 2); }
+        else if (this.stage == 2) { this.awaitDevice(next: 3); }
+        else if (this.stage == 3) { this.destroyThenMap(); }
+        else if (this.stage == 4) { this.awaitDestroyedMap(); }
+        else if (this.stage == 5) { this.awaitLoss(); }
+        else if (this.stage == 10) { this.realLoss(); }
+        else if (this.stage == 11) { this.awaitAdapter(next: 12); }
+        else if (this.stage == 12) { this.awaitDevice(next: 13); }
+        else if (this.stage == 13) { this.readOnlyPass(); }
+        else if (this.stage == 14) { this.awaitReadOnlyMap(); }
+        if (this.stage == 999) {
+            this.early = Optional::None;
+            this.reading = Optional::None;
+            this.readback = Optional::None;
+            this.queue = Optional::None;
+            this.device = Optional::None;
+            this.deviceRequest = Optional::None;
+            this.adapterRequest = Optional::None;
+            this.instance = Optional::None;
+            return true;
+        }
+        return false;
+    }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
+
+    // A fresh instance's adapter, the fallback one when `fallback`.
+    unsafe fn void open(bool fallback, int32 next) {
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                AdapterOptions options = AdapterOptions.make(power: PowerPreference::Default);
+                options.forceFallbackAdapter(on: fallback);
+                this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: options));
+                this.instance = Optional::Some(value: give inst);
+                this.next(to: next);
+            }
+            case Err(error: e): { string why = e.message(); this.found.add(name: "an instance for the lost-device cases", why: give why); this.next(to: 999); }
+        };
+    }
+
+    unsafe fn void awaitAdapter(int32 next) {
+        AdapterStatus s = match (this.adapterRequest) { case Some(value: r): r.poll(); case None: AdapterStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending) {
+            if (this.waited < SETTLE) { return; }
+            this.found.add(name: "an adapter for the lost-device cases", why: "still pending after ${SETTLE} ticks");
+            this.next(to: 999);
+            return;
+        }
+        this.adapterRequest = Optional::None;
+        match (give s) {
+            case Ready(adapter: a): {
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: readOptions()));
+                this.next(to: next);
+            }
+            case Failed(error: e): {
+                bool unavailable = match (e) { case NoAdapter(words: w): true; case _: false; };
+                if (unavailable && this.optional) {
+                    println(s: "skip the lost-device cases: there is no WebGPU adapter here (--adapter-optional)");
+                } else {
+                    string why = e.message();
+                    this.found.add(name: "an adapter for the lost-device cases", why: "refused: " + why);
+                }
+                this.next(to: 999);
+            }
+            case Pending: { }
+        };
+    }
+
+    unsafe fn void awaitDevice(int32 next) {
+        DeviceStatus s = match (this.deviceRequest) { case Some(value: r): r.poll(); case None: DeviceStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending) {
+            if (this.waited < SETTLE) { return; }
+            this.found.add(name: "a device for the lost-device cases", why: "still pending after ${SETTLE} ticks");
+            this.next(to: 999);
+            return;
+        }
+        this.deviceRequest = Optional::None;
+        match (give s) {
+            case Ready(device: d, queue: q): {
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+                this.next(to: next);
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a device for the lost-device cases", why: "refused: " + why); this.next(to: 999); }
+            case Pending: { }
+        };
+    }
+
+    // A command buffer finished while the device works, then the device destroyed through its raw handle, then a map.
+    unsafe fn void destroyThenMap() {
+        Optional<Buffer> made = Optional::None;
+        Optional<BufferRead> started = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: 256, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
+                CommandEncoder encoder = d.createCommandEncoder();
+                this.early = Optional::Some(value: give encoder.finish());
+                destroyDevice(device: d.raw());
+                started = Optional::Some(value: b.mapRead(offset: 0, size: 256));
+                made = Optional::Some(value: give b);
+            }
+            case None: { }
+        };
+        this.readback = give made;
+        this.reading = give started;
+        this.next(to: 4);
+    }
+
+    // The map fails, and the program goes on to submit what was finished before the loss, which goes nowhere.
+    unsafe fn void awaitDestroyedMap() {
+        match (this.device) { case Some(value: d): { d.poll(wait: true); } case None: { } };
+        ReadStatus s = match (this.reading) { case Some(value: r): r.poll(); case None: ReadStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.waited < SETTLE) { return; }
+        string why = match (s) {
+            case Pending: "the map never settled";
+            case Ready: "the map answered its bytes";
+            case Failed(error: e): "";
+        };
+        this.reading = Optional::None;
+        this.readback = Optional::None;
+        this.found.add(name: "a map asked of a device that can no longer take work fails, and the program goes on", why: give why);
+        Optional<CommandBuffer> taken = replace(place: this.early, with: Optional::None);
+        match (give taken) {
+            case Some(value: commands): {
+                match (this.queue) {
+                    case Some(value: q): { q.submit(commands: give commands); }
+                    case None: { CommandBuffer unsent = give commands; }
+                };
+            }
+            case None: { }
+        };
+        this.found.add(name: "a command buffer finished before its device was lost, then submitted, does not end the program", why: "");
+        this.next(to: 5);
+    }
+
+    // The device says it is lost: natively once a submit or a map found it could take no work, on the web once the
+    // browser says so, a tick or more after the destroy.
+    unsafe fn void awaitLoss() {
+        bool lost = match (this.device) { case Some(value: d): d.lost().isSome(); case None: false; };
+        if (!lost && this.waited < SETTLE) { return; }
+        this.found.add(name: "a device that can no longer take work says it is lost", why: lost ? "" : "it never said so in ${SETTLE} ticks");
+        this.queue = Optional::None;
+        this.device = Optional::None;
+        this.instance = Optional::None;
+        if (this.none) {
+            println(s: "skip the read-only depth on the fallback adapter: this leg offers none (--no-fallback-adapter)");
+            this.next(to: 999);
+            return;
+        }
+        this.next(to: 10);
+    }
+
+    unsafe fn void realLoss() { this.open(fallback: true, next: 11); }
+
+    // Depth cleared to 0.5 and stored; then a triangle at 0.25 through a less test and a read-only depth attachment; its
+    // colour copied out and mapped. The command buffer whose finish failed is never submitted (item 2's decision 3); the
+    // map is what reached wgpu-native's panic.
+    unsafe fn void readOnlyPass() {
+        Optional<Buffer> made = Optional::None;
+        Optional<BufferRead> started = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                ShaderModuleDescriptor md = ShaderModuleDescriptor.make(wgsl: lostWgsl());
+                md.label(text: "read-only depth");
+                ShaderModule m = d.createShaderModule(descriptor: give md);
+                RenderPipelineDescriptor p = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: VertexState.make(module: copy m, entryPoint: "vs"));
+                FragmentState f = FragmentState.make(module: copy m, entryPoint: "fs");
+                f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+                p.fragment(state: give f);
+                p.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: false, depthCompare: CompareFunction::Less));
+                RenderPipeline tested = d.createRenderPipeline(descriptor: give p);
+                Texture color = lostTexture(d: d, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc);
+                Texture depth = lostTexture(d: d, format: TextureFormat::Depth32Float, usage: TextureUsage::RenderAttachment);
+                uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
+                Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
+                CommandEncoder encoder = d.createCommandEncoder();
+                RenderPassDescriptor clearing = RenderPassDescriptor.make();
+                clearing.depthStencil(attachment: DepthStencilAttachment.clearingDepth(view: lostView(t: depth), value: 0.5));
+                RenderPass first = encoder.beginRenderPass(descriptor: give clearing);
+                give first.end();
+                DepthStencilAttachment readOnly = DepthStencilAttachment.make(view: lostView(t: depth));
+                readOnly.depth(access: DepthAccess::ReadOnly);
+                RenderPassDescriptor testing = RenderPassDescriptor.make();
+                testing.color(attachment: ColorAttachment.clearing(view: lostView(t: color), color: Color.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0)));
+                testing.depthStencil(attachment: give readOnly);
+                RenderPass second = encoder.beginRenderPass(descriptor: give testing);
+                second.setPipeline(pipeline: tested);
+                second.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+                give second.end();
+                encoder.copyTextureToBuffer(texture: color, buffer: b, width: SIDE, height: SIDE, bytesPerRow: ROW);
+                CommandBuffer commands = give encoder.finish();
+                match (this.queue) {
+                    case Some(value: q): { q.submit(commands: give commands); }
+                    case None: { CommandBuffer unsent = give commands; }
+                };
+                started = Optional::Some(value: b.mapRead(offset: 0, size: bytes));
+                made = Optional::Some(value: give b);
+            }
+            case None: { }
+        };
+        this.readback = give made;
+        this.reading = give started;
+        this.next(to: 14);
+    }
+
+    // The texel drawn, or the device lost; either way the program is here to say so.
+    unsafe fn void awaitReadOnlyMap() {
+        match (this.device) { case Some(value: d): { d.poll(wait: true); } case None: { } };
+        ReadStatus s = match (this.reading) { case Some(value: r): r.poll(); case None: ReadStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.waited < SETTLE) { return; }
+        Optional<DeviceLoss> loss = match (this.device) { case Some(value: d): d.lost(); case None: Optional::None; };
+        string why = "";
+        match (s) {
+            case Pending: { why = "the map never settled"; }
+            case Ready: {
+                DynamicArray<uint8> all = match (this.reading) { case Some(value: r): r.bytes(); case None: DynamicArray.empty(); };
+                bool drawn = all.length() >= 4 && all[0] == 255 && all[1] == 128 && all[2] == 64 && all[3] == 255;
+                if (drawn) { println(s: "info read-only depth on the fallback adapter: drawn"); }
+                else { why = "the map answered, but not the texel drawn"; }
+            }
+            case Failed(error: e): {
+                if (loss.isSome()) { println(s: "info read-only depth on the fallback adapter: the device was lost, " + lossSaid(loss: loss)); }
+                else { string said = e.message(); why = "the map failed, and the device does not say it is lost: " + said; }
+            }
+        };
+        this.reading = Optional::None;
+        this.readback = Optional::None;
+        this.found.add(name: "a read-only depth pass on the fallback adapter, then a map, never end the program: the texel drawn, or the device lost", why: give why);
+        this.next(to: 999);
+    }
+}
+
+unsafe fn Texture lostTexture(ref Device d, TextureFormat format, TextureUsage usage) {
+    return d.createTexture(descriptor: TextureDescriptor.make(width: SIDE, height: SIDE, format: format, usage: usage));
+}
+
+unsafe fn TextureView lostView(ref Texture t) { return t.createView(descriptor: TextureViewDescriptor.make()); }

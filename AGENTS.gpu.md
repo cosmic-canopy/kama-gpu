@@ -1505,6 +1505,35 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       stored by an earlier pass through a read-only depth attachment loses the device ("Parent device is lost"), and
       the next `queue.submit` ends the process in wgpu-native's panic. A lost device's submit is not skipped as a failed
       `finish`'s is (item 2, decision 3), so this is investigated and fixed in a commit of its own.
+    - **Fixed on 2026-11-14: a device that can no longer take work never ends the program,** by item 12's decision 9
+      and item 2's decision 3, which a browser's own rule settles: a submit to a lost device goes nowhere. Measured first
+      (kyoten's `.scratch/warp-lost/`, a C probe on wgpu-native v29.0.1.1):
+      - on D3D12, a pass with a read-only depth attachment loses the device, on WARP and on the AMD GPU alike, when the
+        depth texture's usage is RenderAttachment alone; with TextureBinding as well it draws, and on Vulkan, in Dawn and
+        in Firefox it draws. It shows as a validation error at the encoder's finish, "In a pass parameter: Parent device
+        is lost"; the lost callback fires at the next call, every later call reports "Parent device is lost", and the next
+        submit panics. A draft report for gfx-rs/wgpu is `.scratch/warp-lost/wgpu-issue.md`, for the owner to post;
+      - the package skipped the failed finish's submit, but a map's own empty submit (`gpuseam_map_async`, which flushes
+        the queue's writes) reached the panic, as would a program's submit of a buffer finished before the loss;
+      - after a destroy wgpu-native calls no lost callback at all (item 2), so the package cannot wait to be told.
+
+      **What the package does natively:** before every submit, the program's and a map's own, the seam finishes an empty
+      encoder quietly (`takes_work`). On a working device that never fails, and on a lost or destroyed one it reports the
+      loss inside the call (the facts' `lostfinish`; `abort-lostsubmit` pins the panic it avoids). The first time it
+      fails, the loss is recorded in wgpu-native's words, so `device.lost()` answers; the submit is skipped and the map
+      fails at once. The state block keeps a reference on its device for it. A loss is recorded once, by the lost
+      callback or the check, whichever sees it first. An adopted device is not asked, as its maker vouches for it.
+    - **The cases** (`tests/src/lost.kama`, every leg): a device destroyed through its raw handle stands in for a loss,
+      then a map of its buffer fails, a command buffer finished before the loss and submitted after it does not end the
+      program, and the device says it is lost (natively at once, in a browser a tick or more later); and on the fallback
+      adapter a read-only depth pass and a map never end the program, the texel drawn or the device lost (natively here
+      the device is lost; in Firefox, Chrome for Testing and Edge the texel is drawn). Red first natively: the destroyed
+      device's map ended the process (exit 127). 309 cases natively, 286 in Firefox and Chrome for Testing, 283 in Edge.
+    - **Mutations: 7 of 8 caught,** six natively and one in Chrome for Testing: the check always saying the device takes
+      work, a map's empty submit or a program's submit made without asking, the check's error not kept before the quiet
+      return, the state keeping no device (each ends the process again), and a loss never published (natively and on
+      the web: the device never says it is lost). The eighth, a known loss not answered at once, is equivalent: the check
+      finds the loss again at the next submit, at the cost of one more empty encoder.
 
 ## Where the truth is
 

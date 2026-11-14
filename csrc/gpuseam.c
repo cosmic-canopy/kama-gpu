@@ -69,6 +69,7 @@ struct gpuseam_state {
     int32_t lost_length;
     gpuseam_scope *top;                 // its error scopes, the innermost first, of every thread (each holds the block)
     WGPUQueue queue;                    // natively, a reference on the device's queue, which a map flushes first
+    WGPUDevice device;                  // natively, a reference on the device, which every submit asks first
     int32_t print;                      // DeviceOptions.printErrors: each report the channel takes is printed to stderr
     int32_t compile_in_channel;         // natively, the jobs sent into its compile pool's channel and not yet taken
     struct gpuseam_pipeline_job *compile_overflow;        // and those waiting beside it, the oldest first
@@ -233,6 +234,7 @@ void gpuseam_state_release(gpuseam_state *s) {
     for (int32_t i = 0; i < s->count; i++) free(s->ring[(s->head + i) % GPUSEAM_RING].message);
     free(s->lost_message);
     if (s->queue != NULL) wgpuQueueRelease(s->queue);
+    if (s->device != NULL) wgpuDeviceRelease(s->device);
     free(s);
     atomic_fetch_sub_explicit(&g_states_alive, 1, memory_order_relaxed);
 }
@@ -255,16 +257,22 @@ static _Thread_local int32_t t_quiet;
 // goes where every error goes (gpuseam_create_shader_module).
 static _Thread_local gpuseam_report *t_observed;
 
+// Natively, the device state this thread is asking whether it can take work (takes_work), and the first error that
+// asking raised: the asking is quiet, so its error reaches neither a scope nor the channel.
+static _Thread_local gpuseam_state *t_probing;
+static _Thread_local gpuseam_report t_probe_said;
+
 // Natively an error goes to the innermost scope on its thread whose filter matches it: every error measured reaches the
 // callback inside the call that caused it, on the calling thread (tests/facts, `inthecall`). A scope keeps the first
 // and swallows the rest, as WebGPU's does. Past every scope, an error goes to the channel. On the web the browser's
 // scopes have taken what they catch before this callback runs.
 static void on_uncaptured_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringView message, void *u1, void *u2) {
     (void)device; (void)u2;
+    gpuseam_state *s = (gpuseam_state *)u1;
 #ifndef __EMSCRIPTEN__
+    if (t_probing == s && t_probe_said.message == NULL) t_probe_said = report_of(kind_of(type), message);
     if (t_quiet > 0) return;   // a substitute call's own error, under gpuseam_quiet_begin
 #endif
-    gpuseam_state *s = (gpuseam_state *)u1;
     if (t_finishing == s) t_finish_failed = 1;
     if (t_observed != NULL && t_observed->message == NULL) *t_observed = report_of(kind_of(type), message);
     gpuseam_report r = report_of(kind_of(type), message);
@@ -288,16 +296,27 @@ static void on_uncaptured_error(WGPUDevice const *device, WGPUErrorType type, WG
     print_line(line);
 }
 
+// A device's loss, recorded once, by whichever sees it first: the lost callback, or natively a submit that found the device
+// could take no work (takes_work). The slot is claimed (-1) before its words are written and published with the reason,
+// so the two never both write it, and a reader sees the reason only once the words are in place. The report is moved.
+static void record_loss(gpuseam_state *s, int32_t why, gpuseam_report r) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(&s->lost, &expected, -1, memory_order_acq_rel, memory_order_acquire)) {
+        s->lost_message = r.message;
+        s->lost_length = r.length;
+        atomic_store_explicit(&s->lost, why, memory_order_release);
+    } else {
+        free(r.message);
+    }
+}
+
 static void on_device_lost(WGPUDevice const *device, WGPUDeviceLostReason reason, WGPUStringView message, void *u1, void *u2) {
     (void)device; (void)u2;
     gpuseam_state *s = (gpuseam_state *)u1;
     // its instance gone first is not a loss anyone must handle
-    if (reason != WGPUDeviceLostReason_CallbackCancelled && atomic_load_explicit(&s->lost, memory_order_acquire) == 0) {
-        gpuseam_report r = report_of(GPUSEAM_KIND_UNKNOWN, message);
-        s->lost_message = r.message;
-        s->lost_length = r.length;
+    if (reason != WGPUDeviceLostReason_CallbackCancelled) {
         int32_t why = reason == WGPUDeviceLostReason_Destroyed ? GPUSEAM_LOSS_DESTROYED : GPUSEAM_LOSS_UNKNOWN;
-        atomic_store_explicit(&s->lost, why, memory_order_release);
+        record_loss(s, why, report_of(GPUSEAM_KIND_UNKNOWN, message));
     }
 #ifdef __EMSCRIPTEN__
     gpuseam_state_release(s);   // the hold the lost callback kept until it fired
@@ -521,7 +540,8 @@ void gpuseam_scope_drop_popped(gpuseam_scope *sc) {
 }
 
 int32_t gpuseam_state_lost(gpuseam_state *s) {
-    return s == NULL ? 0 : (int32_t)atomic_load_explicit(&s->lost, memory_order_acquire);
+    int32_t why = s == NULL ? 0 : (int32_t)atomic_load_explicit(&s->lost, memory_order_acquire);
+    return why > 0 ? why : 0;   // -1 is record_loss's claim, its words not yet in place
 }
 int32_t gpuseam_state_lost_length(gpuseam_state *s) { return gpuseam_state_lost(s) != 0 ? s->lost_length : 0; }
 const uint8_t *gpuseam_state_lost_message(gpuseam_state *s) {
@@ -765,14 +785,60 @@ void gpuseam_quiet_end(WGPUDevice device) {
 #endif
 }
 
-void gpuseam_state_keep_queue(gpuseam_state *s, WGPUQueue queue) {
+void gpuseam_state_keep(gpuseam_state *s, WGPUDevice device, WGPUQueue queue) {
 #ifndef __EMSCRIPTEN__
-    if (s == NULL || queue == NULL || s->queue != NULL) return;
+    if (s == NULL || device == NULL || queue == NULL || s->queue != NULL) return;
     wgpuQueueAddRef(queue);
     s->queue = queue;
+    wgpuDeviceAddRef(device);
+    s->device = device;
 #else
-    (void)s; (void)queue;
+    (void)s; (void)device; (void)queue;
 #endif
+}
+
+// ---- a device that can no longer take work ---------------------------------------------------------------------------
+
+#ifndef __EMSCRIPTEN__
+// Natively, whether `s`'s device can still take work, asked before every submit. wgpu-native ends the process in a panic
+// at a submit to a lost or destroyed device ("Error in wgpuQueueSubmit … Parent device is lost"), a map's own empty
+// submit included, where a browser treats one as a no-op (kyoten's .scratch/warp-lost/: a read-only depth pass loses a
+// D3D12 device on wgpu-native v29). An empty encoder finished quietly answers: on a working device it never fails, and
+// on a lost or destroyed one it reports the loss inside the call (tests/facts, `lostfinish`). The first time it fails,
+// the loss is recorded in its words, as the lost callback records one, so `device.lost()` answers. An adopted device
+// has no device kept here, and is taken to work, as its maker vouches for it.
+static int32_t takes_work(gpuseam_state *s) {
+    if (s == NULL || s->device == NULL) return 1;
+    if (atomic_load_explicit(&s->lost, memory_order_acquire) != 0) return 0;
+    gpuseam_state *outer = t_probing;
+    gpuseam_report outer_said = t_probe_said;
+    t_probing = s;
+    t_probe_said.message = NULL;
+    t_probe_said.length = 0;
+    t_quiet += 1;
+    WGPUCommandEncoder e = wgpuDeviceCreateCommandEncoder(s->device, NULL);
+    WGPUCommandBuffer c = e != NULL ? wgpuCommandEncoderFinish(e, NULL) : NULL;
+    t_quiet -= 1;
+    gpuseam_report said = t_probe_said;
+    t_probing = outer;
+    t_probe_said = outer_said;
+    if (c != NULL) wgpuCommandBufferRelease(c);
+    if (e != NULL) wgpuCommandEncoderRelease(e);
+    if (said.message == NULL && said.length == 0) return 1;
+    record_loss(s, GPUSEAM_LOSS_UNKNOWN, said);
+    return 0;
+}
+#endif
+
+// A command buffer submitted: natively only to a device that can still take work, so a submit to a lost one goes nowhere,
+// as in a browser, and never ends the process.
+void gpuseam_queue_submit(WGPUQueue queue, gpuseam_state *state, WGPUCommandBuffer commands) {
+#ifndef __EMSCRIPTEN__
+    if (!takes_work(state)) return;
+#else
+    (void)state;
+#endif
+    wgpuQueueSubmit(queue, 1, &commands);
 }
 
 // ---- a device on its way ---------------------------------------------------------------------------------------------
@@ -960,18 +1026,26 @@ static void on_mapped(WGPUMapAsyncStatus status, WGPUStringView message, void *u
 gpuseam_map *gpuseam_map_async(WGPUBuffer buffer, gpuseam_state *state, uint64_t mode, size_t offset, size_t size) {
     gpuseam_map *m = (gpuseam_map *)calloc(1, sizeof *m);
     if (m == NULL) return NULL;
-#ifndef __EMSCRIPTEN__
-    // wgpu-native keeps a queue's writes until its next submit, where WebGPU has a map see every write made before it
-    // (kyoten's .scratch/gpu4-part2: a map with no submit between read the old bytes), so an empty submit sends them.
-    if (state != NULL && state->queue != NULL) wgpuQueueSubmit(state->queue, 0, NULL);
-#else
-    (void)state;
-#endif
     atomic_init(&m->state, GPUSEAM_PENDING);
     wgpuBufferAddRef(buffer);
     m->buffer = buffer;
     m->offset = offset;
     m->size = size;
+#ifndef __EMSCRIPTEN__
+    // wgpu-native keeps a queue's writes until its next submit, where WebGPU has a map see every write made before it
+    // (kyoten's .scratch/gpu4-part2: a map with no submit between read the old bytes), so an empty submit sends them,
+    // once the device is known to take work: a map of a lost device fails at once, as a browser's does.
+    if (state != NULL && state->queue != NULL) {
+        if (!takes_work(state)) {
+            m->message_length = keep_text("the device is lost, so its buffer cannot be mapped", m->message);
+            atomic_store_explicit(&m->state, GPUSEAM_FAILED, memory_order_release);
+            return m;
+        }
+        wgpuQueueSubmit(state->queue, 0, NULL);
+    }
+#else
+    (void)state;
+#endif
     WGPUBufferMapCallbackInfo ci;
     memset(&ci, 0, sizeof ci);
     ci.mode = WGPUCallbackMode_AllowSpontaneous;

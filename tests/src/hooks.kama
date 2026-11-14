@@ -5,7 +5,7 @@
 // also holds needs an `AddRef` the same way.
 
 export { addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, heapInUse, compileWorkersAlive,
-          pipelinesAlive, compilePause };
+          pipelinesAlive, compilePause, destroyDevice };
 
 extern "gpuseam.h";
 extern "winseam.h";
@@ -15,6 +15,7 @@ extern fn int32 gputests_minimise(UnsafePtr hwnd, int32 minimised);
 extern fn int64 gputests_heap_in_use();
 
 extern fn void wgpuDeviceAddRef(UnsafePtr device);
+extern fn void wgpuDeviceDestroy(UnsafePtr device);
 extern fn void wgpuSurfaceAddRef(UnsafePtr surface);
 extern fn int64 gpuseam_states_alive();
 extern fn int64 gpuseam_compile_workers_alive();
@@ -22,6 +23,8 @@ extern fn int64 gpuseam_pipelines_alive();
 extern fn void gpuseam_compile_pause(int32 paused);
 
 unsafe fn void addDeviceRef(UnsafePtr device) { wgpuDeviceAddRef(device: device); }
+// Destroys a device the package holds, through its raw handle, as a test stands in for a device lost to the system.
+unsafe fn void destroyDevice(UnsafePtr device) { wgpuDeviceDestroy(device: device); }
 unsafe fn void addSurfaceRef(UnsafePtr surface) { wgpuSurfaceAddRef(surface: surface); }
 unsafe fn int64 statesAlive() { return gpuseam_states_alive(); }
 unsafe fn int32 windowRecords() { return winseam_live_records(); }

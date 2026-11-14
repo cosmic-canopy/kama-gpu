@@ -38,7 +38,7 @@ import {
     gpu::native::adapterAddRef, gpu::native::adapterRelease, gpu::native::adapterGetLimits,
     gpu::native::deviceAddRef, gpu::native::deviceRelease, gpu::native::deviceGetQueue, gpu::native::deviceGetLimits,
     gpu::native::deviceCreateBuffer, gpu::native::deviceCreateTexture, gpu::native::deviceCreateCommandEncoder,
-    gpu::native::queueAddRef, gpu::native::queueRelease, gpu::native::queueSubmit, gpu::native::queueWriteBuffer,
+    gpu::native::queueAddRef, gpu::native::queueRelease, gpu::native::queueWriteBuffer,
     gpu::native::bufferAddRef, gpu::native::bufferRelease, gpu::native::bufferGetSize,
     gpu::native::textureAddRef, gpu::native::textureRelease, gpu::native::textureCreateView,
     gpu::native::textureGetWidth, gpu::native::textureGetHeight, gpu::native::textureGetDepthOrArrayLayers,
@@ -68,7 +68,7 @@ import {
     gpu::native::requestDeviceOf, gpu::native::deviceRequestPoll, gpu::native::deviceRequestConsumed,
     gpu::native::deviceRequestTakeDevice, gpu::native::deviceRequestMessage, gpu::native::deviceRequestDrop,
     gpu::native::mapAsync, gpu::native::mapPoll, gpu::native::mapMessage, gpu::native::mapDrop, gpu::native::mapBytes,
-    gpu::native::stateKeepQueue, gpu::native::refuseOn, gpu::native::refuseInPass, gpu::native::quietBegin, gpu::native::quietEnd,
+    gpu::native::stateKeep, gpu::native::queueSubmitChecked, gpu::native::refuseOn, gpu::native::refuseInPass, gpu::native::quietBegin, gpu::native::quietEnd,
     gpu::native::samplerAddRef, gpu::native::samplerRelease, gpu::native::deviceCreateSampler,
     gpu::native::WGPUSamplerDescriptor, gpu::native::WGPUAddressMode, gpu::native::WGPUFilterMode,
     gpu::native::WGPUMipmapFilterMode, gpu::native::WGPUCompareFunction,
@@ -1057,7 +1057,7 @@ type resource DeviceRequest {
         if (device == null) { return DeviceStatus::Failed(error: GpuError::Taken); }
         UnsafePtr state = deviceRequestTakeState(request: this.slot);
         UnsafePtr queue = deviceGetQueue(device: device);
-        stateKeepQueue(state: state, queue: queue);
+        stateKeep(state: state, device: device, queue: queue);
         return DeviceStatus::Ready(device: Device.fromRequest(raw: device, adapter: this.adapter, block: state,
                                                               workers: this.workers),
                                    queue: Queue.fromDevice(raw: queue, block: state, device: device));
@@ -1506,10 +1506,11 @@ type resource Queue implements Copyable<This>(bare: give) {
                          data: cast<UnsafePtr>(data.dataPtr()), size: cast<usize>(n));
     }
 
+    // Natively a command buffer reaches wgpu-native only when its finish reported nothing and its device can still take
+    // work, since a submit of either ends the process there; a browser drops both (item 2's decision 3, item 13).
     public unsafe fn void submit(CommandBuffer commands) {
         if (commands.spoiled()) { return; }
-        UnsafePtr one = commands.raw();
-        queueSubmit(queue: this.handle, commandCount: 1, commands: cast<UnsafePtr>(addr(of: one)));
+        queueSubmitChecked(queue: this.handle, state: this.hold.raw(), commands: commands.raw());
     }
 
     unsafe ~Queue() {
