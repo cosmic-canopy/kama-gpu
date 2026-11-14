@@ -45,8 +45,9 @@ errors reach its own holders (GPU-1), a surface holds its window (GPU-2), an acq
 differences from Dawn are handled (GPU-14). **GPU-4, the render pipeline set, is built** (item 12, decisions 1 to 15),
 in five parts: shader modules; layouts, bind groups, samplers and `writeBuffer`; render pipelines both ways, with
 `printErrors`; textures, views and the pass by description, and the pass's eight commands; and `examples/triangle`,
-whose last frame is read back from its window on every leg. Nothing is under way here: `@kama/graphics`' GFX-1, the lit
-cube, comes next, and the row it pulls first moves into ROADMAP.md's NOW. `tools/test.sh` passes before every commit.
+whose last frame is read back from its window on every leg. `@kama/graphics`' GFX-1, the lit cube, comes next, and the
+first row it pulls is GPU-15, the fallback adapter, for its byte-for-byte software goldens (decided 2026-11-14).
+`tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
 

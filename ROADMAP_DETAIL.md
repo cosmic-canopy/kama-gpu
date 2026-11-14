@@ -5,6 +5,24 @@ when it comes up, and their answers are recorded here or, for a departure from k
 [AGENTS.gpu.md](AGENTS.gpu.md). When a row ships, its section goes: what was built is the [SPEC](SPEC.md), and how it
 was decided is the git log. `tools/check-roadmap.sh` holds every section to a row.
 
+<a id="fallback-adapter"></a>
+## GPU-15: the fallback adapter
+
+Pulled by `@kama/graphics`' GFX-1: its goldens are rendered on a software GPU in CI and compared byte for byte (kyoten's
+`docs/design/rendering.md` § Decided, GFX-1's question 3, 2026-11-14).
+
+- **What it builds:** WebGPU's `forceFallbackAdapter` on an adapter request, its shape by decision 1's rule. An adapter's
+  info already says it is one: `kind()` is `AdapterKind::CPU`.
+- **Measured first** (kyoten's `.scratch/gfx1-probe/FINDINGS.md`, a lit cube at 4× MSAA):
+  - Edge 157's fallback adapter is SwiftShader, with no flag beyond `--enable-unsafe-webgpu`, so it runs under
+    `kama run`; the pinned Chrome for Testing gives SwiftShader only with `--enable-unsafe-swiftshader`, which its
+    driver can pass;
+  - Firefox 160's fallback is WARP;
+  - natively, wgpu-native v29 finds WARP with every backend enabled, and none on Vulkan alone without lavapipe;
+  - each gives the same bytes on every run, and SwiftShader the same in both Chromium browsers.
+- **Done:** a case asks for the fallback adapter on every leg, draws, and reads back the same bytes twice. Where none
+  is offered, the request fails as any other does.
+
 <a id="compute"></a>
 ## GPU-5: compute
 

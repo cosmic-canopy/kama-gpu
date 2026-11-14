@@ -11,15 +11,19 @@ in the git log.
 > **`GPU-<n>` is a permanent id, not a position.** It is assigned once, from the counter below, which the same edit
 > bumps; it is never reused or renumbered, and a shipped row's id retires with it.
 
-**Next id: GPU-15**
+**Next id: GPU-16**
 
 **The goal before 1.0 is every call in webgpu.h** ([AGENTS.gpu.md](AGENTS.gpu.md#what-this-is)), grown by the spec's
 sections in the order `@kama/graphics` pulls them.
 
 ## NOW: what `@kama/graphics`' first slice pulls
 
-Nothing here is under way. The render pipeline set is built ([SPEC.md](SPEC.md); the git log has how), and
-`@kama/graphics`' GFX-1, the lit cube, comes next. The first row below that it pulls moves up here when it does.
+The render pipeline set is built ([SPEC.md](SPEC.md); the git log has how). `@kama/graphics`' GFX-1, the lit cube,
+comes next, and pulls these rows as it goes.
+
+| id | item | why |
+|---|---|---|
+| GPU-15 | **The fallback adapter**: WebGPU's `forceFallbackAdapter`, for `@kama/graphics`' software goldens (SwiftShader on the web, WARP natively), compared byte for byte | [detail](ROADMAP_DETAIL.md#fallback-adapter) |
 
 ## LATER: the rest of webgpu.h before 1.0
 
