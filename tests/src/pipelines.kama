@@ -189,6 +189,7 @@ type resource PipelineRun {
         else if (this.stage == 425) { this.awaitOne(name: "alpha to coverage at one sample is a validation error in the package's words, where wgpu-native takes it", label: "coverage at one sample", says: "alpha to coverage", next: 500); }
         else if (this.stage == 500) { this.asyncFirst(); }
         else if (this.stage == 501) { this.awaitAsyncReady(); }
+        else if (this.stage == 504) { this.countAsyncWorkers(); }
         else if (this.stage == 502) { this.drawnAsync(); }
         else if (this.stage == 503) { this.awaitDrawn(name: "an asynchronous pipeline draws as a synchronous one does", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 510); }
         else if (this.stage == 510) { this.asyncMisused(kind: 0, next: 511); }
@@ -204,6 +205,7 @@ type resource PipelineRun {
         else if (this.stage == 550) { this.manyRequests(); }
         else if (this.stage == 551) { this.awaitMany(name: "more asynchronous requests than a compile pool's channel holds are each answered Ready", count: MANY_REQUESTS, next: 560); }
         else if (this.stage == 560) { this.pendingPastTheDevice(); }
+        else if (this.stage == 562) { this.countPastTheDevice(); }
         else if (this.stage == 561) { this.awaitPastTheDevice(); }
         else if (this.stage == 430) { this.askPrinting(); }
         else if (this.stage == 431) { this.awaitPrintingAdapter(); }
@@ -569,8 +571,17 @@ type resource PipelineRun {
             case Failed(error: e): { why = e.message(); }
         };
         this.found.add(name: "an asynchronous pipeline WebGPU takes comes Ready", why: give why);
+        this.next(to: 504);
+    }
+
+    // The device's isolates, counted once each has started: an isolate counts itself when its thread first runs, and
+    // one the system has yet to run when the first job is answered has not, so the count is waited for by the clock,
+    // as every wait on the package's own threads is. Too many or too few still fail, once the wait runs out. Then the
+    // request is asked again.
+    unsafe fn void countAsyncWorkers() {
         int64 workers = compileWorkersAlive();
         int64 want = expectedWorkers(started: ASYNC_WORKERS);
+        if (workers != want && this.patient()) { return; }
         this.found.add(name: "the first asynchronous request starts the device's compile isolates natively, compileWorkers of them, and none on the web",
                        why: workers == want ? "" : "${workers} run, not ${want}");
         PipelineStatus again = match (this.asyncRequest) {
@@ -833,8 +844,14 @@ type resource PipelineRun {
         this.asyncRequest = give asked;
         this.device = Optional::None;
         this.queue = Optional::None;
+        this.next(to: 562);
+    }
+
+    // The isolates, counted once each has started (as `countAsyncWorkers` waits), while the request is held paused.
+    unsafe fn void countPastTheDevice() {
         int64 workers = compileWorkersAlive();
         int64 want = expectedWorkers(started: ASYNC_WORKERS);
+        if (workers != want && this.patient()) { return; }
         this.found.add(name: "a pending request keeps its device's compile isolates once the device's last copy is gone",
                        why: workers == want ? "" : "${workers} run, not ${want}");
         compilePause(paused: false);
