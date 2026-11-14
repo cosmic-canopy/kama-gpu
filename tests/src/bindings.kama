@@ -13,7 +13,7 @@ import {
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::DeviceOptions, gpu::GpuError,
     gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer,
     gpu::Sampler, gpu::SamplerDescriptor, gpu::AddressMode, gpu::FilterMode, gpu::MipmapFilterMode, gpu::CompareFunction,
-    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::Texture, gpu::TextureDescriptor, gpu::TextureViewDescriptor, gpu::TextureAspect, gpu::TextureViewDimension, gpu::RenderPass, gpu::Color, gpu::TextureDimension, gpu::TextureView, gpu::TextureFormat,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::Texture, gpu::TextureDescriptor, gpu::TextureViewDescriptor, gpu::TextureAspect, gpu::TextureViewDimension, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment, gpu::Color, gpu::TextureDimension, gpu::TextureView, gpu::TextureFormat,
     gpu::TextureUsage, gpu::ShaderStage, gpu::Feature,
     gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
     gpu::BufferBindingType, gpu::SamplerBindingLayout, gpu::SamplerBindingType, gpu::TextureBindingLayout,
@@ -784,7 +784,9 @@ type resource BindingRun {
                 match (give held) {
                     case Some(value: view): {
                         CommandEncoder enc = d.createCommandEncoder();
-                        RenderPass pass = enc.beginRenderPass(target: view, clear: Color.of(r: 0.0, g: 0.0, b: 0.0, a: 1.0));
+                        RenderPassDescriptor passing = RenderPassDescriptor.make();
+                        passing.color(attachment: ColorAttachment.clearing(view: copy view, color: Color.of(r: 0.0, g: 0.0, b: 0.0, a: 1.0)));
+                        RenderPass pass = enc.beginRenderPass(descriptor: give passing);
                         give pass.end();
                         CommandBuffer cb = give enc.finish();
                     }

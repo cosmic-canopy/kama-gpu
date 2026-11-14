@@ -8,7 +8,7 @@ export {
     adapterMarkNew, adapterMarkHold, adapterMarkRelease,
     requestDeviceOf, deviceRequestPoll, deviceRequestTakeDevice, deviceRequestTakeState, deviceRequestMessage,
     deviceRequestConsumed, deviceRequestDrop,
-    mapAsync, mapPoll, mapMessage, mapDrop, mapBytes, stateKeepQueue, refuseOn, quietBegin, quietEnd,
+    mapAsync, mapPoll, mapMessage, mapDrop, mapBytes, stateKeepQueue, refuseOn, refuseInPass, quietBegin, quietEnd,
     pollDevice,
     LOSS_DESTROYED, stateUnwatched, stateHold, stateRelease, stateWatched, stateTakeErrors, errorsCount,
     errorsDropped, errorsKind, errorsLength, errorsMessage, errorsFree, stateLost, stateLostLength, stateLostMessage,
@@ -61,6 +61,7 @@ extern fn void gpuseam_device_request_drop(UnsafePtr request);
 extern fn UnsafePtr gpuseam_map_async(UnsafePtr buffer, UnsafePtr state, uint64 mode, usize offset, usize size);
 extern fn void gpuseam_state_keep_queue(UnsafePtr state, UnsafePtr queue);
 extern fn void gpuseam_refuse(UnsafePtr device, UnsafeConstPtr<uint8> message, int32 length);
+extern fn void gpuseam_refuse_in_pass(UnsafePtr pass, UnsafePtr device, UnsafeConstPtr<uint8> message, int32 length);
 extern fn void gpuseam_quiet_begin(UnsafePtr device);
 extern fn void gpuseam_quiet_end(UnsafePtr device);
 extern fn int32 gpuseam_map_poll(UnsafePtr map);
@@ -137,6 +138,9 @@ unsafe fn UnsafePtr mapAsync(UnsafePtr buffer, UnsafePtr state, uint64 mode, usi
 unsafe fn void stateKeepQueue(UnsafePtr state, UnsafePtr queue) { gpuseam_state_keep_queue(state: state, queue: queue); }
 unsafe fn void refuseOn(UnsafePtr device, UnsafeConstPtr<uint8> message, int32 length) {
     gpuseam_refuse(device: device, message: message, length: length);
+}
+unsafe fn void refuseInPass(UnsafePtr pass, UnsafePtr device, UnsafeConstPtr<uint8> message, int32 length) {
+    gpuseam_refuse_in_pass(pass: pass, device: device, message: message, length: length);
 }
 unsafe fn void quietBegin(UnsafePtr device) { gpuseam_quiet_begin(device: device); }
 unsafe fn void quietEnd(UnsafePtr device) { gpuseam_quiet_end(device: device); }

@@ -5,6 +5,17 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Changed, breaking: a render pass is begun from its description** (2026-11-13, kama 0.9.943; GPU-4's fourth part,
+  AGENTS.gpu.md item 12, decisions 5, 9, 10, 13 and 14). `encoder.beginRenderPass(descriptor: RenderPassDescriptor)`
+  replaces `beginRenderPass(target:, clear:)`.
+  - The description holds colour attachments (`ColorAttachment` with `LoadOp`, `StoreOp`, a resolve target and a
+    depth slice; `ColorAttachment.clearing(view:, color:)` for the common case), empty ones, a depth-stencil attachment
+    typed per aspect (`DepthStencilAttachment` with `DepthAccess`, `DepthLoad`, `StencilAccess` and `StencilLoad`;
+    `clearingDepth(view:, value:)`), and a label.
+  - A clear colour or depth clear value that is not a finite number, and ops on an aspect the view's format lacks, are
+    refused in the package's words, reported at `encoder.finish()` as WebGPU reports every encoding error.
+  - A command encoder now holds a reference on its device, so such a refusal reaches the device's channel.
+
 - **Changed, breaking: a texture view is made from its description** (2026-11-13, kama 0.9.943; GPU-4's fourth part,
   AGENTS.gpu.md item 12, decisions 9, 10 and 12). `texture.createView(descriptor: TextureViewDescriptor.make())`
   replaces `createView()`. The description's parts give a format, a `TextureViewDimension`, `mips(first:, count:)`,

@@ -10,7 +10,7 @@ import {
     std::collections::DynamicArray, std::time::Instant, std::time::monotonicNow,
     gpu::Instance, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::PowerPreference,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::DeviceOptions, gpu::GpuError,
-    gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::Color,
+    gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment, gpu::Color,
     gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus,
     gpu::Texture, gpu::TextureDescriptor, gpu::TextureViewDescriptor, gpu::TextureView, gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::CompareFunction,
     gpu::ShaderModuleDescriptor, gpu::ShaderModule,
@@ -388,7 +388,9 @@ type resource PipelineRun {
                         Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
                         CommandEncoder encoder = d.createCommandEncoder();
                         float64 blue = kind == 6 ? 1.0 : 0.0;
-                        RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: 0.0, g: 0.0, b: blue, a: 0.0));
+                        RenderPassDescriptor passing = RenderPassDescriptor.make();
+                        passing.color(attachment: ColorAttachment.clearing(view: copy view, color: Color.of(r: 0.0, g: 0.0, b: blue, a: 0.0)));
+                        RenderPass pass = encoder.beginRenderPass(descriptor: give passing);
                         pass.setPipeline(pipeline: p);
                         pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
                         give pass.end();
@@ -596,7 +598,9 @@ type resource PipelineRun {
                         uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
                         Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
                         CommandEncoder encoder = d.createCommandEncoder();
-                        RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0));
+                        RenderPassDescriptor passing = RenderPassDescriptor.make();
+                        passing.color(attachment: ColorAttachment.clearing(view: copy view, color: Color.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0)));
+                        RenderPass pass = encoder.beginRenderPass(descriptor: give passing);
                         pass.setPipeline(pipeline: p);
                         pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
                         give pass.end();

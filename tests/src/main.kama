@@ -25,7 +25,7 @@ import {
     gpu::Backend, gpu::Limits, gpu::Feature, gpu::FeatureSet, gpu::DeviceOptions,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError,
     gpu::PowerPreference, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus, gpu::Texture, gpu::TextureDescriptor, gpu::TextureViewDescriptor,
-    gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass,
+    gpu::TextureFormat, gpu::TextureUsage, gpu::ShaderStage, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment,
     gpu::CommandBuffer, gpu::Color,
     gpu::DeviceErrors, gpu::GpuErrorReport, gpu::GpuErrorKind, gpu::DeviceLoss, gpu::LossReason,
     gpu::ErrorFilter, gpu::ErrorScope, gpu::ScopePop, gpu::PopStatus,
@@ -33,7 +33,7 @@ import {
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::WindowOptions, window::Size, window::NativeWindow,
     addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly, readOptions, heapInUse,
-    ShaderRun, Verdicts, BindingRun, PipelineRun,
+    ShaderRun, Verdicts, BindingRun, PipelineRun, PassRun,
 };
 
 comptime uint32 SIDE = 64;
@@ -551,6 +551,16 @@ unsafe fn bool noShaderWarnings() { return hasFlag(flag: "--no-shader-warnings")
 // validation error. Only Firefox's leg passes it. Either way it is an error, not the end of the program (decision 9).
 unsafe fn bool hugeBufferOutOfMemory() { return hasFlag(flag: "--huge-buffer-out-of-memory"); }
 
+// `--unnamed-pass-errors`: a browser whose render pass errors never name the pass (Firefox 160, whose WebGPU is wgpu's,
+// as natively, where the words say "In a pass parameter") is held to not naming it, where Dawn is held to naming it
+// (GPU-4, part 4). Only Firefox's leg passes it, and the day Firefox names the pass, its cases fail and the flag goes.
+unsafe fn bool unnamedPassErrors() { return hasFlag(flag: "--unnamed-pass-errors"); }
+
+// `--unchecked-depth-slice`: a browser that takes a colour attachment's depth slice of 2^32 - 2 on a 2D view (Firefox
+// 160, measured on 2026-11-13, where it refuses a slice of 0 there), which WebGPU refuses, is held to taking it, where
+// every other leg is held to WebGPU's validation error. Only Firefox's leg passes it.
+unsafe fn bool uncheckedDepthSlice() { return hasFlag(flag: "--unchecked-depth-slice"); }
+
 type resource Check implements App {
     Optional<Instance> instance = Optional::None;
     Optional<AdapterPool> pool = Optional::None;      // the adapters, one for each device below
@@ -582,6 +592,7 @@ type resource Check implements App {
     Optional<ShaderRun> shaderRun = Optional::None;
     Optional<BindingRun> bindingRun = Optional::None;
     Optional<PipelineRun> pipelineRun = Optional::None;
+    Optional<PassRun> passRun = Optional::None;
     Instant began = monotonicNow();
     int32 runs = 0;
     int32 failures = 0;
@@ -649,7 +660,8 @@ type resource Check implements App {
         }
         if (this.stage == 6) { this.bindingStep(); }
         if (this.stage == 7) { this.pipelineStep(); }
-        if (this.stage == 8) { return this.finish(); }
+        if (this.stage == 8) { this.passStep(); }
+        if (this.stage == 9) { return this.finish(); }
         return 1;
     }
 
@@ -721,6 +733,24 @@ type resource Check implements App {
         pending.verdicts().clear();
         this.pipelineRun = Optional::Some(value: give pending);
         if (done) { this.pipelineRun = Optional::None; this.stage = 8; }
+    }
+
+    // The cases of GPU-4's fourth part, its passes (tests/src/passes.kama), a step this tick, their verdicts reported here.
+    unsafe fn void passStep() {
+        Optional<PassRun> taken = replace(place: this.passRun, with: Optional::None);
+        PassRun pending = match (give taken) { case Some(value: r): give r; case None: PassRun.make(adapterOptional: adapterOptional(), unnamedPassErrors: unnamedPassErrors(),
+                                                                                         uncheckedDepthSlice: uncheckedDepthSlice()); };
+        bool done = pending.step();
+        isize i = 0;
+        while (i < pending.verdicts().count()) {
+            string name = pending.verdicts().nameAt(at: i);
+            string why = pending.verdicts().whyAt(at: i);
+            this.verdict(name: name, why: why);
+            i = i + 1;
+        }
+        pending.verdicts().clear();
+        this.passRun = Optional::Some(value: give pending);
+        if (done) { this.passRun = Optional::None; this.stage = 9; }
     }
 
     unsafe fn void awaitAdapter() {
@@ -1010,7 +1040,9 @@ type resource Check implements App {
         Buffer copy = device.createBuffer(descriptor: BufferDescriptor.make(size: bytes,
                                                                             usage: BufferUsage::MapRead | BufferUsage::CopyDst));
         CommandEncoder encoder = device.createCommandEncoder();
-        RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: RED, g: GREEN, b: BLUE, a: 1.0));
+        RenderPassDescriptor passing = RenderPassDescriptor.make();
+        passing.color(attachment: ColorAttachment.clearing(view: copy view, color: Color.of(r: RED, g: GREEN, b: BLUE, a: 1.0)));
+        RenderPass pass = encoder.beginRenderPass(descriptor: give passing);
         give pass.end();
         encoder.copyTextureToBuffer(texture: target, buffer: copy, width: SIDE, height: SIDE, bytesPerRow: ROW);
         CommandBuffer commands = give encoder.finish();
@@ -1529,7 +1561,9 @@ unsafe fn Result<GreyRead, GpuError> startGreyRead(ref Surface surface, ref Devi
     Buffer buffer = device.createBuffer(descriptor: BufferDescriptor.make(size: bytes,
                                                                         usage: BufferUsage::MapRead | BufferUsage::CopyDst));
     CommandEncoder encoder = device.createCommandEncoder();
-    RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: 0.5, g: 0.5, b: 0.5, a: 1.0));
+    RenderPassDescriptor passing = RenderPassDescriptor.make();
+    passing.color(attachment: ColorAttachment.clearing(view: copy view, color: Color.of(r: 0.5, g: 0.5, b: 0.5, a: 1.0)));
+    RenderPass pass = encoder.beginRenderPass(descriptor: give passing);
     give pass.end();
     encoder.copyTextureToBuffer(texture: texture, buffer: buffer, width: PATCH, height: PATCH, bytesPerRow: ROW);
     CommandBuffer commands = give encoder.finish();
@@ -1645,7 +1679,9 @@ unsafe fn string drawnOnce(ref Surface surface, ref Device device, ref Queue que
     };
     TextureView view = frame.view();
     CommandEncoder encoder = device.createCommandEncoder();
-    RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: 0.0, g: 0.0, b: 0.0, a: 1.0));
+    RenderPassDescriptor passing = RenderPassDescriptor.make();
+    passing.color(attachment: ColorAttachment.clearing(view: copy view, color: Color.of(r: 0.0, g: 0.0, b: 0.0, a: 1.0)));
+    RenderPass pass = encoder.beginRenderPass(descriptor: give passing);
     give pass.end();
     CommandBuffer commands = give encoder.finish();
     queue.submit(commands: give commands);

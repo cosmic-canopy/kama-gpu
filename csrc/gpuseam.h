@@ -149,6 +149,9 @@ void gpuseam_state_keep_queue(gpuseam_state *state, WGPUQueue queue);
 // decision 9). And a quiet section, in which what the calls report is dropped: a substitute call that makes the
 // refused call's handle, invalid, while the refusal alone is reported.
 void gpuseam_refuse(WGPUDevice device, const uint8_t *message, int32_t length);
+// A refusal inside a pass (decision 14): reported at its encoder's `finish`, in place of the backend's error unless the
+// backend found one earlier in the encoder, and the encoder spoiled. `device` NULL: nothing is reported.
+void gpuseam_refuse_in_pass(WGPURenderPassEncoder pass, WGPUDevice device, const uint8_t *message, int32_t length);
 void gpuseam_quiet_begin(WGPUDevice device);
 void gpuseam_quiet_end(WGPUDevice device);
 // How many blocks are alive in the process, for a test that one is freed with its last holder.

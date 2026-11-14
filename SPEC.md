@@ -431,8 +431,33 @@ Dawn's is. Firefox reports places in UTF-16 units as Dawn does, the first error 
 
 ## Command encoding, render passes and the queue
 
-- **`encoder.beginRenderPass(target:, clear:) -> RenderPass`:** one colour attachment, cleared to `clear` (a `Color`,
-  made memberwise: `Color.of(r:, g:, b:, a:)`) and stored. `pass.end()` consumes the pass.
+- **`encoder.beginRenderPass(descriptor:) -> RenderPass`,** from WebGPU's `GPURenderPassDescriptor` (decisions 5 and
+  13). `pass.end()` consumes the pass.
+  - **`RenderPassDescriptor.make()`,** then `color(attachment:)` for each colour attachment in order, `emptyColor()`
+    for one left empty (WebGPU's `null`, as a pipeline's `emptyTarget()`), `depthStencil(attachment:)` and
+    `label(text:)`. Occlusion queries and timestamps come with GPU-6.
+  - **`ColorAttachment.make(view:, load:, store:)`:** `LoadOp { Clear(color), Load }` and `StoreOp { Store, Discard }`;
+    then `resolveTarget(view:)` and `depthSlice(slice:)`. `ColorAttachment.clearing(view:, color:)` is the common case,
+    cleared and stored. A `Color` is made memberwise: `Color.of(r:, g:, b:, a:)`.
+  - **`DepthStencilAttachment.make(view:)`, typed per aspect,** then `depth(access:)` and `stencil(access:)`:
+    `DepthAccess { ReadOnly, ReadWrite(load, store) }` with `DepthLoad { Clear(value), Load }`, and their stencil twins
+    `StencilAccess` and `StencilLoad`. Read-only with ops, writable without them, and a clear with no value cannot be
+    written. `DepthStencilAttachment.clearingDepth(view:, value:)` is the common case, the depth cleared and stored.
+    An aspect the view's format has but is given no access is WebGPU's error.
+  - **What WebGPU refuses of a pass is reported at `encoder.finish()`,** where WebGPU reports every encoding error, on
+    both legs (measured).
+  - **These are refused in the package's words, and reported at `finish()` too** (decision 14). The refused values
+    never reach the backend, and the encoder is spoiled:
+    - a clear colour or depth clear value that is not a finite number, which a browser throws on (decision 9);
+    - depth or stencil ops on a view whose format lacks that aspect, which wgpu-native takes (decision 10). Read-only
+      there is taken on both legs, so it is passed on.
+
+    A refusal is reported in place of the backend's error unless the encoder's own error came first, which is then
+    the one reported, in WebGPU's order. A scope around `finish()` catches it as it catches any encoding error.
+  - A depth clear value of 0 is passed wherever none is given: emdawnwebgpu hands webgpu.h's "no clear value", NaN,
+    to a browser, which throws. A depth slice of 2^32 - 1, webgpu.h's "no slice", is clamped to 2^32 - 2.
+  - **An encoder holds a reference on its device,** as a texture does, so a refusal inside its passes reaches the
+    device's channel. An adopted encoder has no device, and refuses unreported.
 - **`pass.setPipeline(pipeline:)` and `pass.draw(vertexCount:, instanceCount:, firstVertex:, firstInstance:)`:** draw
   with a render pipeline.
 - **`encoder.copyTextureToBuffer(texture:, buffer:, width:, height:, bytesPerRow:)`:** a region of the texture's first
@@ -540,7 +565,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 30 facts, natively, its asynchronous
   pipeline call's abort and its taking a colour target the fragment stage never writes among them;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 243 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 272 cases natively with a display, debug and release.
   Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
@@ -550,11 +575,13 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
-- the web leg, headless, on the page's canvases: `tests/` (220 cases) and `examples/clear` (60 frames on `#canvas`)
+- the web leg, headless, on the page's canvases: `tests/` (249 cases) and `examples/clear` (60 frames on `#canvas`)
   under `kama run --target WASM --headless` in Edge, Chrome as installed and the pinned Firefox 160, each with the
-  printErrors check. Firefox's run holds `maxImmediateSize` to 0 (`--no-immediates`), a WGSL warning to no message
-  (`--no-shader-warnings`), and a buffer of 2^53 - 256 bytes to an out-of-memory error, which is how Firefox reports it
-  (`--huge-buffer-out-of-memory`). Both also run through `tools/webtest.mjs` in the pinned Chrome for Testing, which
+  printErrors check. Firefox's run holds each of its differences, so the day one goes, its run fails:
+  `maxImmediateSize` to 0 (`--no-immediates`); a WGSL warning to no message (`--no-shader-warnings`); a buffer of
+  2^53 - 256 bytes to an out-of-memory error, which is how Firefox reports it (`--huge-buffer-out-of-memory`); a render
+  pass error to not naming the pass, as wgpu's never do (`--unnamed-pass-errors`); and a depth slice of 2^32 - 2 on a 2D
+  view to being taken (`--unchecked-depth-slice`). Both also run through `tools/webtest.mjs` in the pinned Chrome for Testing, which
   does not run under `kama run` (kyoten's KY-53). `--adapter-optional`, which turns a missing adapter into a named
   skip, is passed by no leg; it is kept for a host with no GPU.
 

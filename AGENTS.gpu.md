@@ -39,13 +39,13 @@ in; *as an engine renderer* they stay out.
 
 **[SPEC.md](SPEC.md) is what the package is, [ROADMAP.md](ROADMAP.md) what comes next, and [COVERAGE.md](COVERAGE.md)
 which of webgpu.h it calls.** In short (2026-11-13, kama 0.9.943): offscreen work and a surface on a window run natively
-on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 87 of webgpu.h's 206 functions, a device's
+on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 88 of webgpu.h's 206 functions, a device's
 errors reach its own holders (GPU-1), a surface holds its window (GPU-2), an acquire before a configure is refused
 (GPU-13), an adapter gives one device and a surface is configured at its window's size (GPU-3), and Firefox's
 differences from Dawn are handled (GPU-14). GPU-4, the render pipeline set, is decided (item 12) and under way: parts 1
 to 3 are built (shader modules; layouts, bind groups, samplers and `writeBuffer`; render pipelines both ways, with
-`printErrors`). Part 4 is decided (decisions 11 to 14) and under way: textures and views by description are built,
-and the pass by description, its depth-stencil attachment and its commands come next, then part 5. `tools/test.sh` passes before every commit.
+`printErrors`). Part 4 is decided (decisions 11 to 14) and under way: textures, views and the pass by description
+are built, and the pass's eight commands come next, then part 5. `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
 
@@ -1242,6 +1242,98 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       target.
     - **Results:** `tests/` is 243 cases natively, debug and release, and 220 in Edge, in Firefox and in Chrome for
       Testing. COVERAGE.md is unchanged, at 87 of 206, since `createView` was already called.
+
+    **Built on 2026-11-13 (kyoten's twentieth session), part 4's third step: the pass by description** (decisions 5, 13
+    and 14, with 9 and 10), test-first. Red against a stub that lowered the first colour attachment alone, cleared and
+    stored, and refused nothing: 25 of the 28 new cases failed. The 29th, the back face, came with the mutations.
+    - **Measured first** (kyoten's `.scratch/gpu4-part4/FINDINGS.md`, its last two sections):
+      - **How a refusal reaches `finish`.** The refused values never reach the backend. In their place the pass is
+        handed the refusal's carrier as vertex buffer 0, so the backend spoils the encoder itself, in command order.
+        The carrier must be a valid buffer made for copies alone. wgpu-native resolves an invalid buffer when its
+        command is recorded and validates the rest at `finish`, so an invalid carrier (the device-level refusal's) is
+        reported first natively, ahead of an earlier error. With the usage error, both legs keep WebGPU's order in all
+        ten cases measured: an earlier draw, descriptor or copy error wins, and a later one loses. It needs no quiet
+        section, since making it is not an error.
+      - **An aspect the format lacks:** natively, depth ops on Stencil8 and stencil ops on Depth24Plus are taken, and
+        Dawn refuses both. Read-only there is taken on both legs.
+      - **wgpu-native's pass errors never name the pass** ("In a pass parameter"), where Dawn's do.
+    - **The API** (decisions 5 and 13):
+      - `RenderPassDescriptor.make()` with `color(attachment:)`, `emptyColor()`, `depthStencil(attachment:)` and
+        `label(text:)`;
+      - `ColorAttachment.make(view:, load:, store:)`, with `resolveTarget(view:)` and `depthSlice(slice:)`, and
+        `ColorAttachment.clearing(view:, color:)`;
+      - `DepthStencilAttachment.make(view:)`, with `depth(access:)` and `stencil(access:)`, and `clearingDepth(view:,
+        value:)`;
+      - the enums `LoadOp`, `StoreOp`, `DepthLoad`, `DepthAccess`, `StencilLoad` and `StencilAccess`.
+
+      `encoder.beginRenderPass(descriptor:)` replaces `beginRenderPass(target:, clear:)`. `examples/clear` and
+      `tests/` moved with it.
+    - **The refusals,** each in the package's words, at `finish` (decision 14), through the seam's new
+      `gpuseam_refuse_in_pass`:
+      - a clear colour, in any channel, that is not a finite number (decision 9);
+      - a depth clear value that is not a finite number (decision 9);
+      - depth or stencil ops on a view whose format lacks that aspect (decision 10).
+
+      A depth clear value of 0 is passed wherever none is given. A depth slice of 2^32 - 1 is clamped to 2^32 - 2.
+    - **A command encoder holds a reference on its device,** as a texture does, so a refusal reaches the channel. The
+      pass will hold one too, in step 4, whose command refusals need it.
+    - **Decided in the building, for the owner to object to:**
+      - **Read-only on an aspect the format lacks is passed on, not refused.** Decision 13 refuses "an aspect the view's
+        format lacks". Both legs and WebGPU's own wording take read-only there, so only ops are refused.
+      - **A colour view as the depth-stencil attachment is left to WebGPU's words**, which say what is wrong more
+        plainly than the package's aspect check would. The check covers depth and stencil formats only.
+    - **Found in the building:**
+      - **Firefox 160's pass errors never name the pass,** as wgpu-native's don't. Its leg passes
+        `--unnamed-pass-errors`, which holds the words to not naming it. The native leg is held the same way, at compile
+        time.
+      - **Firefox 160 takes a depth slice of 2^32 - 2 on a 2D view,** where it refuses a slice of 0 there, and WebGPU
+        refuses both. emdawnwebgpu hands it the number unsigned. Its leg passes `--unchecked-depth-slice`, which holds
+        the slice to being taken.
+
+      Both flags fail an Edge run that passes them, which shows each holds a difference rather than loosening a case.
+    - **The cases** (`tests/src/passes.kama`, `PassRun`, after the pipeline run):
+      - twelve passes WebGPU takes, and the channel empty;
+      - fourteen read back from a texel:
+        - a clear colour, every channel its own;
+        - a load keeping an earlier pass's store;
+        - a discard reading zero;
+        - four samples resolved;
+        - a 3D view's slice;
+        - an empty attachment keeping its place;
+        - a depth clear value letting a triangle through;
+        - a depth prepass loaded by a later pass, through an equal test with the position `@invariant`;
+        - a read-only depth;
+        - a stencil clear value and a stencil load, each failing an equal test;
+        - the stencil faces, Never in front and Always behind, drawing nothing, and with clockwise front faces the
+          triangle a back face, Always in front and Never behind, drawing nothing;
+        - a depth bias slope scale of 4 pushing a sloped triangle behind a depth of 0.5.
+
+        The faces and the slope catch two of part 3's three carried mutations. A front-facing triangle shows only the
+        front face, so the back face's case was added once the mutations were run;
+      - the six refusals;
+      - the order: a refused pass after the encoder's own copy error reports that error, and one before it reports the
+        refusal;
+      - a scope around the encoder catching the refusal, the channel empty;
+      - five validation errors at `finish`, each held to naming the pass or not by leg: a slice on a 2D view, the slice
+        of 2^32 - 1, a depth clear value of 2, a depth format given no access, and no attachments.
+    - **Mutations: 36 of 36 caught,** 35 natively and one in Edge. They cover:
+      - each field of the lowering lost: the colour view, its depth slice, its resolve target, each clear channel, the
+        load op, the store op, discard stored, an empty attachment dropped; the depth view, read-only, load, clear,
+        clear value and store; the stencil's read-only, load, clear, clear value and store; the depth-stencil
+        attachment itself;
+      - the 2^32 - 1 slice not clamped;
+      - each refusal gone (the colour's, green or alpha unchecked, the depth's, each aspect's), Depth24PlusStencil8
+        taken for a format with no stencil;
+      - the refusal not reported, the carrier not set, the carrier invalid (the order cases turn red, as FINDINGS
+        measured), and the encoder holding no device;
+      - in Edge, the label not handed over.
+
+      A null depth view ended the native process. **Part 3's carried mutations, the depth bias slope and each stencil
+      face, are caught,** each by its own case; the step mode waits for step 4's instanced vertex buffer. The three
+      cases green on their first run (a clear's colour, the earlier error, no attachments) turn red under the clear
+      channels, the invalid carrier and, in Edge, the label.
+    - **Results:** `tests/` is 272 cases natively, debug and release, and 249 in Edge, in Firefox and in Chrome for
+      Testing. COVERAGE.md: 88 of 206, with `wgpuRenderPassEncoderSetVertexBuffer` called by the seam's carrier.
 
 ## Where the truth is
 

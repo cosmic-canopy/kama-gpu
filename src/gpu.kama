@@ -50,7 +50,7 @@ import {
     gpu::native::renderPassEncoderAddRef, gpu::native::renderPassEncoderRelease, gpu::native::renderPassEncoderEnd,
     gpu::native::commandBufferAddRef, gpu::native::commandBufferRelease,
     gpu::native::WGPUBufferDescriptor, gpu::native::WGPUTextureDescriptor, gpu::native::WGPURenderPassDescriptor,
-    gpu::native::WGPURenderPassColorAttachment, gpu::native::WGPUTexelCopyTextureInfo,
+    gpu::native::WGPURenderPassColorAttachment, gpu::native::WGPURenderPassDepthStencilAttachment, gpu::native::WGPUTexelCopyTextureInfo,
     gpu::native::WGPUTexelCopyBufferInfo, gpu::native::WGPUExtent3D, gpu::native::WGPUTextureViewDescriptor, gpu::native::WGPUStringView,
     gpu::native::WGPUBufferUsage, gpu::native::WGPUTextureUsage, gpu::native::WGPUShaderStage, gpu::native::WGPUMapMode,
     gpu::native::WGPUTextureDimension, gpu::native::WGPULoadOp,
@@ -65,7 +65,7 @@ import {
     gpu::native::requestDeviceOf, gpu::native::deviceRequestPoll, gpu::native::deviceRequestConsumed,
     gpu::native::deviceRequestTakeDevice, gpu::native::deviceRequestMessage, gpu::native::deviceRequestDrop,
     gpu::native::mapAsync, gpu::native::mapPoll, gpu::native::mapMessage, gpu::native::mapDrop, gpu::native::mapBytes,
-    gpu::native::stateKeepQueue, gpu::native::refuseOn, gpu::native::quietBegin, gpu::native::quietEnd,
+    gpu::native::stateKeepQueue, gpu::native::refuseOn, gpu::native::refuseInPass, gpu::native::quietBegin, gpu::native::quietEnd,
     gpu::native::samplerAddRef, gpu::native::samplerRelease, gpu::native::deviceCreateSampler,
     gpu::native::WGPUSamplerDescriptor, gpu::native::WGPUAddressMode, gpu::native::WGPUFilterMode,
     gpu::native::WGPUMipmapFilterMode, gpu::native::WGPUCompareFunction,
@@ -119,7 +119,8 @@ export {
     Device, Queue, DeviceRequest, DeviceStatus, GpuError, PowerPreference,
     Buffer, BufferDescriptor, BufferUsage, BufferRead, ReadStatus,
     Texture, TextureDescriptor, TextureDimension, TextureUsage, TextureView, TextureViewDescriptor, TextureAspect, ShaderStage,
-    CommandEncoder, RenderPass, CommandBuffer, Color,
+    CommandEncoder, RenderPass, CommandBuffer, Color, RenderPassDescriptor, ColorAttachment, LoadOp, StoreOp,
+    DepthStencilAttachment, DepthLoad, DepthAccess, StencilLoad, StencilAccess,
     Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
     GpuErrorKind, GpuErrorReport, DeviceErrors, DeviceLoss, LossReason, ErrorFilter, ErrorScope, ScopePop, PopStatus,
     Sampler, SamplerDescriptor, AddressMode, FilterMode, MipmapFilterMode, CompareFunction,
@@ -1426,7 +1427,7 @@ type resource Device implements Copyable<This>(bare: give) {
 
     public unsafe fn CommandEncoder createCommandEncoder() {
         return CommandEncoder.fromDevice(raw: deviceCreateCommandEncoder(device: this.handle, descriptor: null),
-                                         block: this.hold.raw());
+                                         block: this.hold.raw(), device: this.handle);
     }
 
     // Natively, finish what the device can and fire its callbacks; `wait` blocks until its queue is empty. On the web
@@ -1835,6 +1836,7 @@ type resource TextureView implements Copyable<This>(bare: give) {
 
     friend Texture::createView[fromDevice];
     friend SurfaceTexture::view[fromDevice];
+    friend CommandEncoder::beginRenderPass[form];   // the depth-stencil attachment's aspects (decision 13)
 
     // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
@@ -2986,10 +2988,32 @@ fn bool hasDepth(TextureFormat format) {
     };
 }
 
+// Whether `format` has a stencil aspect.
+fn bool hasStencil(TextureFormat format) {
+    return match (format) {
+        case Stencil8: true;
+        case Depth24PlusStencil8: true;
+        case Depth32FloatStencil8: true;
+        case _: false;
+    };
+}
+
 // Whether `x` is a finite number: x - x is 0 for one, and NaN for NaN or an infinity.
 fn bool finiteNumber(float64 x) {
     float64 gap = x - x;
     return gap == 0.0;
+}
+fn bool finite32(float32 x) {
+    float32 gap = x - x;
+    return gap == 0.0;
+}
+
+// webgpu.h's number for a store op.
+fn int32 storeValue(StoreOp s) {
+    return match (s) {
+        case Store: WGPUStoreOp::Store;
+        case Discard: WGPUStoreOp::Discard;
+    };
 }
 
 fn bool dualSource(BlendFactor f) {
@@ -3465,44 +3489,238 @@ fn CompilationInfo infoOf(CompilationStatus status) {
     };
 }
 
+// ---- render passes (GPU-4; AGENTS.gpu.md item 12, decisions 5, 13 and 14) --------------------------------------------
+
+// How a colour attachment starts its pass (WebGPU's `GPULoadOp` with its `clearValue`): cleared to `color`, or loaded as
+// the view holds it.
+type enum LoadOp { Clear(Color color), Load }
+// What a pass leaves in an attachment (WebGPU's `GPUStoreOp`): what it drew, stored, or nothing, which reads as zero.
+type enum StoreOp { Store, Discard }
+
+// WebGPU's `GPURenderPassColorAttachment`: the view drawn into, how it starts and what is left of it, which WebGPU
+// requires; and a resolve target for a multisampled view, and the slice of a 3D view, which it does not.
+// `ColorAttachment.clearing(view:, color:)` is the common case: cleared, then stored.
+type resource ColorAttachment {
+    TextureView target;
+    LoadOp load;
+    StoreOp store;
+    Optional<TextureView> resolved = Optional::None;
+    Optional<uint32> slice = Optional::None;
+
+    friend CommandEncoder::beginRenderPass[...];
+
+    public ctor make(TextureView view, LoadOp load, StoreOp store) {
+        this.target = give view;
+        this.load = load;
+        this.store = store;
+    }
+    // Cleared to `color` as the pass begins, and what the pass draws stored.
+    public ctor clearing(TextureView view, Color color) {
+        this.target = give view;
+        this.load = LoadOp::Clear(color: color);
+        this.store = StoreOp::Store;
+    }
+    // The single-sampled view a multisampled one is resolved into as the pass ends.
+    public fn void resolveTarget(TextureView view) { this.resolved = Optional::Some(value: give view); }
+    // The depth slice of a 3D view that is drawn into, which a 3D view needs and any other refuses.
+    public fn void depthSlice(uint32 slice) { this.slice = Optional::Some(value: slice); }
+}
+
+// How a depth aspect starts its pass (WebGPU's `depthLoadOp` with its `depthClearValue`): cleared to a depth from 0 to
+// 1, or loaded.
+type enum DepthLoad { Clear(float32 value), Load }
+// Whether a pass may write an attachment's depth (WebGPU's `depthReadOnly`), and when it may, how the depth starts and
+// what is left of it. Read-only takes no ops and writable takes both, so neither can be given wrongly (decision 13).
+type enum DepthAccess { ReadOnly, ReadWrite(DepthLoad load, StoreOp store) }
+// The stencil's twins of `DepthLoad` and `DepthAccess`; a stencil clear value keeps its format's bits.
+type enum StencilLoad { Clear(uint32 value), Load }
+type enum StencilAccess { ReadOnly, ReadWrite(StencilLoad load, StoreOp store) }
+
+// WebGPU's `GPURenderPassDepthStencilAttachment`, typed per aspect (decision 13): the view, and for each aspect its
+// format has, how the pass uses it. An aspect given no access is WebGPU's error when the format has it.
+// `DepthStencilAttachment.clearingDepth(view:, value:)` is the common case: the depth cleared to `value`, then stored.
+type resource DepthStencilAttachment {
+    TextureView target;
+    Optional<DepthAccess> depthPart = Optional::None;
+    Optional<StencilAccess> stencilPart = Optional::None;
+
+    friend CommandEncoder::beginRenderPass[...];
+
+    public ctor make(TextureView view) { this.target = give view; }
+    // The depth cleared to `value` as the pass begins, and what the pass writes stored.
+    public ctor clearingDepth(TextureView view, float32 value) {
+        this.target = give view;
+        this.depthPart = Optional::Some(value: DepthAccess::ReadWrite(load: DepthLoad::Clear(value: value), store: StoreOp::Store));
+    }
+    public fn void depth(DepthAccess access) { this.depthPart = Optional::Some(value: access); }
+    public fn void stencil(StencilAccess access) { this.stencilPart = Optional::Some(value: access); }
+}
+
+// WebGPU's `GPURenderPassDescriptor`: its colour attachments in order, any of them left empty (WebGPU's `null`), a
+// depth-stencil attachment, and a label. Occlusion queries and timestamps come with GPU-6.
+type resource RenderPassDescriptor {
+    DynamicArray<Optional<ColorAttachment>> colorList;
+    Optional<DepthStencilAttachment> depthStencilPart = Optional::None;
+    string labelled = "";
+
+    friend CommandEncoder::beginRenderPass[...];
+
+    public ctor make() { this.colorList = DynamicArray.empty(); }
+    // The next colour attachment.
+    public fn void color(ColorAttachment attachment) { this.colorList.add(item: Optional::Some(value: give attachment)); }
+    // The next colour attachment left empty, as a pipeline's empty target.
+    public fn void emptyColor() { this.colorList.add(item: Optional::None); }
+    public fn void depthStencil(DepthStencilAttachment attachment) { this.depthStencilPart = Optional::Some(value: give attachment); }
+    public fn void label(string text) { this.labelled = give text; }
+}
+
 // ---- recording -------------------------------------------------------------------------------------------------------
 
 type resource CommandEncoder implements Copyable<This>(bare: give) {
     UnsafePtr handle;
     StateHold hold = StateHold.empty();   // its device's state, which its errors reach
+    UnsafePtr device = null;              // its device, held, which a refusal inside its passes rides; none when adopted
 
     friend Device::createCommandEncoder[fromDevice];
 
     // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block, UnsafePtr device) {
         this.handle = raw;
         this.hold = StateHold.make(block: block);
+        this.device = device;
+        if (device != null) { deviceAddRef(device: device); }
     }
     public unsafe ctor copy(ref CommandEncoder source) {
         this.handle = source.handle;
         commandEncoderAddRef(commandEncoder: this.handle);
         this.hold = copy source.hold;
+        this.device = source.device;
+        if (this.device != null) { deviceAddRef(device: this.device); }
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
-    // A render pass into one color target, cleared to `clear` and stored. `end()` it before `finish()`.
-    public unsafe fn RenderPass beginRenderPass(const ref TextureView target, Color clear) {
-        WGPURenderPassColorAttachment att = WGPURenderPassColorAttachment.zero();
-        att.view = target.raw();
-        att.depthSlice = DEPTH_SLICE_UNDEFINED;
-        att.loadOp = WGPULoadOp::Clear;
-        att.storeOp = WGPUStoreOp::Store;
-        att.clearValue.r = clear.r;
-        att.clearValue.g = clear.g;
-        att.clearValue.b = clear.b;
-        att.clearValue.a = clear.a;
+    // A render pass as `descriptor` describes it (WebGPU's `beginRenderPass`; AGENTS.gpu.md item 12, decisions 5, 13 and
+    // 14). `end()` it before `finish()`. What WebGPU refuses of it is reported at `finish()`, where WebGPU reports it.
+    // These are refused in the package's words, reported at `finish()` too unless the encoder's own error came first,
+    // and never reach the backend: a clear colour or depth clear value that is not a finite number, which a browser
+    // throws on (decision 9); and depth or stencil ops on a view whose format lacks that aspect, which wgpu-native takes
+    // (decision 10). Read-only is taken there on both legs, so it is passed on. A depth clear value of 0 is passed
+    // wherever none is given: emdawnwebgpu hands webgpu.h's NaN to a browser, which throws.
+    public unsafe fn RenderPass beginRenderPass(RenderPassDescriptor descriptor) {
+        string what = "the render pass '" + descriptor.labelled + "'";
+        string refused = "";
+
+        // the colour attachments, an empty one as no view, which both legs read as WebGPU's null
+        DynamicArray<WGPURenderPassColorAttachment> colors = DynamicArray.empty();
+        isize i = 0;
+        while (i < descriptor.colorList.length()) {
+            WGPURenderPassColorAttachment a = WGPURenderPassColorAttachment.zero();
+            a.depthSlice = DEPTH_SLICE_UNDEFINED;
+            a.loadOp = WGPULoadOp::Clear;
+            a.storeOp = WGPUStoreOp::Store;
+            match (descriptor.colorList[i]) {
+                case Some(value: c): {
+                    a.view = c.target.raw();
+                    match (c.slice) { case Some(value: z): { a.depthSlice = countOf(n: z); } case None: { } };
+                    match (c.resolved) { case Some(value: r): { a.resolveTarget = r.raw(); } case None: { } };
+                    match (c.load) {
+                        case Clear(color: k): {
+                            if (finiteNumber(x: k.r) && finiteNumber(x: k.g) && finiteNumber(x: k.b) && finiteNumber(x: k.a)) {
+                                a.clearValue.r = k.r;
+                                a.clearValue.g = k.g;
+                                a.clearValue.b = k.b;
+                                a.clearValue.a = k.a;
+                            } else if (refused.isEmpty()) {
+                                refused = "${what} clears colour attachment ${i} to a colour that is not a finite number (r ${k.r}, g ${k.g}, b ${k.b}, a ${k.a}): WebGPU refuses it";
+                            }
+                        }
+                        case Load: { a.loadOp = WGPULoadOp::Load; }
+                    };
+                    a.storeOp = storeValue(s: c.store);
+                }
+                case None: { }
+            };
+            colors.add(item: a);
+            i = i + 1;
+        }
+
+        // the depth-stencil attachment, each aspect as it is given
+        WGPURenderPassDepthStencilAttachment ds = WGPURenderPassDepthStencilAttachment.zero();
+        bool depthStencilGiven = false;
+        match (descriptor.depthStencilPart) {
+            case Some(value: a): {
+                depthStencilGiven = true;
+                ds.view = a.target.raw();
+                // a view made elsewhere has no format kept, and a colour format is WebGPU's to name: neither is refused
+                Optional<TextureFormat> seen = TextureFormat::fromValue(value: a.target.form);
+                bool depthLacked = match (seen) { case Some(value: f): hasStencil(format: f) && !hasDepth(format: f); case None: false; };
+                bool stencilLacked = match (seen) { case Some(value: f): hasDepth(format: f) && !hasStencil(format: f); case None: false; };
+                string named = match (seen) { case Some(value: f): f.name(); case None: ""; };
+                match (a.depthPart) {
+                    case Some(value: access): {
+                        match (access) {
+                            case ReadOnly: { ds.depthReadOnly = 1; }
+                            case ReadWrite(load: l, store: st): {
+                                if (depthLacked) {
+                                    if (refused.isEmpty()) { refused = "${what} gives depth ops to a view in ${named}, which has no depth: WebGPU refuses them"; }
+                                } else {
+                                    match (l) {
+                                        case Clear(value: v): {
+                                            ds.depthLoadOp = WGPULoadOp::Clear;
+                                            if (finite32(x: v)) {
+                                                ds.depthClearValue = v;
+                                            } else if (refused.isEmpty()) {
+                                                refused = "${what} clears its depth to ${v}, which is not a finite number: WebGPU refuses it";
+                                            }
+                                        }
+                                        case Load: { ds.depthLoadOp = WGPULoadOp::Load; }
+                                    };
+                                    ds.depthStoreOp = storeValue(s: st);
+                                }
+                            }
+                        };
+                    }
+                    case None: { }
+                };
+                match (a.stencilPart) {
+                    case Some(value: access): {
+                        match (access) {
+                            case ReadOnly: { ds.stencilReadOnly = 1; }
+                            case ReadWrite(load: l, store: st): {
+                                if (stencilLacked) {
+                                    if (refused.isEmpty()) { refused = "${what} gives stencil ops to a view in ${named}, which has no stencil: WebGPU refuses them"; }
+                                } else {
+                                    match (l) {
+                                        case Clear(value: v): {
+                                            ds.stencilLoadOp = WGPULoadOp::Clear;
+                                            ds.stencilClearValue = v;
+                                        }
+                                        case Load: { ds.stencilLoadOp = WGPULoadOp::Load; }
+                                    };
+                                    ds.stencilStoreOp = storeValue(s: st);
+                                }
+                            }
+                        };
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+
         WGPURenderPassDescriptor d = WGPURenderPassDescriptor.zero();
-        d.colorAttachmentCount = 1;
-        d.colorAttachments = cast<UnsafePtr>(addr(of: att));
-        return RenderPass.fromDevice(raw: commandEncoderBeginRenderPass(commandEncoder: this.handle,
-                                                                        descriptor: cast<UnsafePtr>(addr(of: d))),
-                                     block: this.hold.raw());
+        d.label = labelOf(text: descriptor.labelled);
+        d.colorAttachmentCount = cast<usize>(colors.length());
+        d.colorAttachments = cast<UnsafePtr>(colors.dataPtrMut());
+        if (depthStencilGiven) { d.depthStencilAttachment = cast<UnsafePtr>(addr(of: ds)); }
+        UnsafePtr raw = commandEncoderBeginRenderPass(commandEncoder: this.handle, descriptor: cast<UnsafePtr>(addr(of: d)));
+        if (!refused.isEmpty()) {
+            // in the refused values' place, the refusal's carrier (decision 14)
+            refuseInPass(pass: raw, device: this.device, message: cast<UnsafeConstPtr<uint8>>(refused.cstr()),
+                         length: cast<int32>(refused.length()));
+        }
+        return RenderPass.fromDevice(raw: raw, block: this.hold.raw());
     }
 
     // Copy a `width` × `height` region of `texture`'s first level into `buffer`, `bytesPerRow` apart (a multiple of 256).
@@ -3532,7 +3750,10 @@ type resource CommandEncoder implements Copyable<This>(bare: give) {
         return CommandBuffer.fromDevice(raw: commands, block: this.hold.raw(), spoiled: failed != 0);
     }
 
-    unsafe ~CommandEncoder() { if (this.handle != null) { commandEncoderRelease(commandEncoder: this.handle); } }
+    unsafe ~CommandEncoder() {
+        if (this.handle != null) { commandEncoderRelease(commandEncoder: this.handle); }
+        if (this.device != null) { deviceRelease(device: this.device); }
+    }
 }
 
 type resource RenderPass implements Copyable<This>(bare: give) {

@@ -1,0 +1,853 @@
+// The cases of GPU-4's fourth part, its third step (AGENTS.gpu.md item 12, decisions 5, 9, 10, 13 and 14), a step a tick
+// on every leg: render passes made from WebGPU's description, drawn and read back; what WebGPU refuses of them, at the
+// encoder's `finish`; and what the package refuses first, reported at `finish` too, where a browser throws or wgpu-native
+// takes what WebGPU refuses. The device is given no feature.
+//
+// They report through `Verdicts`, which the check reads each tick, as the pipeline cases do.
+
+import {
+    core::println,
+    std::collections::DynamicArray,
+    gpu::Instance, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::PowerPreference,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError,
+    gpu::DeviceErrors, gpu::GpuErrorKind, gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::Color,
+    gpu::RenderPassDescriptor, gpu::ColorAttachment, gpu::LoadOp, gpu::StoreOp, gpu::DepthStencilAttachment,
+    gpu::DepthLoad, gpu::DepthAccess, gpu::StencilLoad, gpu::StencilAccess,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus,
+    gpu::Texture, gpu::TextureDescriptor, gpu::TextureViewDescriptor, gpu::TextureView, gpu::TextureFormat,
+    gpu::TextureUsage, gpu::TextureDimension, gpu::CompareFunction, gpu::FrontFace,
+    gpu::ShaderModuleDescriptor, gpu::ShaderModule,
+    gpu::StencilFaceState, gpu::DepthStencilState, gpu::ColorTargetState, gpu::VertexState, gpu::FragmentState,
+    gpu::Layout, gpu::RenderPipelineDescriptor, gpu::RenderPipeline,
+    gpu::ErrorScope, gpu::ErrorFilter, gpu::ScopePop, gpu::PopStatus,
+    Verdicts, readOptions,
+};
+export { PassRun };
+
+comptime int32 SETTLE = 60;   // the most ticks a case waits for an error the browser owes
+comptime int32 QUIET = 10;    // the ticks a case waits to see that no error comes
+comptime uint32 SIDE = 4;     // a target is SIDE by SIDE texels
+comptime uint32 ROW = 256;    // a copied row's bytes: WebGPU's alignment
+
+// `vs0` covers the target with one counter-clockwise triangle at a depth of 0.25, its position invariant so two
+// pipelines place it at the same depth (a depth prepass's equal test); `vsSlope` is that triangle with its depth rising
+// from 0 at the target's left edge to 0.5 at its right, a slope of 0.125 a texel that a depth bias scales. `fs` writes
+// (1, 0.5, 0.25, 1), and `fs1` white to location 1 alone.
+fn string passWgsl() {
+    return "struct VOut { @invariant @builtin(position) pos: vec4f };\n"
+        + "@vertex fn vs0(@builtin(vertex_index) i: u32) -> VOut {\n"
+        + "  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));\n"
+        + "  var o: VOut; o.pos = vec4f(p[i], 0.25, 1.0); return o; }\n"
+        + "@vertex fn vsSlope(@builtin(vertex_index) i: u32) -> VOut {\n"
+        + "  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));\n"
+        + "  var o: VOut; o.pos = vec4f(p[i], 0.25 + 0.25 * p[i].x, 1.0); return o; }\n"
+        + "@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.25, 1.0); }\n"
+        + "@fragment fn fs1() -> @location(1) vec4f { return vec4f(1.0, 1.0, 1.0, 1.0); }\n";
+}
+
+// NaN and the infinities, made at run time: kama refuses a constant division by zero.
+fn float64 notANumber() {
+    float64 zero = 0.0;
+    return zero / zero;
+}
+fn float64 infinity(float64 sign) {
+    float64 zero = 0.0;
+    return sign / zero;
+}
+fn float32 notANumber32() {
+    float32 zero = 0.0;
+    return zero / zero;
+}
+fn float32 infinity32(float32 sign) {
+    float32 zero = 0.0;
+    return sign / zero;
+}
+
+// Whether this leg's render pass errors name the pass: Dawn's do, and wgpu's never do, natively (kyoten's
+// .scratch/gpu4-part4/FINDINGS.md) and in Firefox (`--unnamed-pass-errors`), whose words say "In a pass parameter". A
+// case holds each leg to what it does, so the day wgpu names the pass, it fails.
+@compileFor(ARCH_WASM32)
+fn bool passesNamed() { return true; }
+@compileFor(!ARCH_WASM32)
+fn bool passesNamed() { return false; }
+
+// The clear colour the read-back cases use, each channel a whole number of 255ths: (51, 102, 153, 204).
+fn Color fifths() { return Color.of(r: 0.2, g: 0.4, b: 0.6, a: 0.8); }
+fn Color nothing() { return Color.of(r: 0.0, g: 0.0, b: 0.0, a: 0.0); }
+
+type resource PassRun {
+    int32 stage = 0;
+    int32 waited = 0;
+    bool optional;       // `--adapter-optional`: no adapter here is a skip
+    bool named;          // this leg's pass errors name the pass
+    bool sliceChecked;   // this leg refuses a depth slice of 2^32 - 2 on a 2D view (Firefox takes it)
+    Verdicts found;
+    Optional<Instance> instance = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+    Optional<ShaderModule> shaders = Optional::None;   // passWgsl's module
+    Optional<Buffer> readback = Optional::None;        // a drawn target's copy
+    Optional<BufferRead> reading = Optional::None;
+    Optional<ScopePop> around = Optional::None;        // a scope popped around a refused encoder's finish
+
+    public ctor make(bool adapterOptional, bool unnamedPassErrors, bool uncheckedDepthSlice) {
+        this.optional = adapterOptional;
+        this.named = passesNamed() && !unnamedPassErrors;
+        this.sliceChecked = !uncheckedDepthSlice;
+        this.found = Verdicts.make();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // One tick's step: true once every case has run.
+    public unsafe fn bool step() {
+        this.waited = this.waited + 1;
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.awaitAdapter(); }
+        else if (this.stage == 2) { this.awaitDevice(); }
+        else if (this.stage == 10) { this.goodPasses(); }
+        else if (this.stage == 11) { this.awaitNone(name: "passes WebGPU takes begin, end and finish with no error: a colour cleared and stored, loaded, discarded, resolved, a 3D view's slice, an empty colour attachment, depth alone cleared and read-only, both aspects, stencil alone, and stencil read-only on a format with no stencil", next: 20); }
+        else if (this.stage == 20) { this.render(kind: 0, next: 21); }
+        else if (this.stage == 21) { this.awaitPixel(name: "a colour attachment cleared reads back its clear colour, every channel its own", want: pixel(r: 51, g: 102, b: 153, a: 204), next: 30); }
+        else if (this.stage == 30) { this.render(kind: 1, next: 31); }
+        else if (this.stage == 31) { this.awaitPixel(name: "a colour attachment loaded keeps what an earlier pass stored", want: pixel(r: 51, g: 102, b: 153, a: 204), next: 40); }
+        else if (this.stage == 40) { this.render(kind: 2, next: 41); }
+        else if (this.stage == 41) { this.awaitPixel(name: "a colour attachment discarded reads back zero", want: pixel(r: 0, g: 0, b: 0, a: 0), next: 50); }
+        else if (this.stage == 50) { this.render(kind: 3, next: 51); }
+        else if (this.stage == 51) { this.awaitPixel(name: "four samples cleared and discarded are resolved into the resolve target", want: pixel(r: 51, g: 102, b: 153, a: 204), next: 60); }
+        else if (this.stage == 60) { this.render(kind: 4, next: 61); }
+        else if (this.stage == 61) { this.awaitPixel(name: "a 3D view's depth slice 1 is cleared, and slice 0 keeps its own clear", want: pixel(r: 51, g: 102, b: 153, a: 204), next: 70); }
+        else if (this.stage == 70) { this.render(kind: 5, next: 71); }
+        else if (this.stage == 71) { this.awaitPixel(name: "an empty colour attachment keeps its place: a pipeline with an empty first target draws location 1 into the second", want: pixel(r: 255, g: 255, b: 255, a: 255), next: 80); }
+        else if (this.stage == 80) { this.render(kind: 6, next: 81); }
+        else if (this.stage == 81) { this.awaitPixel(name: "a depth cleared to 0.5 lets a triangle at 0.25 through a less test", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 90); }
+        else if (this.stage == 90) { this.render(kind: 7, next: 91); }
+        else if (this.stage == 91) { this.awaitPixel(name: "a depth prepass is stored, and a later pass that loads it draws where an equal test passes", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 100); }
+        else if (this.stage == 100) { this.render(kind: 8, next: 101); }
+        else if (this.stage == 101) { this.awaitPixel(name: "a read-only depth is tested against what an earlier pass stored", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 110); }
+        else if (this.stage == 110) { this.render(kind: 9, next: 111); }
+        else if (this.stage == 111) { this.awaitPixel(name: "a stencil cleared to 1 fails an equal test against the reference 0", want: pixel(r: 0, g: 0, b: 0, a: 0), next: 120); }
+        else if (this.stage == 120) { this.render(kind: 10, next: 121); }
+        else if (this.stage == 121) { this.awaitPixel(name: "a stencil loaded keeps the 1 an earlier pass stored", want: pixel(r: 0, g: 0, b: 0, a: 0), next: 130); }
+        else if (this.stage == 130) { this.render(kind: 11, next: 131); }
+        else if (this.stage == 131) { this.awaitPixel(name: "a front face meets the front stencil test, not the back: Never in front and Always behind draws nothing", want: pixel(r: 0, g: 0, b: 0, a: 0), next: 140); }
+        else if (this.stage == 140) { this.render(kind: 12, next: 141); }
+        else if (this.stage == 141) { this.awaitPixel(name: "a depth bias slope scale of 4 pushes a sloped triangle behind a depth of 0.5", want: pixel(r: 0, g: 0, b: 0, a: 0), next: 150); }
+        else if (this.stage == 150) { this.render(kind: 13, next: 151); }
+        else if (this.stage == 151) { this.awaitPixel(name: "a back face meets the back stencil test, not the front: with clockwise front faces, Always in front and Never behind draws nothing", want: pixel(r: 0, g: 0, b: 0, a: 0), next: 200); }
+        else if (this.stage == 200) { this.refused(kind: 0, label: "nan colour", next: 201); }
+        else if (this.stage == 201) { this.awaitOne(name: "a NaN clear colour is a validation error at finish in the package's words, not the end of a web program", label: "nan colour", says: "not a finite number", next: 210); }
+        else if (this.stage == 210) { this.refused(kind: 1, label: "infinite colour", next: 211); }
+        else if (this.stage == 211) { this.awaitOne(name: "an infinite clear colour is a validation error at finish in the package's words, not the end of a web program", label: "infinite colour", says: "not a finite number", next: 220); }
+        else if (this.stage == 220) { this.refused(kind: 2, label: "nan depth", next: 221); }
+        else if (this.stage == 221) { this.awaitOne(name: "a NaN depth clear value is a validation error at finish in the package's words, not the end of a web program", label: "nan depth", says: "not a finite number", next: 230); }
+        else if (this.stage == 230) { this.refused(kind: 3, label: "infinite depth", next: 231); }
+        else if (this.stage == 231) { this.awaitOne(name: "a -inf depth clear value is a validation error at finish in the package's words, not the end of a web program", label: "infinite depth", says: "not a finite number", next: 240); }
+        else if (this.stage == 240) { this.refused(kind: 4, label: "stencil without stencil", next: 241); }
+        else if (this.stage == 241) { this.awaitOne(name: "stencil ops on a Depth24Plus view are a validation error at finish in the package's words, where wgpu-native takes them", label: "stencil without stencil", says: "has no stencil", next: 250); }
+        else if (this.stage == 250) { this.refused(kind: 5, label: "depth without depth", next: 251); }
+        else if (this.stage == 251) { this.awaitOne(name: "depth ops on a Stencil8 view are a validation error at finish in the package's words, where wgpu-native takes them", label: "depth without depth", says: "has no depth", next: 260); }
+        else if (this.stage == 260) { this.refused(kind: 6, label: "after a bad copy", next: 261); }
+        else if (this.stage == 261) { this.awaitEarlier(next: 270); }
+        else if (this.stage == 270) { this.refused(kind: 7, label: "before a bad copy", next: 271); }
+        else if (this.stage == 271) { this.awaitOne(name: "a refused pass before the encoder's own error: the refusal is the one reported", label: "before a bad copy", says: "not a finite number", next: 280); }
+        else if (this.stage == 280) { this.refused(kind: 8, label: "scoped", next: 281); }
+        else if (this.stage == 281) { this.awaitScoped(next: 300); }
+        else if (this.stage == 300) { this.misused(kind: 0, label: "slice of 2D", next: 301); }
+        else if (this.stage == 301) { this.awaitNamed(name: "a depth slice on a 2D view is a validation error at finish", label: "slice of 2D", next: 310); }
+        else if (this.stage == 310) { this.misused(kind: 1, label: "slice of the rest", next: 311); }
+        else if (this.stage == 311) { this.awaitSliceOfTheRest(next: 320); }
+        else if (this.stage == 320) { this.misused(kind: 2, label: "depth of 2", next: 321); }
+        else if (this.stage == 321) { this.awaitNamed(name: "a depth clear value of 2 is a validation error at finish", label: "depth of 2", next: 330); }
+        else if (this.stage == 330) { this.misused(kind: 3, label: "depth unsaid", next: 331); }
+        else if (this.stage == 331) { this.awaitNamed(name: "a depth format given no depth access is a validation error at finish", label: "depth unsaid", next: 340); }
+        else if (this.stage == 340) { this.misused(kind: 4, label: "bare pass", next: 341); }
+        else if (this.stage == 341) { this.awaitNamed(name: "a pass with no attachments is a validation error at finish", label: "bare pass", next: 999); }
+        return this.stage >= 999;
+    }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
+
+    unsafe fn void open() {
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.make(power: PowerPreference::Default)));
+                this.instance = Optional::Some(value: give inst);
+                this.next(to: 1);
+            }
+            case Err(error: e): { string why = e.message(); this.found.add(name: "an instance for the pass cases", why: give why); this.next(to: 999); }
+        };
+    }
+
+    unsafe fn void awaitAdapter() {
+        if (this.adapterRequest.isNone()) { this.next(to: 999); return; }
+        AdapterStatus s = match (this.adapterRequest) {
+            case Some(value: r): r.poll();
+            case None: AdapterStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.adapterRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(adapter: a): {
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: readOptions()));
+                this.next(to: 2);
+            }
+            case Failed(error: e): {
+                bool none = match (e) { case NoAdapter(words: w): true; case _: false; };
+                if (none && this.optional) {
+                    println(s: "skip the pass cases: there is no WebGPU adapter here (--adapter-optional)");
+                } else {
+                    string why = e.message();
+                    this.found.add(name: "an adapter for the pass cases", why: give why);
+                }
+                this.next(to: 999);
+            }
+        };
+    }
+
+    unsafe fn void awaitDevice() {
+        if (this.deviceRequest.isNone()) { this.next(to: 999); return; }
+        DeviceStatus s = match (this.deviceRequest) {
+            case Some(value: r): r.poll();
+            case None: DeviceStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.deviceRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(device: d, queue: q): {
+                ShaderModuleDescriptor m = ShaderModuleDescriptor.make(wgsl: passWgsl());
+                m.label(text: "pass stages");
+                this.shaders = Optional::Some(value: d.createShaderModule(descriptor: give m));
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+                this.next(to: 10);
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a device for the pass cases", why: give why); this.next(to: 999); }
+        };
+    }
+
+    // An empty command buffer submitted: on the web, what lets a pending error through to the channel.
+    unsafe fn void flush() {
+        match (this.device) {
+            case Some(value: d): {
+                match (this.queue) {
+                    case Some(value: q): { CommandEncoder enc = d.createCommandEncoder(); CommandBuffer cb = give enc.finish(); q.submit(commands: give cb); }
+                    case None: { this.found.add(name: "a pass case flushes through the run's queue", why: "the queue is gone (stage ${this.stage})"); }
+                };
+            }
+            case None: { }
+        };
+    }
+
+    unsafe fn Optional<DeviceErrors> drain() {
+        match (this.device) {
+            case Some(value: d): { return Optional::Some(value: d.takeErrors()); }
+            case None: { return Optional::None; }
+        };
+    }
+
+    // Once QUIET ticks have passed, the channel holds nothing.
+    unsafe fn void awaitNone(const ref string name, int32 next) {
+        if (this.waited < QUIET) { return; }
+        Optional<DeviceErrors> got = this.drain();
+        string why = match (got) {
+            case Some(value: errs): errs.isEmpty() ? "" : "the channel holds " + described(errs: errs);
+            case None: "no device";
+        };
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // Once an error arrives, or SETTLE ticks pass: one validation error, its words naming `label` (and saying `says`).
+    unsafe fn void awaitOne(const ref string name, const ref string label, const ref string says, int32 next) {
+        Optional<DeviceErrors> got = this.drain();
+        bool none = match (got) { case Some(value: errs): errs.isEmpty(); case None: true; };
+        if (none && this.waited < SETTLE) { return; }
+        string why = match (got) {
+            case Some(value: errs): oneNaming(errs: errs, label: label, says: says);
+            case None: "no device";
+        };
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // Once an error arrives, or SETTLE ticks pass: one validation error, which names the pass `label` on a leg whose
+    // pass errors name the pass, and does not on one whose never do.
+    unsafe fn void awaitNamed(const ref string name, const ref string label, int32 next) {
+        Optional<DeviceErrors> got = this.drain();
+        bool none = match (got) { case Some(value: errs): errs.isEmpty(); case None: true; };
+        if (none && this.waited < SETTLE) { return; }
+        string why = match (got) {
+            case Some(value: errs): oneNaming(errs: errs, label: this.named ? label : "", says: "");
+            case None: "no device";
+        };
+        if (why.isEmpty() && !this.named) {
+            string words = match (got) { case Some(value: errs): errs.reports()[0].message(); case None: ""; };
+            if (words.contains(substring: label)) { why = "this leg's pass errors are held to not naming the pass, and this one does: " + words; }
+        }
+        string held = this.named ? ", naming the pass's label" : ", not naming the pass, as wgpu's never do";
+        this.found.add(name: name + held, why: give why);
+        this.next(to: next);
+    }
+
+    // A depth slice of 2^32 - 1 on a 2D view: one validation error, a slice given where none is allowed, not webgpu.h's
+    // "no slice"; and in Firefox, which takes a slice of 2^32 - 2 there, nothing.
+    unsafe fn void awaitSliceOfTheRest(int32 next) {
+        if (this.sliceChecked) {
+            this.awaitNamed(name: "a depth slice of 2^32 - 1 on a 2D view is a validation error at finish, not webgpu.h's no slice", label: "slice of the rest", next: next);
+        } else {
+            this.awaitNone(name: "a depth slice of 2^32 - 1 on a 2D view is taken, as Firefox takes a slice of 2^32 - 2 there (--unchecked-depth-slice)", next: next);
+        }
+    }
+
+    // Passes WebGPU takes, each begun, ended and finished, and the command buffers dropped: no error.
+    unsafe fn void goodPasses() {
+        match (this.device) {
+            case Some(value: d): {
+                int32 kind = 0;
+                while (kind < GOOD_KINDS) {
+                    CommandEncoder encoder = d.createCommandEncoder();
+                    RenderPass pass = encoder.beginRenderPass(descriptor: goodPass(d: d, kind: kind));
+                    give pass.end();
+                    CommandBuffer done = give encoder.finish();
+                    kind = kind + 1;
+                }
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: 11);
+    }
+
+    // `recorded`'s `kind` drawn, its target copied out, submitted and mapped.
+    unsafe fn void render(int32 kind, int32 next) {
+        Optional<Buffer> copied = Optional::None;
+        Optional<BufferRead> started = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): {
+                        uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
+                        Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
+                        CommandEncoder encoder = d.createCommandEncoder();
+                        recorded(d: d, m: m, encoder: encoder, kind: kind, into: b);
+                        CommandBuffer commands = give encoder.finish();
+                        match (this.queue) {
+                            case Some(value: q): { q.submit(commands: give commands); }
+                            case None: { CommandBuffer unsent = give commands; }
+                        };
+                        started = Optional::Some(value: b.mapRead(offset: 0, size: bytes));
+                        copied = Optional::Some(value: give b);
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.readback = give copied;
+        this.reading = give started;
+        this.next(to: next);
+    }
+
+    // The copied target's first texel is `want`, and the channel is empty.
+    unsafe fn void awaitPixel(const ref string name, DynamicArray<uint8> want, int32 next) {
+        match (this.device) { case Some(value: d): { d.poll(wait: true); } case None: { } };
+        ReadStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: ReadStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.waited < SETTLE) { return; }
+        string why = match (s) {
+            case Pending: "the map did not finish";
+            case Failed(error: e): e.message();
+            case Ready: "";
+        };
+        if (why.isEmpty()) {
+            DynamicArray<uint8> got = match (this.reading) { case Some(value: r): firstTexel(r: r); case None: DynamicArray.empty(); };
+            why = sameBytes(got: got, want: want);
+        }
+        Optional<DeviceErrors> errs = this.drain();
+        string heard = match (errs) {
+            case Some(value: e): e.isEmpty() ? "" : "the channel holds " + described(errs: e);
+            case None: "";
+        };
+        if (why.isEmpty()) { why = copy heard; }
+        this.reading = Optional::None;
+        this.readback = Optional::None;
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // An encoder whose pass the package refuses (`refusedPass`'s `kind`), finished and its command buffer dropped. Kind
+    // 6 has the encoder's own error first (a copy into a buffer without CopyDst), kind 7 after the pass, and kind 8 has
+    // a scope open around the whole encoder, popped once it is finished.
+    unsafe fn void refused(int32 kind, const ref string label, int32 next) {
+        Optional<ScopePop> popped = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                Texture target = colorTarget(d: d);
+                Buffer noCopy = d.createBuffer(descriptor: BufferDescriptor.make(size: cast<uint64>(ROW) * cast<uint64>(SIDE), usage: BufferUsage::MapRead));
+                Optional<ErrorScope> catching = Optional::None;
+                if (kind == 8) { catching = Optional::Some(value: d.pushErrorScope(filter: ErrorFilter::Validation)); }
+                CommandEncoder encoder = d.createCommandEncoder();
+                if (kind == 6) { encoder.copyTextureToBuffer(texture: target, buffer: noCopy, width: SIDE, height: SIDE, bytesPerRow: ROW); }
+                RenderPass pass = encoder.beginRenderPass(descriptor: refusedPass(d: d, kind: kind, label: label));
+                give pass.end();
+                if (kind == 7) { encoder.copyTextureToBuffer(texture: target, buffer: noCopy, width: SIDE, height: SIDE, bytesPerRow: ROW); }
+                CommandBuffer done = give encoder.finish();
+                match (give catching) {
+                    case Some(value: c): {
+                        Result<ScopePop, GpuError> ended = give c.pop();
+                        match (give ended) { case Ok(value: p): { popped = Optional::Some(value: give p); } case Err(error: e): { } };
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.around = give popped;
+        this.flush();
+        this.next(to: next);
+    }
+
+    // Once an error arrives, or SETTLE ticks pass: one validation error, the encoder's own copy error, not the refusal
+    // of the pass recorded after it (each backend has its own words for the copy).
+    unsafe fn void awaitEarlier(int32 next) {
+        Optional<DeviceErrors> got = this.drain();
+        bool none = match (got) { case Some(value: errs): errs.isEmpty(); case None: true; };
+        if (none && this.waited < SETTLE) { return; }
+        string why = match (got) {
+            case Some(value: errs): oneNaming(errs: errs, label: "", says: "");
+            case None: "no device";
+        };
+        if (why.isEmpty()) {
+            string words = match (got) { case Some(value: errs): errs.reports()[0].message(); case None: ""; };
+            if (words.contains(substring: "not a finite number")) { why = "the refusal was reported, not the earlier error: " + words; }
+        }
+        this.found.add(name: "a refused pass after the encoder's own error: that earlier error is the one reported, as WebGPU's order has it", why: give why);
+        this.next(to: next);
+    }
+
+    // The scope around a refused encoder caught the refusal, in the package's words, and the channel holds nothing.
+    unsafe fn void awaitScoped(int32 next) {
+        PopStatus s = match (this.around) { case Some(value: p): p.poll(); case None: PopStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if ((pending || this.waited < QUIET) && this.waited < SETTLE) { return; }
+        string why = "";
+        match (give s) {
+            case Pending: { why = "the pop was not answered"; }
+            case Failed(error: e): { string failed = e.message(); why = "the pop failed: " + failed; }
+            case Ready(caught: c): {
+                match (c) {
+                    case Some(value: r): {
+                        string words = r.message();
+                        if (!words.contains(substring: "not a finite number")) { why = "it caught another error: " + words; }
+                    }
+                    case None: { why = "it caught nothing"; }
+                };
+            }
+        };
+        Optional<DeviceErrors> errs = this.drain();
+        string heard = match (errs) {
+            case Some(value: e): e.isEmpty() ? "" : "the channel holds " + described(errs: e);
+            case None: "";
+        };
+        if (why.isEmpty()) { why = copy heard; }
+        this.around = Optional::None;
+        this.found.add(name: "a scope open around an encoder catches its pass's refusal at finish, in the package's words, and the channel holds nothing", why: give why);
+        this.next(to: next);
+    }
+
+    // An encoder whose pass WebGPU refuses (`misusedPass`'s `kind`), finished and its command buffer dropped.
+    unsafe fn void misused(int32 kind, const ref string label, int32 next) {
+        match (this.device) {
+            case Some(value: d): {
+                CommandEncoder encoder = d.createCommandEncoder();
+                RenderPass pass = encoder.beginRenderPass(descriptor: misusedPass(d: d, kind: kind, label: label));
+                give pass.end();
+                CommandBuffer done = give encoder.finish();
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: next);
+    }
+}
+
+comptime int32 GOOD_KINDS = 12;
+
+// A SIDE by SIDE target of `format`, its usage `usage`, `layers` deep in `dim`, at `samples`.
+unsafe fn Texture madeTexture(ref Device d, TextureFormat format, TextureUsage usage, TextureDimension dim, uint32 layers, uint32 samples) {
+    TextureDescriptor t = TextureDescriptor.make(width: SIDE, height: SIDE, format: format, usage: usage);
+    t.dimension(kind: dim);
+    t.depthOrArrayLayers(count: layers);
+    t.sampleCount(count: samples);
+    return d.createTexture(descriptor: give t);
+}
+unsafe fn Texture colorTarget(ref Device d) {
+    return madeTexture(d: d, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc,
+                       dim: TextureDimension::D2, layers: 1, samples: 1);
+}
+unsafe fn Texture depthTarget(ref Device d, TextureFormat format) {
+    return madeTexture(d: d, format: format, usage: TextureUsage::RenderAttachment, dim: TextureDimension::D2, layers: 1, samples: 1);
+}
+unsafe fn TextureView wholeView(ref Texture t) { return t.createView(descriptor: TextureViewDescriptor.make()); }
+
+// One colour attachment, and a pass of it.
+fn RenderPassDescriptor passOf(ColorAttachment attachment) {
+    RenderPassDescriptor p = RenderPassDescriptor.make();
+    p.color(attachment: give attachment);
+    return p;
+}
+// A pass of a colour attachment cleared to nothing and a depth-stencil attachment.
+unsafe fn RenderPassDescriptor withDepth(ref Texture color, DepthStencilAttachment depth) {
+    RenderPassDescriptor p = passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: nothing()));
+    p.depthStencil(attachment: give depth);
+    return p;
+}
+// A pass of a depth-stencil attachment alone.
+fn RenderPassDescriptor depthAlone(DepthStencilAttachment depth) {
+    RenderPassDescriptor p = RenderPassDescriptor.make();
+    p.depthStencil(attachment: give depth);
+    return p;
+}
+
+// The passes WebGPU takes, by kind.
+unsafe fn RenderPassDescriptor goodPass(ref Device d, int32 kind) {
+    Texture color = colorTarget(d: d);
+    if (kind == 0) { return passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: fifths())); }
+    if (kind == 1) { return passOf(attachment: ColorAttachment.make(view: wholeView(t: color), load: LoadOp::Load, store: StoreOp::Store)); }
+    if (kind == 2) { return passOf(attachment: ColorAttachment.make(view: wholeView(t: color), load: LoadOp::Clear(color: fifths()), store: StoreOp::Discard)); }
+    if (kind == 3) {
+        Texture four = madeTexture(d: d, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::RenderAttachment, dim: TextureDimension::D2, layers: 1, samples: 4);
+        ColorAttachment a = ColorAttachment.make(view: wholeView(t: four), load: LoadOp::Clear(color: fifths()), store: StoreOp::Discard);
+        a.resolveTarget(view: wholeView(t: color));
+        return passOf(attachment: give a);
+    }
+    if (kind == 4) {
+        Texture deep = madeTexture(d: d, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::RenderAttachment, dim: TextureDimension::D3, layers: 2, samples: 1);
+        ColorAttachment a = ColorAttachment.clearing(view: wholeView(t: deep), color: fifths());
+        a.depthSlice(slice: 1);
+        return passOf(attachment: give a);
+    }
+    if (kind == 5) {
+        RenderPassDescriptor p = RenderPassDescriptor.make();
+        p.emptyColor();
+        p.color(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: fifths()));
+        return p;
+    }
+    if (kind == 6) {
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth24Plus);
+        return depthAlone(depth: DepthStencilAttachment.clearingDepth(view: wholeView(t: depth), value: 1.0));
+    }
+    if (kind == 7) {
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth24Plus);
+        DepthStencilAttachment a = DepthStencilAttachment.make(view: wholeView(t: depth));
+        a.depth(access: DepthAccess::ReadOnly);
+        return withDepth(color: color, depth: give a);
+    }
+    if (kind == 8) {
+        Texture both = depthTarget(d: d, format: TextureFormat::Depth24PlusStencil8);
+        DepthStencilAttachment a = DepthStencilAttachment.make(view: wholeView(t: both));
+        a.depth(access: DepthAccess::ReadWrite(load: DepthLoad::Load, store: StoreOp::Discard));
+        a.stencil(access: StencilAccess::ReadWrite(load: StencilLoad::Clear(value: 7), store: StoreOp::Store));
+        return withDepth(color: color, depth: give a);
+    }
+    if (kind == 9) {
+        Texture stencil = depthTarget(d: d, format: TextureFormat::Stencil8);
+        DepthStencilAttachment a = DepthStencilAttachment.make(view: wholeView(t: stencil));
+        a.stencil(access: StencilAccess::ReadWrite(load: StencilLoad::Load, store: StoreOp::Store));
+        return depthAlone(depth: give a);
+    }
+    if (kind == 10) {
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth24Plus);
+        DepthStencilAttachment a = DepthStencilAttachment.clearingDepth(view: wholeView(t: depth), value: 0.0);
+        a.stencil(access: StencilAccess::ReadOnly);
+        return depthAlone(depth: give a);
+    }
+    // both aspects of Depth24PlusStencil8 read-only
+    Texture both = depthTarget(d: d, format: TextureFormat::Depth24PlusStencil8);
+    DepthStencilAttachment a = DepthStencilAttachment.make(view: wholeView(t: both));
+    a.depth(access: DepthAccess::ReadOnly);
+    a.stencil(access: StencilAccess::ReadOnly);
+    return withDepth(color: color, depth: give a);
+}
+
+// The read-back cases, recorded into `encoder`: each ends with its colour copied into `into`.
+unsafe fn void recorded(ref Device d, ref ShaderModule m, ref CommandEncoder encoder, int32 kind, const ref Buffer into) {
+    Texture color = colorTarget(d: d);
+    if (kind == 0) {
+        // cleared, every channel its own
+        RenderPass pass = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: fifths())));
+        give pass.end();
+    } else if (kind == 1) {
+        // cleared and stored, then loaded and stored by a pass that draws nothing
+        RenderPass first = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: fifths())));
+        give first.end();
+        RenderPass second = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.make(view: wholeView(t: color), load: LoadOp::Load, store: StoreOp::Store)));
+        give second.end();
+    } else if (kind == 2) {
+        // cleared and discarded
+        RenderPass pass = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.make(view: wholeView(t: color), load: LoadOp::Clear(color: fifths()), store: StoreOp::Discard)));
+        give pass.end();
+    } else if (kind == 3) {
+        // four samples cleared, discarded, and resolved into the target
+        Texture four = madeTexture(d: d, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::RenderAttachment, dim: TextureDimension::D2, layers: 1, samples: 4);
+        ColorAttachment a = ColorAttachment.make(view: wholeView(t: four), load: LoadOp::Clear(color: fifths()), store: StoreOp::Discard);
+        a.resolveTarget(view: wholeView(t: color));
+        RenderPass pass = encoder.beginRenderPass(descriptor: passOf(attachment: give a));
+        give pass.end();
+    } else if (kind == 4) {
+        // a 3D target's slice 0 cleared, then slice 1 cleared to another colour; slice 0 is copied
+        Texture deep = madeTexture(d: d, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc,
+                                   dim: TextureDimension::D3, layers: 2, samples: 1);
+        ColorAttachment zero = ColorAttachment.clearing(view: wholeView(t: deep), color: fifths());
+        zero.depthSlice(slice: 0);
+        RenderPass first = encoder.beginRenderPass(descriptor: passOf(attachment: give zero));
+        give first.end();
+        ColorAttachment one = ColorAttachment.clearing(view: wholeView(t: deep), color: Color.of(r: 1.0, g: 1.0, b: 1.0, a: 1.0));
+        one.depthSlice(slice: 1);
+        RenderPass second = encoder.beginRenderPass(descriptor: passOf(attachment: give one));
+        give second.end();
+        encoder.copyTextureToBuffer(texture: deep, buffer: into, width: SIDE, height: SIDE, bytesPerRow: ROW);
+        return;
+    } else if (kind == 5) {
+        // an empty first attachment, and a pipeline with an empty first target writing location 1 into the second
+        RenderPassDescriptor p = RenderPassDescriptor.make();
+        p.emptyColor();
+        p.color(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: nothing()));
+        RenderPipeline second = d.createRenderPipeline(descriptor: passPipeline(m: m, kind: 7));
+        RenderPass pass = encoder.beginRenderPass(descriptor: give p);
+        pass.setPipeline(pipeline: second);
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    } else if (kind == 6) {
+        // depth cleared to 0.5, a triangle at 0.25 through a less test
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth32Float);
+        RenderPipeline tested = d.createRenderPipeline(descriptor: passPipeline(m: m, kind: 1));
+        RenderPass pass = encoder.beginRenderPass(descriptor: withDepth(color: color, depth: DepthStencilAttachment.clearingDepth(view: wholeView(t: depth), value: 0.5)));
+        pass.setPipeline(pipeline: tested);
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    } else if (kind == 7) {
+        // a depth prepass at 0.25 over a depth of 1, stored; then the depth loaded and the triangle drawn with an equal test
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth32Float);
+        RenderPipeline prepass = d.createRenderPipeline(descriptor: passPipeline(m: m, kind: 2));
+        RenderPipeline equal = d.createRenderPipeline(descriptor: passPipeline(m: m, kind: 3));
+        RenderPass first = encoder.beginRenderPass(descriptor: depthAlone(depth: DepthStencilAttachment.clearingDepth(view: wholeView(t: depth), value: 1.0)));
+        first.setPipeline(pipeline: prepass);
+        first.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give first.end();
+        DepthStencilAttachment loaded = DepthStencilAttachment.make(view: wholeView(t: depth));
+        loaded.depth(access: DepthAccess::ReadWrite(load: DepthLoad::Load, store: StoreOp::Store));
+        RenderPass second = encoder.beginRenderPass(descriptor: withDepth(color: color, depth: give loaded));
+        second.setPipeline(pipeline: equal);
+        second.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give second.end();
+    } else if (kind == 8) {
+        // depth cleared to 0.5 and stored; then read-only, a triangle at 0.25 through a less test that writes no depth
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth32Float);
+        RenderPipeline tested = d.createRenderPipeline(descriptor: passPipeline(m: m, kind: 1));
+        RenderPass first = encoder.beginRenderPass(descriptor: depthAlone(depth: DepthStencilAttachment.clearingDepth(view: wholeView(t: depth), value: 0.5)));
+        give first.end();
+        DepthStencilAttachment readOnly = DepthStencilAttachment.make(view: wholeView(t: depth));
+        readOnly.depth(access: DepthAccess::ReadOnly);
+        RenderPass second = encoder.beginRenderPass(descriptor: withDepth(color: color, depth: give readOnly));
+        second.setPipeline(pipeline: tested);
+        second.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give second.end();
+    } else if (kind == 9) {
+        // stencil cleared to 1, a triangle through an equal test against the reference 0
+        Texture stencil = depthTarget(d: d, format: TextureFormat::Stencil8);
+        RenderPipeline equal = d.createRenderPipeline(descriptor: passPipeline(m: m, kind: 4));
+        DepthStencilAttachment cleared = DepthStencilAttachment.make(view: wholeView(t: stencil));
+        cleared.stencil(access: StencilAccess::ReadWrite(load: StencilLoad::Clear(value: 1), store: StoreOp::Store));
+        RenderPass pass = encoder.beginRenderPass(descriptor: withDepth(color: color, depth: give cleared));
+        pass.setPipeline(pipeline: equal);
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    } else if (kind == 10) {
+        // stencil cleared to 1 and stored; then loaded, a triangle through an equal test against the reference 0
+        Texture stencil = depthTarget(d: d, format: TextureFormat::Stencil8);
+        RenderPipeline equal = d.createRenderPipeline(descriptor: passPipeline(m: m, kind: 4));
+        DepthStencilAttachment cleared = DepthStencilAttachment.make(view: wholeView(t: stencil));
+        cleared.stencil(access: StencilAccess::ReadWrite(load: StencilLoad::Clear(value: 1), store: StoreOp::Store));
+        RenderPass first = encoder.beginRenderPass(descriptor: depthAlone(depth: give cleared));
+        give first.end();
+        DepthStencilAttachment loaded = DepthStencilAttachment.make(view: wholeView(t: stencil));
+        loaded.stencil(access: StencilAccess::ReadWrite(load: StencilLoad::Load, store: StoreOp::Store));
+        RenderPass second = encoder.beginRenderPass(descriptor: withDepth(color: color, depth: give loaded));
+        second.setPipeline(pipeline: equal);
+        second.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give second.end();
+    } else if (kind == 11 || kind == 13) {
+        // stencil cleared to 0; the front face Never, the back Always; or, with clockwise front faces, the triangle a
+        // back face, Always in front and Never behind
+        Texture stencil = depthTarget(d: d, format: TextureFormat::Stencil8);
+        RenderPipeline faces = d.createRenderPipeline(descriptor: passPipeline(m: m, kind: kind == 11 ? 5 : 8));
+        DepthStencilAttachment cleared = DepthStencilAttachment.make(view: wholeView(t: stencil));
+        cleared.stencil(access: StencilAccess::ReadWrite(load: StencilLoad::Clear(value: 0), store: StoreOp::Store));
+        RenderPass pass = encoder.beginRenderPass(descriptor: withDepth(color: color, depth: give cleared));
+        pass.setPipeline(pipeline: faces);
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    } else {
+        // depth cleared to 0.5, the sloped triangle (0.0625 at the first texel) biased by a slope scale of 4
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth32Float);
+        RenderPipeline sloped = d.createRenderPipeline(descriptor: passPipeline(m: m, kind: 6));
+        RenderPass pass = encoder.beginRenderPass(descriptor: withDepth(color: color, depth: DepthStencilAttachment.clearingDepth(view: wholeView(t: depth), value: 0.5)));
+        pass.setPipeline(pipeline: sloped);
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    }
+    encoder.copyTextureToBuffer(texture: color, buffer: into, width: SIDE, height: SIDE, bytesPerRow: ROW);
+}
+
+// The read-back cases' pipelines, by kind: 1 a less test on Depth32Float writing no depth; 2 a depth-only prepass
+// writing depth; 3 an equal test writing no depth; 4 a stencil equal test on both faces of Stencil8; 5 Never in front
+// and Always behind; 6 the sloped triangle, biased by a slope scale of 4, through a less test; 7 an empty first target
+// and `fs1` into the second; 8 clockwise front faces, Always in front and Never behind.
+unsafe fn RenderPipelineDescriptor passPipeline(ref ShaderModule m, int32 kind) {
+    string entry = kind == 6 ? "vsSlope" : "vs0";
+    RenderPipelineDescriptor p = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: VertexState.make(module: copy m, entryPoint: give entry));
+    if (kind != 2) {
+        FragmentState f = FragmentState.make(module: copy m, entryPoint: kind == 7 ? "fs1" : "fs");
+        if (kind == 7) { f.emptyTarget(); }
+        f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+        p.fragment(state: give f);
+    }
+    if (kind == 1 || kind == 6) {
+        DepthStencilState s = DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: false, depthCompare: CompareFunction::Less);
+        if (kind == 6) { s.depthBiasSlopeScale = 4.0; }
+        p.depthStencil(state: s);
+    } else if (kind == 2) {
+        p.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true, depthCompare: CompareFunction::Less));
+    } else if (kind == 3) {
+        p.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: false, depthCompare: CompareFunction::Equal));
+    } else if (kind == 4 || kind == 5) {
+        DepthStencilState s = DepthStencilState.make(format: TextureFormat::Stencil8, depthWriteEnabled: false, depthCompare: CompareFunction::Always);
+        s.stencilFront.compare = kind == 4 ? CompareFunction::Equal : CompareFunction::Never;
+        s.stencilBack.compare = kind == 4 ? CompareFunction::Equal : CompareFunction::Always;
+        p.depthStencil(state: s);
+    } else if (kind == 8) {
+        DepthStencilState s = DepthStencilState.make(format: TextureFormat::Stencil8, depthWriteEnabled: false, depthCompare: CompareFunction::Always);
+        s.stencilFront.compare = CompareFunction::Always;
+        s.stencilBack.compare = CompareFunction::Never;
+        p.depthStencil(state: s);
+        p.primitiveMut().frontFace = FrontFace::CW;
+    }
+    return p;
+}
+
+// The passes the package refuses, by kind: 0 a NaN green; 1 an infinite alpha; 2 a NaN depth clear value; 3 a -inf
+// one; 4 stencil ops on Depth24Plus; 5 depth ops on Stencil8; 6 to 8 a NaN red, for the order and the scope.
+unsafe fn RenderPassDescriptor refusedPass(ref Device d, int32 kind, const ref string label) {
+    Texture color = colorTarget(d: d);
+    RenderPassDescriptor p = RenderPassDescriptor.make();
+    if (kind == 0) {
+        p = passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: Color.of(r: 0.0, g: notANumber(), b: 0.0, a: 1.0)));
+    } else if (kind == 1) {
+        p = passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: Color.of(r: 0.0, g: 0.0, b: 0.0, a: infinity(sign: 1.0))));
+    } else if (kind == 2 || kind == 3) {
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth24Plus);
+        float32 v = kind == 2 ? notANumber32() : infinity32(sign: -1.0);
+        p = withDepth(color: color, depth: DepthStencilAttachment.clearingDepth(view: wholeView(t: depth), value: v));
+    } else if (kind == 4) {
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth24Plus);
+        DepthStencilAttachment a = DepthStencilAttachment.clearingDepth(view: wholeView(t: depth), value: 1.0);
+        a.stencil(access: StencilAccess::ReadWrite(load: StencilLoad::Clear(value: 0), store: StoreOp::Store));
+        p = withDepth(color: color, depth: give a);
+    } else if (kind == 5) {
+        Texture stencil = depthTarget(d: d, format: TextureFormat::Stencil8);
+        DepthStencilAttachment a = DepthStencilAttachment.make(view: wholeView(t: stencil));
+        a.stencil(access: StencilAccess::ReadWrite(load: StencilLoad::Clear(value: 0), store: StoreOp::Store));
+        a.depth(access: DepthAccess::ReadWrite(load: DepthLoad::Clear(value: 1.0), store: StoreOp::Store));
+        p = withDepth(color: color, depth: give a);
+    } else {
+        p = passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: Color.of(r: notANumber(), g: 0.0, b: 0.0, a: 1.0)));
+    }
+    p.label(text: copy label);
+    return p;
+}
+
+// The passes WebGPU refuses, by kind: 0 a depth slice on a 2D view; 1 a slice of 2^32 - 1 on one, webgpu.h's "no
+// slice"; 2 a depth clear value of 2; 3 a Depth24Plus attachment given no depth access; 4 no attachments.
+unsafe fn RenderPassDescriptor misusedPass(ref Device d, int32 kind, const ref string label) {
+    Texture color = colorTarget(d: d);
+    RenderPassDescriptor p = RenderPassDescriptor.make();
+    if (kind == 0 || kind == 1) {
+        ColorAttachment a = ColorAttachment.clearing(view: wholeView(t: color), color: nothing());
+        a.depthSlice(slice: kind == 0 ? 0 : 0xFFFFFFFF);
+        p = passOf(attachment: give a);
+    } else if (kind == 2) {
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth24Plus);
+        p = withDepth(color: color, depth: DepthStencilAttachment.clearingDepth(view: wholeView(t: depth), value: 2.0));
+    } else if (kind == 3) {
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth24Plus);
+        p = withDepth(color: color, depth: DepthStencilAttachment.make(view: wholeView(t: depth)));
+    }
+    p.label(text: copy label);
+    return p;
+}
+
+// The red, green, blue and alpha bytes of one RGBA8Unorm texel.
+fn DynamicArray<uint8> pixel(uint8 r, uint8 g, uint8 b, uint8 a) {
+    DynamicArray<uint8> p = DynamicArray.empty();
+    p.add(item: r);
+    p.add(item: g);
+    p.add(item: b);
+    p.add(item: a);
+    return p;
+}
+
+// The first texel's four bytes of a mapped copy.
+unsafe fn DynamicArray<uint8> firstTexel(const ref BufferRead r) {
+    DynamicArray<uint8> all = r.bytes();
+    DynamicArray<uint8> four = DynamicArray.empty();
+    isize i = 0;
+    while (i < 4 && i < all.length()) { four.add(item: all[i]); i = i + 1; }
+    return four;
+}
+
+fn string sameBytes(const ref DynamicArray<uint8> got, const ref DynamicArray<uint8> want) {
+    if (got.length() != want.length()) {
+        isize g = got.length();
+        isize w = want.length();
+        return "${g} bytes, not ${w}";
+    }
+    isize i = 0;
+    while (i < got.length()) {
+        if (got[i] != want[i]) {
+            uint8 a = got[i];
+            uint8 b = want[i];
+            return "byte ${i} is ${a}, not ${b}";
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+// The channel's reports, for a failure's words.
+fn string described(const ref DeviceErrors errs) {
+    isize n = errs.reports().length();
+    if (n == 0) { return "nothing"; }
+    string first = errs.reports()[0].message();
+    return "${n} report(s), the first: ${first}";
+}
+
+// "" when `errs` holds one validation error whose words name `label`, and say `says` when it is not "".
+fn string oneNaming(const ref DeviceErrors errs, const ref string label, const ref string says) {
+    if (errs.reports().length() != 1) { return "want one error; " + described(errs: errs); }
+    bool validation = match (errs.reports()[0].kind()) { case Validation: true; case _: false; };
+    string words = errs.reports()[0].message();
+    if (!validation) { return "not a validation error: ${words}"; }
+    if (!words.contains(substring: label)) { return "its words do not name `${label}`: ${words}"; }
+    if (!says.isEmpty() && !words.contains(substring: says)) { return "its words do not say `${says}`: ${words}"; }
+    return "";
+}

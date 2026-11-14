@@ -135,15 +135,16 @@ else
     # Under `kama run` (AGENTS.gpu.md item 11), bounded since it has no time limit of its own: Edge and Chrome as
     # installed, and the pinned Firefox, whose headless page has WebGPU since kama 0.9.940 sets its pref (kyoten's
     # KY-54, fixed), so every leg runs every case, the printErrors check and the clear. Firefox differs from Dawn in
-    # three ways its run passes: it has no immediates, so maxImmediateSize is held to 0 (--no-immediates); its WGSL
-    # compiler is naga, which gives no warnings (--no-shader-warnings); and a buffer of 2^53 - 256 bytes is an
-    # OutOfMemory error there (--huge-buffer-out-of-memory).
+    # five ways its run passes: it has no immediates, so maxImmediateSize is held to 0 (--no-immediates); its WGSL
+    # compiler is naga, which gives no warnings (--no-shader-warnings); a buffer of 2^53 - 256 bytes is an OutOfMemory
+    # error there (--huge-buffer-out-of-memory); its render pass errors never name the pass (--unnamed-pass-errors); and
+    # it takes a depth slice of 2^32 - 2 on a 2D view (--unchecked-depth-slice).
     if browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
         while IFS= read -r browser; do
             name="${browser##*[/\\]}"
             differences=()
             if [[ "${name,,}" == *firefox* ]]; then
-                differences=(--no-immediates --no-shader-warnings --huge-buffer-out-of-memory)
+                differences=(--no-immediates --no-shader-warnings --huge-buffer-out-of-memory --unnamed-pass-errors --unchecked-depth-slice)
             fi
             echo "-- kama run, $browser ${differences[*]}"
             KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless -- "${differences[@]}" 2>&1 | tee tests/out/run-web.log || failed=1

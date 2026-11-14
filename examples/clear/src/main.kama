@@ -21,7 +21,7 @@ import {
     gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::DeviceOptions,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::PowerPreference,
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
-    gpu::ConfigureError, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass, gpu::CommandBuffer, gpu::Color,
+    gpu::ConfigureError, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment, gpu::CommandBuffer, gpu::Color,
     gpu::DeviceErrors,
     window::Window, window::WindowOptions, window::WindowError, window::Event, window::Key,
 };
@@ -236,7 +236,9 @@ type resource Clear implements App {
                         match (this.queue) {
                             case Some(value: q): {
                                 CommandEncoder encoder = d.createCommandEncoder();
-                                RenderPass pass = encoder.beginRenderPass(target: view, clear: Color.of(r: t, g: 0.3, b: 1.0 - t, a: 1.0));
+                                RenderPassDescriptor passing = RenderPassDescriptor.make();
+                                passing.color(attachment: ColorAttachment.clearing(view: copy view, color: Color.of(r: t, g: 0.3, b: 1.0 - t, a: 1.0)));
+                                RenderPass pass = encoder.beginRenderPass(descriptor: give passing);
                                 give pass.end();
                                 CommandBuffer commands = give encoder.finish();
                                 q.submit(commands: give commands);

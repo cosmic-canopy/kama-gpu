@@ -691,10 +691,12 @@ int32_t gpuseam_adapter_mark_consumed(gpuseam_adapter_mark *m) {
 
 // ---- a refusal reported, a substitute call quieted ------------------------------------------------------------------
 
-void gpuseam_refuse(WGPUDevice device, const uint8_t *message, int32_t length) {
-    if (device == NULL || message == NULL || length <= 0) return;
+// A carrier for the refusal `message`: a 4-byte buffer made with `usage` and labelled with the refusal's id, its words
+// kept for `report_of`. NULL when there is no device, no words, or no memory for them.
+static WGPUBuffer carrier_of(WGPUDevice device, const uint8_t *message, int32_t length, WGPUBufferUsage usage) {
+    if (device == NULL || message == NULL || length <= 0) return NULL;
     char *copy = (char *)malloc((size_t)length);
-    if (copy == NULL) return;
+    if (copy == NULL) return NULL;
     memcpy(copy, message, (size_t)length);
     carried_lock();
     uint32_t id = g_carried_next++;
@@ -711,9 +713,26 @@ void gpuseam_refuse(WGPUDevice device, const uint8_t *message, int32_t length) {
     d.label.data = label;
     d.label.length = n > 0 ? (size_t)n : 0;
     d.size = 4;
-    d.usage = WGPUBufferUsage_None;
-    WGPUBuffer carrier = wgpuDeviceCreateBuffer(device, &d);
+    d.usage = usage;
+    return wgpuDeviceCreateBuffer(device, &d);
+}
+
+void gpuseam_refuse(WGPUDevice device, const uint8_t *message, int32_t length) {
+    // a buffer with no usage, which the device refuses as it is made
+    WGPUBuffer carrier = carrier_of(device, message, length, WGPUBufferUsage_None);
     if (carrier != NULL) wgpuBufferRelease(carrier);
+}
+
+// Inside a pass the refused command never reaches the backend, and the carrier takes its place as vertex buffer 0: a
+// valid buffer made for copies alone, so its usage error is found in command order on both legs, as every other error
+// in the pass is, and lands at `finish` unless an earlier one did (kyoten's .scratch/gpu4-part4/FINDINGS.md: an
+// invalid carrier is reported first natively, whatever came before it).
+void gpuseam_refuse_in_pass(WGPURenderPassEncoder pass, WGPUDevice device, const uint8_t *message, int32_t length) {
+    if (pass == NULL) return;
+    WGPUBuffer carrier = carrier_of(device, message, length, WGPUBufferUsage_CopyDst);
+    if (carrier == NULL) return;
+    wgpuRenderPassEncoderSetVertexBuffer(pass, 0, carrier, 0, WGPU_WHOLE_SIZE);
+    wgpuBufferRelease(carrier);
 }
 
 #ifdef __EMSCRIPTEN__
