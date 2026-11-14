@@ -42,10 +42,11 @@ which of webgpu.h it calls.** In short (2026-11-13, kama 0.9.943): offscreen wor
 on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 95 of webgpu.h's 206 functions, a device's
 errors reach its own holders (GPU-1), a surface holds its window (GPU-2), an acquire before a configure is refused
 (GPU-13), an adapter gives one device and a surface is configured at its window's size (GPU-3), and Firefox's
-differences from Dawn are handled (GPU-14). GPU-4, the render pipeline set, is decided (item 12) and under way: parts 1
-to 3 are built (shader modules; layouts, bind groups, samplers and `writeBuffer`; render pipelines both ways, with
-`printErrors`). Part 4 is built (decisions 11 to 14): textures, views and the pass by description, and the pass's eight
-commands. Part 5, `examples/triangle`, comes next. `tools/test.sh` passes before every commit.
+differences from Dawn are handled (GPU-14). **GPU-4, the render pipeline set, is built** (item 12, decisions 1 to 15),
+in five parts: shader modules; layouts, bind groups, samplers and `writeBuffer`; render pipelines both ways, with
+`printErrors`; textures, views and the pass by description, and the pass's eight commands; and `examples/triangle`,
+whose last frame is read back from its window on every leg. Nothing is under way here: `@kama/graphics`' GFX-1, the lit
+cube, comes next, and the row it pulls first moves into ROADMAP.md's NOW. `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
 
@@ -1401,6 +1402,75 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       again from an interactive UCRT64 shell and each failed on its own.
     - **Results:** `tests/` is 301 cases natively, debug and release, and 278 in Edge, in Firefox and in Chrome for
       Testing. COVERAGE.md: 95 of 206, with `drawIndexed` and the seven `set` commands called.
+
+    **Decided by the owner on 2026-11-13 (kyoten's twenty-first session), as recommended,** asked in full in the chat
+    before part 5 was built ("B, as recommended"):
+    15. **`examples/triangle` reads its own window back.** "60 frames presented with no WebGPU error", all that
+        `examples/clear` holds, is also what a frame with nothing drawn gives. A sample mask of 0 draws nothing, silently,
+        on both legs (the probe above), and so do a wrong stride, a wrong index format or a spin never written. The tests
+        prove each piece apart, offscreen; nothing proved a triangle drawn through them into a window, which is what a
+        user sees. So under `--frames N` the example copies its last frame out of the window before presenting it, with
+        the surface's `CopySrc` (offered on every leg measured, GPU-3), reads it back and checks its pixels. The check is
+        a file of its own, so `main.kama` still reads as the example, and the gate fails a run whose output lacks the
+        read back's line, so a run cannot pass by skipping it. It is the first form of the frame capture
+        `@kama/graphics`' golden harness needs.
+
+    **Built on 2026-11-13 (kyoten's twenty-first session), part 5 of 5: `examples/triangle`** (decision 15, with 1, 4
+    and 11), test-first. **GPU-4 is built.**
+    - **Red first, twice.** The gate's step went in before the example and failed for want of it. The example then came
+      with its check and without its draw commands. It presented 60 frames with no WebGPU error, read its centre back as
+      the clear colour (63 89 137), and failed: decision 15's reason, measured.
+    - **The example** (`src/main.kama`), a `std::app` `App` a step a tick, as `examples/clear` is:
+      - a WGSL module, and group 0's layout written out (`BindGroupLayout`, `PipelineLayout`, `Layout::Explicit`), so
+        one group serves every pipeline made with that layout; `tests/` covers `Auto`. Decided in the building, for the
+        owner to object to;
+      - three corners of position and colour in a vertex buffer, a `@generate(BytesViewable)` `type value` whose bytes
+        reach `writeBuffer` with no packing by hand; a `Uint16` index buffer padded to a whole word, since `writeBuffer`
+        writes whole words; and a uniform of the angle and the aspect ratio written each frame (decision 4), through a
+        bind group. Back faces are culled;
+      - the window opens at 600 × 400 so that a copy's rows need padding (600 × 4 bytes is no multiple of 256), which
+        640 would have hidden: the mutation reading rows unpadded was equivalent at 640.
+    - **The check** (`src/check.kama`) holds three texels within 3 of 255, in the frame's byte order (BGRA on the web)
+      and through its view's encoding (sRGB on every leg measured):
+      - the centre: a third of each corner's colour, wherever the triangle has turned;
+      - a point 0.55 of the way towards the red corner at the frame's angle and the window's aspect ratio: 0.79 red and
+        0.10 of each other. It came after a first run, since with the centre and a corner alone a spin never written
+        passed: the centre is the same at every angle;
+      - the texel at (1, 1), the clear colour.
+
+      A `--frames` run that never read its frame back fails on its own, whatever else went right.
+    - **The gate** (`tools/test.sh`) runs it natively, under `kama run` in Edge, Chrome as installed and Firefox 160,
+      and through the driver in Chrome for Testing at a scale of 1.5. A grep holds its source to no `raw()`, `adopt`,
+      `extern fn` or webgpu.h name, GPU-4's "zero hand-written releases".
+    - **Read back on every leg** (natively through RGBA8UnormSrgb, on the web through BGRA8Unorm's sRGB view): the
+      centre 156 157 156 (156 156 156 in Chrome for Testing), towards the red corner 230 91 90, and the corner
+      63 89 137, against 156, 230 91 91 and 63 89 137.
+    - **COVERAGE.md is unchanged, 95 of 206:** the example calls nothing the tests did not. GPU-4's done, "COVERAGE.md's
+      pipeline, binding, sampler and shader rows called", holds for the render path. Those sections' uncalled rows are
+      the six `SetLabel`s, which GPU-8 holds ("labels on every handle"; a label is set through each description now),
+      and compute's, which are GPU-5's.
+    - **Mutations: 21 of 21 caught,** 16 natively and four in Edge, each run built and failed on its own, and the grep:
+      - the drawing: the spin never written per frame, the aspect ratio not applied, the bind group never set, a
+        `Uint32` index format, the indices wound clockwise, the front faces culled, a stride of 24, the colour read from
+        byte 12, the red corner a tenth green, the frame not offered for copying, and the last frame never copied (the
+        program's own guard);
+      - the check: the clear colour changed, the byte order read wrongly, the centre read off-centre, the turned point
+        unturned, and the rows read unpadded;
+      - in Edge, where the frame is BGRA on a canvas: the byte order, the frame not offered for copying, the rows
+        unpadded, and the last frame never copied;
+      - a raw handle taken in the example, which compiled and read back as drawn, failed by the grep alone.
+
+      Six of the drawing's eleven leave WebGPU silent, so only the read back catches them: the spin, the aspect, the
+      winding, the culling, the stride and the red corner's colour. The colour read from byte 12 runs past the stride,
+      which WebGPU reports.
+    - **Found on the way, and fixed in a commit of its own: two of part 3's cases raced the isolates' start.** The gate
+      failed once natively in debug: "the first asynchronous request starts the device's compile isolates … 1 run, not
+      2". An isolate counts itself when its thread first runs, and the case counted as soon as the first job was
+      answered, so an isolate the system had yet to run was missed. Reproduced every time by holding each isolate after
+      the first 300 ms before it counts itself, which failed that case and "a pending request keeps its device's compile
+      isolates", the same way. Each now waits by the clock, as every wait on the package's own threads does, and then
+      holds the count exactly: the held start passes, and a pool one isolate short or one over still fails both, as 1
+      or 3 run, not 2.
 
 ## Where the truth is
 

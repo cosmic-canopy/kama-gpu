@@ -1,0 +1,495 @@
+// triangle: a triangle spun in a window, on @kama/gpu and @kama/window, natively and in a browser. Its corners come from
+// a vertex buffer through an index buffer, and its angle from a uniform buffer written each frame and bound through a
+// bind group. The group's layout is written out rather than read from the shader, so one group can serve every
+// pipeline made with that layout. Escape or the close button quits; a resize reconfigures, and the triangle keeps its
+// shape at any aspect ratio.
+//
+// `triangle --frames N` presents N frames and exits, for a check that needs no hand on the keyboard, and opens without
+// taking the focus; on the web the page passes it (`triangle.html?arg=--frames&arg=60`). Its last frame is then copied
+// out of the window before it is presented, and read back (src/check.kama): the centre must be the triangle's colour, a
+// point towards the red corner the mix it makes there at that frame's angle, and a corner of the window the clear
+// colour. It prints how many frames it presented and how many errors WebGPU reported to its device, and its exit status
+// is 1 when there were any, or when the window did not read back as drawn, or was never read back.
+//
+// It is a `std::app` `App`, a step a tick, as `examples/clear` is: on the web the browser answers the adapter, the
+// device and a buffer's map between ticks, and paces the frames.
+//
+// Every handle is a `type resource` its drop releases, so nothing here releases anything by hand.
+
+import {
+    core::println,
+    core::env::args, core::env::Args,
+    std::app::App, std::app::Lifecycle, std::app::run, std::app::quit,
+    std::collections::ConstView,
+    std::fmt::ParseError, std::fmt::Parseable,
+    std::math::radians,
+    std::memory::Owned,
+    std::time::sleep, std::time::Duration,
+    gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::DeviceOptions,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::PowerPreference,
+    gpu::DeviceErrors,
+    gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
+    gpu::ConfigureError, gpu::TextureFormat, gpu::TextureUsage, gpu::Texture, gpu::TextureView,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferBinding,
+    gpu::ShaderModule, gpu::ShaderModuleDescriptor, gpu::ShaderStage,
+    gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
+    gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindingResource,
+    gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::Layout,
+    gpu::RenderPipeline, gpu::RenderPipelineDescriptor, gpu::VertexState, gpu::VertexBufferLayout, gpu::VertexFormat,
+    gpu::FragmentState, gpu::ColorTargetState, gpu::CullMode, gpu::IndexFormat,
+    gpu::CommandEncoder, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment, gpu::CommandBuffer,
+    gpu::Color,
+    window::Window, window::WindowOptions, window::WindowError, window::Event, window::Key,
+    FrameRead, Verdict, copyOut, readable, clearColor,
+};
+
+comptime int32 SETTLE_TICKS = 3;   // after the last frame, before the device's errors are read: the web's arrive a tick later
+
+// The shader: a corner's position turned by the spin's angle and squeezed by the window's aspect ratio, and its colour
+// passed on to be blended across the triangle.
+fn string wgsl() {
+    return "struct Spin { angle: f32, aspect: f32 };\n"
+        + "@group(0) @binding(0) var<uniform> spin: Spin;\n"
+        + "struct Corner { @builtin(position) position: vec4f, @location(0) color: vec3f };\n"
+        + "@vertex fn vs(@location(0) position: vec2f, @location(1) color: vec3f) -> Corner {\n"
+        + "  let c = cos(spin.angle);\n"
+        + "  let s = sin(spin.angle);\n"
+        + "  let turned = vec2f(position.x * c - position.y * s, position.x * s + position.y * c);\n"
+        + "  var corner: Corner;\n"
+        + "  corner.position = vec4f(turned.x / spin.aspect, turned.y, 0.0, 1.0);\n"
+        + "  corner.color = color;\n"
+        + "  return corner;\n"
+        + "}\n"
+        + "@fragment fn fs(corner: Corner) -> @location(0) vec4f { return vec4f(corner.color, 1.0); }\n";
+}
+
+// One corner as the vertex buffer holds it: a position and a colour, 20 bytes. `@generate(BytesViewable)` proves the
+// type has no padding, which is what lets its bytes be handed to `writeBuffer`.
+@generate(BytesViewable)
+type value Corner {
+    public float32 x;
+    public float32 y;
+    public float32 r;
+    public float32 g;
+    public float32 b;
+
+    public ctor of(float32 x, float32 y, float32 r, float32 g, float32 b) {
+        this.x = x; this.y = y; this.r = r; this.g = g; this.b = b;
+    }
+}
+
+// The uniform the vertex stage reads, written each frame: WGSL's `Spin`, 8 bytes.
+@generate(BytesViewable)
+type value Spin {
+    public float32 angle;    // radians
+    public float32 aspect;   // the frame's width over its height
+
+    public ctor of(float32 angle, float32 aspect) { this.angle = angle; this.aspect = aspect; }
+}
+
+// A buffer for `usage`, labelled `name`, holding `data`. `CopyDst` is what `writeBuffer` needs.
+unsafe fn Buffer holding(ref Device device, ref Queue queue, BufferUsage usage, ConstView<uint8> data, string name) {
+    BufferDescriptor described = BufferDescriptor.make(size: cast<uint64>(data.length()), usage: usage | BufferUsage::CopyDst);
+    described.label(text: give name);
+    Buffer made = device.createBuffer(descriptor: give described);
+    queue.writeBuffer(buffer: made, offset: 0, data: data);
+    return made;
+}
+
+// What configuring at the window's size came to: the surface is ready, the window has no area (skip frames until it
+// has), or the surface refused, which ends the program.
+type enum Fit { Ready, NoArea, Refused }
+
+// The device and everything the triangle is drawn with, made once the device is granted.
+type resource Drawing {
+    Device device;
+    Queue queue;
+    RenderPipeline pipeline;
+    Buffer corners;
+    Buffer order;
+    Buffer spin;
+    BindGroup group;
+
+    public unsafe ctor make(Device device, Queue queue, TextureFormat target) {
+        ShaderModuleDescriptor source = ShaderModuleDescriptor.make(wgsl: wgsl());
+        source.label(text: "triangle.wgsl");
+        ShaderModule shader = device.createShaderModule(descriptor: give source);
+
+        // Group 0 holds the spin, a uniform buffer the vertex stage reads.
+        BindGroupLayoutDescriptor spinGroup = BindGroupLayoutDescriptor.make();
+        spinGroup.entry(binding: 0, visibility: ShaderStage::Vertex, layout: BindingLayout::Buffer(layout: BufferBindingLayout.make()));
+        spinGroup.label(text: "the spin's group");
+        BindGroupLayout spinLayout = device.createBindGroupLayout(descriptor: give spinGroup);
+        PipelineLayoutDescriptor groups = PipelineLayoutDescriptor.make();
+        groups.group(layout: copy spinLayout);
+        groups.label(text: "the triangle's groups");
+        PipelineLayout layout = device.createPipelineLayout(descriptor: give groups);
+
+        // Slot 0 holds the corners: a position at location 0 and a colour at location 1.
+        VertexBufferLayout cornerLayout = VertexBufferLayout.make(arrayStride: 20);
+        cornerLayout.attribute(format: VertexFormat::Float32x2, offset: 0, shaderLocation: 0);
+        cornerLayout.attribute(format: VertexFormat::Float32x3, offset: 8, shaderLocation: 1);
+        VertexState vertex = VertexState.make(module: copy shader, entryPoint: "vs");
+        vertex.buffer(layout: give cornerLayout);
+        FragmentState fragment = FragmentState.make(module: copy shader, entryPoint: "fs");
+        fragment.target(state: ColorTargetState.make(format: target));
+        RenderPipelineDescriptor described = RenderPipelineDescriptor.make(layout: Layout::Explicit(layout: give layout),
+                                                                           vertex: give vertex);
+        described.fragment(state: give fragment);
+        described.primitiveMut().cullMode = CullMode::Back;   // the corners wind counter-clockwise, WebGPU's front
+        described.label(text: "the triangle");
+        this.pipeline = device.createRenderPipeline(descriptor: give described);
+
+        // Red at the top, then green and blue below, counter-clockwise about the centre of the window.
+        InlineArray<Corner>#(3) three = [
+            Corner.of(x: 0.0, y: 0.8, r: 1.0, g: 0.0, b: 0.0),
+            Corner.of(x: -0.6928, y: -0.4, r: 0.0, g: 1.0, b: 0.0),
+            Corner.of(x: 0.6928, y: -0.4, r: 0.0, g: 0.0, b: 1.0)
+        ];
+        // `writeBuffer` writes whole 4-byte words, so the three 2-byte indices are padded to four.
+        InlineArray<uint16>#(4) indices = [0, 1, 2, 0];
+        Spin still = Spin.of(angle: 0.0, aspect: 1.0);
+        this.corners = holding(device: device, queue: queue, usage: BufferUsage::Vertex, data: three.bytes(), name: "the corners");
+        this.order = holding(device: device, queue: queue, usage: BufferUsage::Index, data: indices.bytes(), name: "the order");
+        this.spin = holding(device: device, queue: queue, usage: BufferUsage::Uniform, data: still.bytes(), name: "the spin");
+
+        BindGroupDescriptor bound = BindGroupDescriptor.make(layout: give spinLayout);
+        bound.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.whole(buffer: copy this.spin)));
+        bound.label(text: "the spin");
+        this.group = device.createBindGroup(descriptor: give bound);
+
+        this.device = give device;
+        this.queue = give queue;
+    }
+
+    // Configure `surface` at its window's size.
+    public unsafe fn Fit fit(ref Surface surface, const ref SurfaceConfig config) {
+        Result<Unit, ConfigureError> done = surface.configure(device: this.device, config: config);
+        return match (done) {
+            case Ok(value: u): Fit::Ready;
+            case Err(error: e): {
+                match (e) {
+                    case NoArea: { return Fit::NoArea; }
+                    case _: { string why = e.message(); println(s: "triangle: the surface refused: ${why}"); return Fit::Refused; }
+                };
+            }
+        };
+    }
+
+    // Draw one frame at `angle` and present it. With `readBack`, the frame is first copied out of the window, and its
+    // read is handed back.
+    public unsafe fn Optional<FrameRead> draw(SurfaceTexture frame, float32 angle, bool readBack) {
+        Texture texture = frame.texture();
+        Spin now = Spin.of(angle: angle, aspect: cast<float32>(texture.width()) / cast<float32>(texture.height()));
+        this.queue.writeBuffer(buffer: this.spin, offset: 0, data: now.bytes());
+
+        CommandEncoder encoder = this.device.createCommandEncoder();
+        RenderPassDescriptor passing = RenderPassDescriptor.make();
+        passing.color(attachment: ColorAttachment.clearing(view: frame.view(), color: clearColor()));
+        RenderPass pass = encoder.beginRenderPass(descriptor: give passing);
+        pass.setPipeline(pipeline: this.pipeline);
+        pass.setBindGroup(index: 0, group: this.group);
+        pass.setVertexBuffer(slot: 0, binding: BufferBinding.whole(buffer: copy this.corners));
+        pass.setIndexBuffer(binding: BufferBinding.whole(buffer: copy this.order), format: IndexFormat::Uint16);
+        pass.drawIndexed(indexCount: 3, instanceCount: 1, firstIndex: 0, baseVertex: 0, firstInstance: 0);
+        give pass.end();
+
+        Optional<Buffer> copied = Optional::None;
+        if (readBack) { copied = Optional::Some(value: copyOut(device: this.device, encoder: encoder, frame: texture)); }
+        CommandBuffer commands = give encoder.finish();
+        this.queue.submit(commands: give commands);
+        Optional<FrameRead> read = match (give copied) {
+            case Some(value: b): Optional::Some(value: FrameRead.make(buffer: give b, frame: texture, angle: angle));
+            case None: Optional::None;
+        };
+        give frame.present();
+        return read;
+    }
+
+    // Natively the map is answered once the device is polled; on the web the browser answers it between ticks.
+    public unsafe fn Optional<Verdict> answer(ref FrameRead read, TextureFormat view) {
+        this.device.poll(wait: true);
+        return read.poll(view: view);
+    }
+
+    public unsafe fn DeviceErrors takeErrors() { return this.device.takeErrors(); }
+}
+
+// `--frames N`, or 0 for no limit.
+unsafe fn int32 frameLimit() {
+    Args a = args();
+    Optional<string> flag = a.get(at: 0);
+    Optional<string> value = a.get(at: 1);
+    bool asked = match (flag) { case Some(value: f): f == "--frames"; case None: false; };
+    if (!asked) { return 0; }
+    return match (give value) {
+        case Some(value: v): {
+            Result<int32, ParseError> n = Parseable::<int32>.parse(text: v);
+            match (n) { case Ok(value: k): { return k; } case Err(error: e): { return 0; } };
+        }
+        case None: 0;
+    };
+}
+
+// A window with no area: natively wait as an occluded acquire does (32 ms) rather than spin; on the web the browser
+// paces the ticks.
+@compileFor(ARCH_WASM32)
+fn void idle() { }
+@compileFor(!ARCH_WASM32)
+fn void idle() { sleep(d: Duration.fromMillis(ms: 32)); }
+
+// The status `main` returns natively; on the web `run` never returns, so the program ends with `quit`.
+static int32 exitStatus = 1;
+
+@compileFor(ARCH_WASM32)
+fn void endOnTheWeb(int32 status) { quit(code: cast<uint8>(status)); }
+@compileFor(!ARCH_WASM32)
+fn void endOnTheWeb(int32 status) { }
+
+type resource Triangle implements App {
+    int32 limit = 0;
+    int32 stage = 0;   // 0 opening, 1 the adapter, 2 the device, 3 frames, 4 settling, 5 done
+    Optional<Window> window = Optional::None;
+    Optional<Instance> instance = Optional::None;
+    Optional<Surface> surface = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<SurfaceConfig> config = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Drawing> drawing = Optional::None;
+    Optional<FrameRead> read = Optional::None;
+    bool ready = false;
+    bool checked = false;   // under `--frames N`: the last frame was read back
+    bool wrong = false;     // under `--frames N`: it was not as drawn, or never read
+    int32 frames = 0;
+    int32 skipped = 0;
+    int32 settled = 0;
+
+    public unsafe ctor make() { this.limit = frameLimit(); }
+
+    public fn void lifecycle(Lifecycle event) { }
+
+    public unsafe fn bool tick() {
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.awaitAdapter(); }
+        else if (this.stage == 2) { this.awaitDevice(); }
+        else if (this.stage == 3) { this.frame(); }
+        else if (this.stage == 4) { this.settle(); }
+        if (this.stage >= 5) { endOnTheWeb(status: exitStatus); return false; }
+        return true;
+    }
+
+    unsafe fn void fail(const ref string words) { println(s: "triangle: ${words}"); exitStatus = 1; this.stage = 5; }
+
+    unsafe fn void open() {
+        // A check (`--frames N`) needs no hand on the keyboard, so it leaves the focus where it is; run by hand, the
+        // window takes it, as a program's should.
+        WindowOptions options = WindowOptions.make();
+        options.focused = this.limit == 0;
+        Result<Window, WindowError> opened = Window.openIn(canvas: "#canvas", title: "@kama/gpu triangle", width: 600,
+                                                           height: 400, options: options);
+        Window win = match (give opened) {
+            case Ok(value: x): give x;
+            case Err(error: e): { string why = e.message(); this.fail(words: "no window: " + why); return; }
+        };
+        Result<Instance, GpuError> made = Instance.make();
+        Instance inst = match (give made) {
+            case Ok(value: i): give i;
+            case Err(error: e): { string why = e.message(); this.fail(words: why); return; }
+        };
+        Result<Surface, GpuError> onWindow = Surface.make(instance: inst, window: win);
+        Surface s = match (give onWindow) {
+            case Ok(value: x): give x;
+            case Err(error: e): { string why = e.message(); this.fail(words: why); return; }
+        };
+        this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.withSurface(surface: s,
+                                                                                    power: PowerPreference::HighPerformance)));
+        this.surface = Optional::Some(value: give s);
+        this.instance = Optional::Some(value: give inst);
+        this.window = Optional::Some(value: give win);
+        this.stage = 1;
+    }
+
+    unsafe fn void awaitAdapter() {
+        AdapterStatus status = AdapterStatus::Failed(error: GpuError::Taken);
+        match (this.adapterRequest) { case Some(value: r): { status = r.poll(); } case None: { } };
+        bool settledNow = match (status) { case Pending: false; case _: true; };
+        if (settledNow) { this.adapterRequest = Optional::None; }
+        match (give status) {
+            case Pending: { }
+            case Failed(error: e): { string why = e.message(); this.fail(words: "no adapter: " + why); }
+            case Ready(adapter: a): {
+                Result<SurfaceCapabilities, GpuError> asked = Result::Err(error: GpuError::Taken);
+                match (this.surface) { case Some(value: s): { asked = s.capabilities(adapter: a); } case None: { } };
+                match (give asked) {
+                    case Err(error: e): { string why = e.message(); this.fail(words: why); }
+                    case Ok(value: caps): {
+                        SurfaceConfig chosen = caps.preferred();
+                        if (this.limit > 0) {
+                            // The check copies the last frame out of the window, which the surface must allow.
+                            if (!caps.usages().has(flags: TextureUsage::CopySrc)) {
+                                this.fail(words: "the window cannot be read back: the surface does not offer CopySrc");
+                                return;
+                            }
+                            if (!readable(format: chosen.format)) {
+                                string name = chosen.format.name();
+                                this.fail(words: "the window cannot be read back: the check reads no ${name} frame");
+                                return;
+                            }
+                            chosen.usage = chosen.usage | TextureUsage::CopySrc;
+                        }
+                        this.config = Optional::Some(value: chosen);
+                        this.deviceRequest = Optional::Some(value: a.requestDevice(options: DeviceOptions.defaults()));
+                        this.stage = 2;
+                    }
+                };
+            }
+        };
+    }
+
+    unsafe fn void awaitDevice() {
+        DeviceStatus status = DeviceStatus::Failed(error: GpuError::Taken);
+        match (this.deviceRequest) { case Some(value: r): { status = r.poll(); } case None: { } };
+        bool settledNow = match (status) { case Pending: false; case _: true; };
+        if (settledNow) { this.deviceRequest = Optional::None; }
+        match (give status) {
+            case Pending: { }
+            case Failed(error: e): { string why = e.message(); this.fail(words: "no device: " + why); }
+            case Ready(device: d, queue: q): {
+                TextureFormat target = match (this.config) { case Some(value: c): c.viewFormat; case None: TextureFormat::BGRA8Unorm; };
+                this.drawing = Optional::Some(value: Drawing.make(device: give d, queue: give q, target: target));
+                if (!this.refit()) { return; }
+                this.stage = 3;
+            }
+        };
+    }
+
+    // Configure at the window's size: false when the surface refused, which ends the program.
+    unsafe fn bool refit() {
+        Fit f = Fit::Refused;
+        match (this.surface) {
+            case Some(value: s): {
+                match (this.drawing) {
+                    case Some(value: d): {
+                        match (this.config) { case Some(value: c): { f = d.fit(surface: s, config: c); } case None: { } };
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        if (f == Fit::Refused) { exitStatus = 1; this.stage = 5; return false; }
+        this.ready = f == Fit::Ready;
+        return true;
+    }
+
+    unsafe fn void frame() {
+        bool running = true;
+        bool reconfigure = !this.ready;
+        match (this.window) {
+            case Some(value: w): {
+                w.pump();
+                bool polling = true;
+                while (polling) {
+                    Optional<Event> next = w.pollEvent();
+                    match (next) {
+                        case None: { polling = false; }
+                        case Some(value: e): {
+                            match (e) {
+                                case CloseRequested: { running = false; }
+                                case KeyDown(key: k, mods: m, repeat: r): { if (k == Key::Escape) { running = false; } }
+                                case Resize(width: rw, height: rh): { reconfigure = true; }
+                                case _: { }
+                            };
+                        }
+                    };
+                }
+            }
+            case None: { }
+        };
+        if (!running) { this.stage = 4; return; }
+        if (reconfigure) {
+            if (!this.refit()) { return; }
+        }
+        if (!this.ready) { idle(); return; }
+        Result<SurfaceTexture, SurfaceError> acquired = Result::Err(error: SurfaceError::Closed);
+        match (this.surface) { case Some(value: s): { acquired = s.acquire(); } case None: { } };
+        match (give acquired) {
+            case Ok(value: frame): {
+                bool last = this.limit > 0 && this.frames + 1 >= this.limit;
+                float32 angle = radians(deg: cast<float32>(this.frames % 360));   // a degree a frame
+                Optional<FrameRead> taken = Optional::None;
+                match (this.drawing) {
+                    case Some(value: d): { taken = d.draw(frame: give frame, angle: angle, readBack: last); }
+                    case None: { give frame.present(); }   // never: the drawing is made before the first frame
+                };
+                match (give taken) { case Some(value: r): { this.read = Optional::Some(value: give r); } case None: { } };
+                this.frames = this.frames + 1;
+            }
+            case Err(error: e): {
+                this.skipped = this.skipped + 1;
+                match (e) {
+                    case Outdated: { this.ready = false; }
+                    case Lost: { this.ready = false; }
+                    case Failed: { println(s: "triangle: the surface failed"); this.stage = 4; }
+                    case _: { }
+                };
+            }
+        };
+        if (this.limit > 0 && this.frames >= this.limit) { this.stage = 4; }
+    }
+
+    // The last frame's read, if there is one, then a few ticks so the web's errors have arrived, then the totals.
+    unsafe fn void settle() {
+        if (this.read.isSome()) {
+            TextureFormat view = match (this.config) { case Some(value: c): c.viewFormat; case None: TextureFormat::BGRA8Unorm; };
+            Optional<Verdict> got = Optional::None;
+            match (this.read) {
+                case Some(value: r): {
+                    match (this.drawing) { case Some(value: d): { got = d.answer(read: r, view: view); } case None: { } };
+                }
+                case None: { }
+            };
+            match (give got) {
+                case None: { return; }
+                case Some(value: v): {
+                    this.read = Optional::None;
+                    this.checked = true;
+                    string words = v.words();
+                    if (v.asDrawn()) { println(s: "triangle: the window reads back as drawn: ${words}"); }
+                    else { println(s: "triangle: the window does not read back as drawn: ${words}"); this.wrong = true; }
+                }
+            };
+        }
+        this.settled = this.settled + 1;
+        if (this.settled < SETTLE_TICKS) { return; }
+        // A check that never read its frame back is a failed check, whatever else went right.
+        if (this.limit > 0 && !this.checked) { println(s: "triangle: the last frame was never read back"); this.wrong = true; }
+        int64 errors = 0;
+        string firstWords = "";
+        match (this.drawing) {
+            case Some(value: d): {
+                DeviceErrors reported = d.takeErrors();
+                isize kept = reported.reports().length();
+                errors = cast<int64>(kept) + reported.dropped();
+                if (kept > 0) { firstWords = reported.reports()[0].message(); }
+            }
+            case None: { }
+        };
+        int32 n = this.frames;
+        int32 k = this.skipped;
+        println(s: "triangle: ${n} frames presented, ${k} acquires skipped, ${errors} WebGPU errors");
+        if (!firstWords.isEmpty()) { println(s: "triangle: the first: ${firstWords}"); }
+        exitStatus = (errors > 0 || this.wrong) ? 1 : 0;
+        this.stage = 5;
+    }
+}
+
+unsafe fn void runTriangle() {
+    Owned<App> app = new Triangle.make();
+    run(app: give app);
+}
+
+fn uint8 main() {
+    runTriangle();
+    return cast<uint8>(exitStatus);
+}

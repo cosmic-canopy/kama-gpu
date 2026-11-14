@@ -1,0 +1,139 @@
+// The triangle's own check (@kama/gpu's AGENTS.gpu.md item 12, decision 15). Under `--frames N` the last frame is
+// copied out of the window before it is presented, and read back: the centre must be the triangle's colour, a point
+// towards its red corner the mix that corner makes there at the frame's angle, and a corner of the window the clear
+// colour. "N frames presented with no WebGPU error" is also what a frame with nothing drawn on it gives (a sample mask
+// of 0 draws nothing, silently, on both legs), so it is the pixels that are checked.
+
+import {
+    std::collections::DynamicArray,
+    std::math::sin, std::math::cos, std::math::floor,
+    gpu::Device, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus,
+    gpu::CommandEncoder, gpu::Texture, gpu::TextureFormat, gpu::Color,
+};
+
+export { FrameRead, Verdict, copyOut, readable, clearColor };
+
+comptime int32 NEAR = 3;   // how far a channel may be from the colour it should be, in 8-bit steps
+
+// The colour the frame is cleared to, in linear terms. Through an sRGB view it is stored as 63, 89, 137, and through a
+// linear one as 13, 26, 64.
+fn Color clearColor() { return Color.of(r: 0.05, g: 0.1, b: 0.25, a: 1.0); }
+
+// Whether the check reads a frame of `format`: the 8-bit formats with four channels, in either order.
+fn bool readable(TextureFormat format) {
+    TextureFormat plain = format.linear();
+    return plain == TextureFormat::RGBA8Unorm || plain == TextureFormat::BGRA8Unorm;
+}
+
+// A copy's rows lie a multiple of 256 bytes apart, as WebGPU requires.
+fn uint32 rowBytes(uint32 width) { return (width * 4 + 255) / 256 * 256; }
+
+// Copy the whole of `frame` into a new buffer through `encoder`, to be read once the encoder's work is submitted.
+unsafe fn Buffer copyOut(ref Device device, ref CommandEncoder encoder, const ref Texture frame) {
+    uint32 row = rowBytes(width: frame.width());
+    uint64 size = cast<uint64>(row) * cast<uint64>(frame.height());
+    BufferDescriptor described = BufferDescriptor.make(size: size, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
+    described.label(text: "the last frame, copied out");
+    Buffer copied = device.createBuffer(descriptor: give described);
+    encoder.copyTextureToBuffer(texture: frame, buffer: copied, width: frame.width(), height: frame.height(), bytesPerRow: row);
+    return copied;
+}
+
+// What the read found: whether the window holds what was drawn, and the pixels it read, in words.
+type resource Verdict {
+    bool drawn;
+    string said;
+
+    public ctor make(bool drawn, string said) { this.drawn = drawn; this.said = give said; }
+    public const fn bool asDrawn() { return this.drawn; }
+    public const fn string words() { return copy this.said; }
+}
+
+// The channels of the texel at `at`, red first, whichever order the frame keeps them in.
+fn int32 red(const ref DynamicArray<uint8> px, isize at, bool bgra) { return cast<int32>(px[at + (bgra ? 2 : 0)]); }
+fn int32 green(const ref DynamicArray<uint8> px, isize at) { return cast<int32>(px[at + 1]); }
+fn int32 blue(const ref DynamicArray<uint8> px, isize at, bool bgra) { return cast<int32>(px[at + (bgra ? 0 : 2)]); }
+
+fn bool close(int32 got, int32 want) { return got >= want - NEAR && got <= want + NEAR; }
+
+// The texel of a frame `width` × `height`, rows `row` bytes apart, under the point (x, y) in WebGPU's clip space, where
+// x and y run from -1 to 1 and y points up.
+fn isize texelAt(float64 x, float64 y, uint32 width, uint32 height, isize row) {
+    float64 column = floor(x: (x + 1.0) * 0.5 * cast<float64>(width));
+    float64 line = floor(x: (1.0 - y) * 0.5 * cast<float64>(height));
+    return cast<isize>(line) * row + cast<isize>(column) * 4;
+}
+
+// A frame copied out of the window, on its way back to the CPU.
+type resource FrameRead {
+    Buffer buffer;
+    BufferRead read;
+    uint32 width;
+    uint32 height;
+    bool bgra;
+    float32 turned;   // the angle the frame was drawn at
+
+    // Start reading `buffer`, which holds a copy of `frame` already submitted, drawn at `angle`.
+    public unsafe ctor make(Buffer buffer, const ref Texture frame, float32 angle) {
+        this.turned = angle;
+        this.width = frame.width();
+        this.height = frame.height();
+        Optional<TextureFormat> format = frame.format();
+        bool reversed = match (format) { case Some(value: f): f.linear() == TextureFormat::BGRA8Unorm; case None: false; };
+        this.bgra = reversed;
+        uint64 size = cast<uint64>(rowBytes(width: this.width)) * cast<uint64>(this.height);
+        this.read = buffer.mapRead(offset: 0, size: size);
+        this.buffer = give buffer;
+    }
+
+    // None while the bytes are on their way; then what they hold. `view` is the format the frame was drawn through: an
+    // sRGB view stores the colours encoded.
+    public unsafe fn Optional<Verdict> poll(TextureFormat view) {
+        ReadStatus status = this.read.poll();
+        match (give status) {
+            case Pending: { return Optional::None; }
+            case Failed(error: e): {
+                string why = e.message();
+                return Optional::Some(value: Verdict.make(drawn: false, said: "the read failed: " + why));
+            }
+            case Ready: { }
+        };
+        DynamicArray<uint8> px = this.read.bytes();
+        isize row = cast<isize>(rowBytes(width: this.width));
+        if (px.length() < row * cast<isize>(this.height)) {
+            return Optional::Some(value: Verdict.make(drawn: false, said: "too few bytes read"));
+        }
+        // Three texels: the centre; a point 0.55 of the way out towards the red corner, which is 0.8 out, wherever the
+        // spin has turned it and the window's shape has squeezed it; and the texel at (1, 1), outside the triangle.
+        float64 angle = cast<float64>(this.turned);
+        float64 aspect = cast<float64>(this.width) / cast<float64>(this.height);
+        isize middle = texelAt(x: 0.0, y: 0.0, width: this.width, height: this.height, row: row);
+        isize towards = texelAt(x: -0.55 * sin(x: angle) / aspect, y: 0.55 * cos(x: angle), width: this.width,
+                                height: this.height, row: row);
+        isize corner = row + 4;
+        bool srgb = view.isSrgb();
+        // The corners are red, green and blue, so the centre is a third of each. The point towards red is 0.79 red and
+        // 0.10 each of green and blue (a third, and two thirds of 0.55 / 0.8 more). An sRGB view stores them encoded.
+        int32 third = srgb ? 156 : 85;
+        int32 mostly = srgb ? 230 : 202;
+        int32 little = srgb ? 91 : 27;
+        int32 clearR = srgb ? 63 : 13;
+        int32 clearG = srgb ? 89 : 26;
+        int32 clearB = srgb ? 137 : 64;
+        int32 mr = red(px: px, at: middle, bgra: this.bgra);
+        int32 mg = green(px: px, at: middle);
+        int32 mb = blue(px: px, at: middle, bgra: this.bgra);
+        int32 tr = red(px: px, at: towards, bgra: this.bgra);
+        int32 tg = green(px: px, at: towards);
+        int32 tb = blue(px: px, at: towards, bgra: this.bgra);
+        int32 cr = red(px: px, at: corner, bgra: this.bgra);
+        int32 cg = green(px: px, at: corner);
+        int32 cb = blue(px: px, at: corner, bgra: this.bgra);
+        bool drawn = close(got: mr, want: third) && close(got: mg, want: third) && close(got: mb, want: third)
+            && close(got: tr, want: mostly) && close(got: tg, want: little) && close(got: tb, want: little)
+            && close(got: cr, want: clearR) && close(got: cg, want: clearG) && close(got: cb, want: clearB);
+        string said = "the centre ${mr} ${mg} ${mb} (wants ${third} ${third} ${third}), towards the red corner ${tr} ${tg} ${tb} "
+            + "(wants ${mostly} ${little} ${little}), a corner ${cr} ${cg} ${cb} (the clear colour, ${clearR} ${clearG} ${clearB})";
+        return Optional::Some(value: Verdict.make(drawn: drawn, said: give said));
+    }
+}

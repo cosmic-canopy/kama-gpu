@@ -16,11 +16,10 @@ in the git log.
 **The goal before 1.0 is every call in webgpu.h** ([AGENTS.gpu.md](AGENTS.gpu.md#what-this-is)), grown by the spec's
 sections in the order `@kama/graphics` pulls them.
 
-## NOW: the render pipeline set
+## NOW: what `@kama/graphics`' first slice pulls
 
-| id | item | why |
-|---|---|---|
-| GPU-4 | **The render pipeline set**, shaped by `@kama/graphics`' design pass: shader modules, layouts and bind groups, samplers, render pipelines, vertex and index buffers, depth and multisampled targets | [detail](ROADMAP_DETAIL.md#render-pipelines) |
+Nothing here is under way. The render pipeline set is built ([SPEC.md](SPEC.md); the git log has how), and
+`@kama/graphics`' GFX-1, the lit cube, comes next. The first row below that it pulls moves up here when it does.
 
 ## LATER: the rest of webgpu.h before 1.0
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # tools/test.sh — @kama/gpu's gate: the tests program built debug and release and run natively, a window cleared for
-# 60 frames (skipped when KAMA_WINDOW_NO_DISPLAY is set), the xfail refused, the tests built for the web and run in every
+# 60 frames and a triangle drawn for 60 and read back from its window (both skipped when KAMA_WINDOW_NO_DISPLAY is set),
+# the xfails refused, the tests and both examples built for the web and run in every
 # headless browser present, the bindings checked against the headers, and what wgpu-native does that the seam is built
 # on (tools/check-facts.sh).
 #
@@ -51,6 +52,18 @@ printed() {
         failed=1
     fi
 }
+# examples/triangle's own check (AGENTS.gpu.md item 12, decision 15): its last frame read back from its window, the
+# centre the triangle's colour and a corner the clear colour. A run that skipped the read back, or never reached it,
+# fails here, whatever its exit status.
+readBack() {
+    local log="$1" leg="$2"
+    if grep -q '^triangle: the window reads back as drawn: ' "$log"; then
+        echo "ok   the triangle reads back from its window as drawn ($leg)"
+    else
+        echo "FAIL the triangle never read back from its window as drawn ($leg)"
+        failed=1
+    fi
+}
 # A browser run, bounded where `timeout` exists: `kama run` has no time limit, and a browser that never asks for the page
 # waits for ever (kyoten's KY-53).
 bounded() { if command -v timeout >/dev/null 2>&1; then timeout 300 "$@"; else "$@"; fi; }
@@ -96,6 +109,27 @@ else
     fi
 fi
 
+step "a triangle drawn for 60 frames and read back from its window (examples/triangle)"
+# GPU-4's done: every handle a resource its drop releases, so the example releases nothing by hand, and it reaches
+# webgpu.h only through the package.
+if ! ls examples/triangle/src/*.kama > /dev/null 2>&1; then
+    echo "FAIL examples/triangle has no source"; failed=1
+elif grep -nE '\.raw\(|adopt\(|wgpu[A-Z]|extern fn' examples/triangle/src/*.kama; then
+    echo "FAIL examples/triangle releases or binds by hand (above)"; failed=1
+else
+    echo "ok   examples/triangle releases nothing by hand"
+fi
+"$KAMA" pkg install examples/triangle/kama.json > /dev/null || failed=1
+if [ -n "${KAMA_WINDOW_NO_DISPLAY:-}" ]; then
+    echo "skip KAMA_WINDOW_NO_DISPLAY is set"
+elif "$KAMA" build examples/triangle/kama.json -o "tests/out/triangle$EXE" > tests/out/build-triangle.log 2>&1; then
+    "tests/out/triangle$EXE" --frames 60 2>&1 | tee tests/out/run-triangle.log || failed=1
+    readBack tests/out/run-triangle.log "native"
+else
+    tail -20 tests/out/build-triangle.log
+    failed=1
+fi
+
 step "xfail: a moved-from encoder"
 xf=tests/xfail/encoder_after_finish
 "$KAMA" pkg install "$xf/kama.json" > /dev/null
@@ -128,8 +162,11 @@ elif ! "$KAMA" build tests/kama.json --target WASM -o tests/out/web/gputests.htm
 elif ! "$KAMA" build examples/clear/kama.json --target WASM -o tests/out/clear-web/clear.html > tests/out/build-clear-web.log 2>&1; then
     tail -20 tests/out/build-clear-web.log
     failed=1
+elif ! "$KAMA" build examples/triangle/kama.json --target WASM -o tests/out/triangle-web/triangle.html > tests/out/build-triangle-web.log 2>&1; then
+    tail -20 tests/out/build-triangle-web.log
+    failed=1
 elif ! command -v node >/dev/null 2>&1; then
-    echo "ok   built tests/out/web/gputests.html and tests/out/clear-web/clear.html"
+    echo "ok   built tests/out/web/gputests.html, tests/out/clear-web/clear.html and tests/out/triangle-web/triangle.html"
     echo "skip no node on PATH, so no browser run"
 else
     # Under `kama run` (AGENTS.gpu.md item 11), bounded since it has no time limit of its own: Edge and Chrome as
@@ -151,6 +188,9 @@ else
             printed tests/out/run-web.log "$name"
             echo "-- kama run, $browser: examples/clear on #canvas for 60 frames"
             KAMA_BROWSER="$browser" bounded "$KAMA" run examples/clear/kama.json --target WASM --headless -- --frames 60 || failed=1
+            echo "-- kama run, $browser: examples/triangle on #canvas for 60 frames, read back"
+            KAMA_BROWSER="$browser" bounded "$KAMA" run examples/triangle/kama.json --target WASM --headless -- --frames 60 2>&1 | tee tests/out/run-triangle-web.log || failed=1
+            readBack tests/out/run-triangle-web.log "$name"
         done <<< "$browsers"
     else
         echo "skip no browser for kama run (Edge or Chrome installed, or Firefox pinned under ~/browsers; or set KAMA_BROWSER)"
@@ -163,6 +203,9 @@ else
             printed tests/out/run-driver.log "the driver"
             echo "-- the driver, $browser: examples/clear on #canvas for 60 frames"
             node tools/webtest.mjs tests/out/clear-web "clear.html?arg=--frames&arg=60" --browser "$browser" || failed=1
+            echo "-- the driver, $browser: examples/triangle on #canvas for 60 frames, read back"
+            node tools/webtest.mjs tests/out/triangle-web "triangle.html?arg=--frames&arg=60" --browser "$browser" 2>&1 | tee tests/out/run-triangle-driver.log || failed=1
+            readBack tests/out/run-triangle-driver.log "the driver"
         done <<< "$browsers"
     else
         echo "skip no Chrome for Testing pinned under ~/browsers, so no driver run"

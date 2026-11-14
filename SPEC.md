@@ -5,15 +5,21 @@ tested. What comes next is [ROADMAP.md](ROADMAP.md), why the package departs fro
 [AGENTS.gpu.md](AGENTS.gpu.md), which of webgpu.h's functions it calls is [COVERAGE.md](COVERAGE.md), and its history
 is the git log and [CHANGELOG.md](CHANGELOG.md).
 
-**Where it stands** (2026-11-13, kama 0.9.938): offscreen work and a surface on an `@kama/window` window, natively on
-Windows over Vulkan, on wgpu-native v29.0.1.1, and on the web (emdawnwebgpu, Dawn v20260423.175430) in headless Edge
-157, Chrome for Testing 157 and Firefox 160 on a canvas. It calls 79 of webgpu.h's 206 functions. Not published.
+**Where it stands** (2026-11-13, kama 0.9.943): the render pipeline set, offscreen and on a surface on an
+`@kama/window` window, natively on Windows over Vulkan, on wgpu-native v29.0.1.1, and on the web (emdawnwebgpu, Dawn
+v20260423.175430) in headless Edge 157, Chrome for Testing 157 and Firefox 160 on a canvas. It calls 95 of webgpu.h's
+206 functions. Not published.
 
 ## Using it
 
 A program sets `"webgpu": true` in its own `kama.json` (kama reads that key from the root manifest only) and, until
 `@kama/window` is published, names `@kama/window` beside `@kama/gpu`, since kama allows a path dependency only at the
 top level. Natively kama finds wgpu-native's SDK at `$KAMA_WGPU_DIR`. Everything is `import { gpu::… }`.
+
+`examples/triangle` is the whole path in one program, natively and in a browser: a window, its surface, an adapter
+and a device answered a tick at a time as a `std::app` `App`, a pipeline made from a WGSL module through a layout
+written out, a triangle drawn through a vertex buffer, an index buffer and a bind group whose uniform is written each
+frame, and nothing released by hand. `examples/clear` is the smallest program that presents.
 
 ## Invariants
 
@@ -591,15 +597,23 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   once each, and nothing of the error a popped scope caught, since every other device the tests open turns printing off;
 - `examples/clear`, a real window cleared for 60 frames with no skipped acquire and no WebGPU error, unless
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
+- `examples/triangle`, a real window, 600 × 400 so that a copy's rows need padding, drawn for 60 frames with no WebGPU
+  error, unless `KAMA_WINDOW_NO_DISPLAY` is set (AGENTS.gpu.md item 12, decision 15). Its last frame is copied out of
+  the window before it is presented and read back, and three texels are held within 3 of 255: the centre, a third of
+  each corner's colour; a point towards the red corner at the frame's angle and the window's aspect ratio, which only a
+  spin written to the uniform each frame puts there; and a corner of the window, the clear colour. "60 frames with no
+  error" is also what a frame with nothing drawn gives, so the pixels are what is held. The program fails a run that
+  never read its frame back, and the gate fails a run whose output lacks the read back's line. Its source holds no
+  `raw()`, `adopt`, `extern fn` or webgpu.h name, so nothing in it is released by hand;
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
-- the web leg, headless, on the page's canvases: `tests/` (278 cases) and `examples/clear` (60 frames on `#canvas`)
-  under `kama run --target WASM --headless` in Edge, Chrome as installed and the pinned Firefox 160, each with the
-  printErrors check. Firefox's run holds each of its differences, so the day one goes, its run fails:
+- the web leg, headless, on the page's canvases: `tests/` (278 cases), `examples/clear` (60 frames on `#canvas`) and
+  `examples/triangle` (60 frames on `#canvas`, the last read back) under `kama run --target WASM --headless` in Edge,
+  Chrome as installed and the pinned Firefox 160, each with the printErrors check and the read back's line. Firefox's run holds each of its differences, so the day one goes, its run fails:
   `maxImmediateSize` to 0 (`--no-immediates`); a WGSL warning to no message (`--no-shader-warnings`); a buffer of
   2^53 - 256 bytes to an out-of-memory error, which is how Firefox reports it (`--huge-buffer-out-of-memory`); a render
   pass error to not naming the pass, as wgpu's never do (`--unnamed-pass-errors`); and a depth slice of 2^32 - 2 on a 2D
-  view to being taken (`--unchecked-depth-slice`). Both also run through `tools/webtest.mjs` in the pinned Chrome for Testing, which
+  view to being taken (`--unchecked-depth-slice`). All three also run through `tools/webtest.mjs` in the pinned Chrome for Testing, which
   does not run under `kama run` (kyoten's KY-53). `--adapter-optional`, which turns a missing adapter into a named
   skip, is passed by no leg; it is kept for a host with no GPU.
 

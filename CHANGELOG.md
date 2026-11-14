@@ -5,6 +5,12 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: `examples/triangle`** (2026-11-13, kama 0.9.943; GPU-4's fifth and last part, AGENTS.gpu.md item 12,
+  decision 15). A triangle spun in a window, natively and in a browser, drawn through a vertex buffer, an index buffer
+  and a bind group whose uniform is written each frame, through a layout written out, with nothing released by hand.
+  Under `--frames N` its last frame is copied out of the window and read back, and three texels are checked; the gate
+  runs it on every leg. The render pipeline set, GPU-4, is built.
+
 - **New: the render pass's commands** (2026-11-13, kama 0.9.943; GPU-4's fourth part, AGENTS.gpu.md item 12,
   decision 11): `setVertexBuffer(slot:, binding:)` and `setIndexBuffer(binding:, format:)` over a `BufferBinding`,
   `setBindGroup(index:, group:)` and `setBindGroupWithOffsets(index:, group:, offsets:)`, `setBlendConstant(color:)`,
