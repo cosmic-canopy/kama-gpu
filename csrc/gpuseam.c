@@ -929,6 +929,7 @@ struct gpuseam_map {
     WGPUBuffer buffer;   // a reference held while the slot lives
     size_t offset;
     size_t size;
+    const uint8_t *bytes;   // the mapped range, once asked for: valid until the unmap
     char message[GPUSEAM_MESSAGE_BYTES];
     int32_t message_length;
 };
@@ -985,9 +986,12 @@ int32_t gpuseam_map_message(gpuseam_map *m, uint8_t *dst, int32_t capacity) {
     return copy_out(m->message, m->message_length, dst, capacity);
 }
 
+// The range is asked for once and kept until the unmap: a browser refuses a second mapped range over the first, which
+// emdawnwebgpu answers with NULL, where wgpu-native hands the same range again.
 const uint8_t *gpuseam_map_bytes(gpuseam_map *m) {
     if (atomic_load_explicit(&m->state, memory_order_acquire) != GPUSEAM_READY) return NULL;
-    return (const uint8_t *)wgpuBufferGetConstMappedRange(m->buffer, m->offset, m->size);
+    if (m->bytes == NULL) m->bytes = (const uint8_t *)wgpuBufferGetConstMappedRange(m->buffer, m->offset, m->size);
+    return m->bytes;
 }
 
 void gpuseam_map_drop(gpuseam_map *m) {

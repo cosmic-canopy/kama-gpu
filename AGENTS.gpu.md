@@ -39,13 +39,13 @@ in; *as an engine renderer* they stay out.
 
 **[SPEC.md](SPEC.md) is what the package is, [ROADMAP.md](ROADMAP.md) what comes next, and [COVERAGE.md](COVERAGE.md)
 which of webgpu.h it calls.** In short (2026-11-13, kama 0.9.943): offscreen work and a surface on a window run natively
-on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 88 of webgpu.h's 206 functions, a device's
+on Windows and in a browser on a canvas (GPU-3, built), the safe API calls 95 of webgpu.h's 206 functions, a device's
 errors reach its own holders (GPU-1), a surface holds its window (GPU-2), an acquire before a configure is refused
 (GPU-13), an adapter gives one device and a surface is configured at its window's size (GPU-3), and Firefox's
 differences from Dawn are handled (GPU-14). GPU-4, the render pipeline set, is decided (item 12) and under way: parts 1
 to 3 are built (shader modules; layouts, bind groups, samplers and `writeBuffer`; render pipelines both ways, with
-`printErrors`). Part 4 is decided (decisions 11 to 14) and under way: textures, views and the pass by description
-are built, and the pass's eight commands come next, then part 5. `tools/test.sh` passes before every commit.
+`printErrors`). Part 4 is built (decisions 11 to 14): textures, views and the pass by description, and the pass's eight
+commands. Part 5, `examples/triangle`, comes next. `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
 
@@ -1334,6 +1334,73 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       channels, the invalid carrier and, in Edge, the label.
     - **Results:** `tests/` is 272 cases natively, debug and release, and 249 in Edge, in Firefox and in Chrome for
       Testing. COVERAGE.md: 88 of 206, with `wgpuRenderPassEncoderSetVertexBuffer` called by the seam's carrier.
+
+    **Built on 2026-11-13 (kyoten's twentieth session), part 4's fourth step: the pass's eight commands** (decision 11,
+    with 9 and 14), test-first. Red against a stub whose new commands did nothing: 27 of the 28 new cases failed. The
+    28th, a draw of 2^31 vertices passed on natively, was green on its first run, since `draw` reached the backend
+    already.
+    - **The API** (decision 11):
+      - `setVertexBuffer(slot:, binding:)` and `setIndexBuffer(binding:, format:)`, each taking a `const ref
+        BufferBinding`, so one binding serves many passes;
+      - `setBindGroup(index:, group:)`, and `setBindGroupWithOffsets(index:, group:, offsets:)` with a
+        `ConstView<uint32>`, as `writeBuffer` takes its bytes;
+      - `setBlendConstant(color:)`, `drawIndexed(indexCount:, instanceCount:, firstIndex:, baseVertex:,
+        firstInstance:)`, `setViewport(...)`, `setScissorRect(...)` and `setStencilReference(reference:)`.
+    - **Clamped** where a browser would throw (decision 9), so WebGPU refuses them as it refuses the number given: a
+      slot, group index or scissor value at 2^31 or above, to 2^31 - 1 (`u31Of`); and an offset or size past 2^53 - 1,
+      through `BufferBinding`'s own clamps.
+    - **Refused** in the package's words at `finish` (decision 14), through the pass's own device and label: a blend
+      constant or viewport value that is not a finite number.
+    - **Decided in the building, for the owner to object to: a draw count of 2^31 or more is refused on the web alone.**
+      emdawnwebgpu converts `draw`'s and `drawIndexed`'s vertex, index and instance counts with `convertToU31`, so such a
+      count reaches a browser negative, and the browser throws, though WebGPU types the counts as 32-bit and takes
+      them, and so does wgpu-native. Clamping would draw less without a word, so the web refuses, and native, which
+      can draw it, passes it on (never nerf native). `draw` from part 3 gets the same.
+    - **Found in the building:**
+      - **A mapped read asked for its bytes twice answered nothing the second time on the web,** a bug since GPU-3. The
+        seam asked emdawnwebgpu for the mapped range at each `bytes()`, and a browser refuses a second range over the
+        first, where wgpu-native hands it again. The seam now keeps the first answer until the unmap. A case asks
+        twice on every leg.
+      - **Firefox 160 delivers no second uncaptured validation error whose words repeat an earlier one's,** whether or
+        not another came between: two vertex slots clamped to the same 2^31 - 1 gave one error there, and two in Edge.
+        The slot of 2^32 - 1's case was dropped, since its words are the slot of 2^31's. `u31Of`'s 2^32 - 1 is held
+        by the scissor's case, whose words differ.
+    - **The cases** (`PassRun`, after the pass's description cases):
+      - ten read back from a texel or two:
+        - a vertex buffer bound from an offset for a size;
+        - an instanced vertex buffer in slot 1, which catches part 3's last carried mutation, the step mode;
+        - an indexed draw, from an index buffer's offset, from a first index with a base vertex and a first instance;
+        - a bind group at index 1 of an explicit layout;
+        - a dynamic offset of 256;
+        - white blended by the constant, every channel its own;
+        - a viewport and a scissor of the bottom-right quarter, each read at both corners;
+        - a viewport depth range pushing the triangle behind a depth;
+        - a stencil reference passing an equal test;
+      - the read asked for its bytes twice;
+      - the refusals: a NaN and an infinite blend constant, a NaN viewport x, an infinite maxDepth, and a draw of 2^31
+        vertices and an indexed draw of 2^31 instances, refused on the web and passed on natively;
+      - twelve validation errors at `finish`, held to naming the pass or not by leg: each clamp (a slot of 2^31, an
+        offset and a size of 2^60, an index offset of 2^60, a group index of 2^31, a scissor x of 2^31 and one 2^32 - 1
+        wide and high), a slot past `maxVertexBuffers`, two dynamic offsets for one, a reversed depth range, an indexed
+        draw with no index buffer, and an index range of 2 bytes under 3 indices.
+    - **Mutations: 46 of 46 caught,** 41 natively and five in Edge. They cover:
+      - each command's every argument lost: the slot, the vertex buffer, its offset and size; the index buffer's offset,
+        size and format; the group index, with and without offsets, and the offsets; each blend channel; each viewport
+        value; each scissor value; the stencil reference; and `drawIndexed`'s five numbers;
+      - each refusal gone, and the blend's red and blue and the viewport's x and maxDepth unchecked;
+      - the pass holding no device, its label lost, and its refusal not reported;
+      - a draw count of 2^31 refused natively too;
+      - part 3's last carried mutation, the step mode, caught by the instanced case alone;
+      - in Edge: `u31Of` gone, and clamping 2^31 alone; the web's draw count not refused, and an indexed draw's
+        instance count unchecked (each ended the program at emdawnwebgpu's assertion, since `kama run` builds debug); and
+        the mapped range asked for at each `bytes()`.
+
+      The read asked for its bytes twice was red in Edge before the seam's fix. The index range of 2 bytes came with the
+      mutations, since a lost index size showed in no case before it. An Edge run through the mutation runner first
+      found no `emcc` on its shell's path and failed to build, which the runner counted as caught; the five were run
+      again from an interactive UCRT64 shell and each failed on its own.
+    - **Results:** `tests/` is 301 cases natively, debug and release, and 278 in Edge, in Firefox and in Chrome for
+      Testing. COVERAGE.md: 95 of 206, with `drawIndexed` and the seven `set` commands called.
 
 ## Where the truth is
 

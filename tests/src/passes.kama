@@ -19,6 +19,10 @@ import {
     gpu::ShaderModuleDescriptor, gpu::ShaderModule,
     gpu::StencilFaceState, gpu::DepthStencilState, gpu::ColorTargetState, gpu::VertexState, gpu::FragmentState,
     gpu::Layout, gpu::RenderPipelineDescriptor, gpu::RenderPipeline,
+    gpu::BindGroupLayout, gpu::BindGroupLayoutDescriptor, gpu::BindingLayout, gpu::BufferBindingLayout,
+    gpu::PipelineLayout, gpu::PipelineLayoutDescriptor, gpu::BindGroup, gpu::BindGroupDescriptor, gpu::BindingResource,
+    gpu::BufferBinding, gpu::ShaderStage, gpu::VertexBufferLayout, gpu::VertexFormat, gpu::VertexStepMode,
+    gpu::IndexFormat, gpu::BlendState, gpu::BlendComponent, gpu::BlendFactor,
     gpu::ErrorScope, gpu::ErrorFilter, gpu::ScopePop, gpu::PopStatus,
     Verdicts, readOptions,
 };
@@ -32,7 +36,9 @@ comptime uint32 ROW = 256;    // a copied row's bytes: WebGPU's alignment
 // `vs0` covers the target with one counter-clockwise triangle at a depth of 0.25, its position invariant so two
 // pipelines place it at the same depth (a depth prepass's equal test); `vsSlope` is that triangle with its depth rising
 // from 0 at the target's left edge to 0.5 at its right, a slope of 0.125 a texel that a depth bias scales. `fs` writes
-// (1, 0.5, 0.25, 1), and `fs1` white to location 1 alone.
+// (1, 0.5, 0.25, 1), and `fs1` white to location 1 alone. For the pass's commands: `vsBuf` reads a vertex buffer's
+// position, `vsInst` adds an instance's shift to it, `fsu0` and `fsu1` write group 0's and group 1's uniform, and
+// `fsWhite` writes white.
 fn string passWgsl() {
     return "struct VOut { @invariant @builtin(position) pos: vec4f };\n"
         + "@vertex fn vs0(@builtin(vertex_index) i: u32) -> VOut {\n"
@@ -42,7 +48,15 @@ fn string passWgsl() {
         + "  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));\n"
         + "  var o: VOut; o.pos = vec4f(p[i], 0.25 + 0.25 * p[i].x, 1.0); return o; }\n"
         + "@fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.5, 0.25, 1.0); }\n"
-        + "@fragment fn fs1() -> @location(1) vec4f { return vec4f(1.0, 1.0, 1.0, 1.0); }\n";
+        + "@fragment fn fs1() -> @location(1) vec4f { return vec4f(1.0, 1.0, 1.0, 1.0); }\n"
+        + "@vertex fn vsBuf(@location(0) p: vec2f) -> VOut { var o: VOut; o.pos = vec4f(p, 0.25, 1.0); return o; }\n"
+        + "@vertex fn vsInst(@location(0) p: vec2f, @location(1) shift: vec2f) -> VOut {\n"
+        + "  var o: VOut; o.pos = vec4f(p + shift, 0.25, 1.0); return o; }\n"
+        + "@group(0) @binding(0) var<uniform> u0: vec4f;\n"
+        + "@group(1) @binding(0) var<uniform> u1: vec4f;\n"
+        + "@fragment fn fsu0() -> @location(0) vec4f { return u0; }\n"
+        + "@fragment fn fsu1() -> @location(0) vec4f { return u1; }\n"
+        + "@fragment fn fsWhite() -> @location(0) vec4f { return vec4f(1.0, 1.0, 1.0, 1.0); }\n";
 }
 
 // NaN and the infinities, made at run time: kama refuses a constant division by zero.
@@ -110,7 +124,9 @@ type resource PassRun {
         else if (this.stage == 10) { this.goodPasses(); }
         else if (this.stage == 11) { this.awaitNone(name: "passes WebGPU takes begin, end and finish with no error: a colour cleared and stored, loaded, discarded, resolved, a 3D view's slice, an empty colour attachment, depth alone cleared and read-only, both aspects, stencil alone, and stencil read-only on a format with no stencil", next: 20); }
         else if (this.stage == 20) { this.render(kind: 0, next: 21); }
-        else if (this.stage == 21) { this.awaitPixel(name: "a colour attachment cleared reads back its clear colour, every channel its own", want: pixel(r: 51, g: 102, b: 153, a: 204), next: 30); }
+        else if (this.stage == 21) { this.awaitPixel(name: "a colour attachment cleared reads back its clear colour, every channel its own", want: pixel(r: 51, g: 102, b: 153, a: 204), next: 25); }
+        else if (this.stage == 25) { this.render(kind: 0, next: 26); }
+        else if (this.stage == 26) { this.awaitTwice(next: 30); }
         else if (this.stage == 30) { this.render(kind: 1, next: 31); }
         else if (this.stage == 31) { this.awaitPixel(name: "a colour attachment loaded keeps what an earlier pass stored", want: pixel(r: 51, g: 102, b: 153, a: 204), next: 40); }
         else if (this.stage == 40) { this.render(kind: 2, next: 41); }
@@ -164,7 +180,63 @@ type resource PassRun {
         else if (this.stage == 330) { this.misused(kind: 3, label: "depth unsaid", next: 331); }
         else if (this.stage == 331) { this.awaitNamed(name: "a depth format given no depth access is a validation error at finish", label: "depth unsaid", next: 340); }
         else if (this.stage == 340) { this.misused(kind: 4, label: "bare pass", next: 341); }
-        else if (this.stage == 341) { this.awaitNamed(name: "a pass with no attachments is a validation error at finish", label: "bare pass", next: 999); }
+        else if (this.stage == 341) { this.awaitNamed(name: "a pass with no attachments is a validation error at finish", label: "bare pass", next: 400); }
+        else if (this.stage == 400) { this.render(kind: 20, next: 401); }
+        else if (this.stage == 401) { this.awaitPixel(name: "a vertex buffer bound from an offset, for a size, is drawn from there", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 410); }
+        else if (this.stage == 410) { this.render(kind: 21, next: 411); }
+        else if (this.stage == 411) { this.awaitPixel(name: "a vertex buffer in slot 1 stepped per instance shifts the second instance onto the target, and the first off it", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 420); }
+        else if (this.stage == 420) { this.render(kind: 22, next: 421); }
+        else if (this.stage == 421) { this.awaitPixel(name: "an indexed draw reads its index buffer from an offset, in Uint16, from its first index, each index added to its base vertex, from its first instance", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 430); }
+        else if (this.stage == 430) { this.render(kind: 23, next: 431); }
+        else if (this.stage == 431) { this.awaitPixel(name: "a bind group set at index 1 is read by the shader's group 1", want: pixel(r: 0, g: 255, b: 0, a: 255), next: 440); }
+        else if (this.stage == 440) { this.render(kind: 24, next: 441); }
+        else if (this.stage == 441) { this.awaitPixel(name: "a dynamic offset of 256 reads the uniform 256 bytes into its buffer", want: pixel(r: 0, g: 0, b: 255, a: 255), next: 450); }
+        else if (this.stage == 450) { this.render(kind: 25, next: 451); }
+        else if (this.stage == 451) { this.awaitPixel(name: "a blend of white times the blend constant writes the constant, every channel its own", want: pixel(r: 51, g: 102, b: 153, a: 204), next: 460); }
+        else if (this.stage == 460) { this.render(kind: 26, next: 461); }
+        else if (this.stage == 461) { this.awaitCorners(name: "a viewport of the bottom-right quarter draws there and not at the top left", topLeft: pixel(r: 0, g: 0, b: 0, a: 0), bottomRight: pixel(r: 255, g: 128, b: 64, a: 255), next: 470); }
+        else if (this.stage == 470) { this.render(kind: 27, next: 471); }
+        else if (this.stage == 471) { this.awaitPixel(name: "a viewport's depth range from 0.6 to 1 maps a depth of 0.25 to 0.7, behind a depth of 0.5", want: pixel(r: 0, g: 0, b: 0, a: 0), next: 480); }
+        else if (this.stage == 480) { this.render(kind: 28, next: 481); }
+        else if (this.stage == 481) { this.awaitCorners(name: "a scissor of the bottom-right quarter draws there and not at the top left", topLeft: pixel(r: 0, g: 0, b: 0, a: 0), bottomRight: pixel(r: 255, g: 128, b: 64, a: 255), next: 490); }
+        else if (this.stage == 490) { this.render(kind: 29, next: 491); }
+        else if (this.stage == 491) { this.awaitPixel(name: "a stencil reference of 1 passes an equal test against a stencil cleared to 1", want: pixel(r: 255, g: 128, b: 64, a: 255), next: 500); }
+        else if (this.stage == 500) { this.commandRefused(kind: 0, label: "nan blend", next: 501); }
+        else if (this.stage == 501) { this.awaitOne(name: "a NaN blend constant is a validation error at finish in the package's words, not the end of a web program", label: "nan blend", says: "not a finite number", next: 510); }
+        else if (this.stage == 510) { this.commandRefused(kind: 1, label: "infinite blend", next: 511); }
+        else if (this.stage == 511) { this.awaitOne(name: "an infinite blend constant is a validation error at finish in the package's words, not the end of a web program", label: "infinite blend", says: "not a finite number", next: 520); }
+        else if (this.stage == 520) { this.commandRefused(kind: 2, label: "nan viewport", next: 521); }
+        else if (this.stage == 521) { this.awaitOne(name: "a NaN viewport x is a validation error at finish in the package's words, not the end of a web program", label: "nan viewport", says: "not a finite number", next: 530); }
+        else if (this.stage == 530) { this.commandRefused(kind: 3, label: "infinite depth range", next: 531); }
+        else if (this.stage == 531) { this.awaitOne(name: "an infinite viewport maxDepth is a validation error at finish in the package's words, not the end of a web program", label: "infinite depth range", says: "not a finite number", next: 540); }
+        else if (this.stage == 540) { this.commandRefused(kind: 4, label: "huge draw", next: 541); }
+        else if (this.stage == 541) { this.awaitHuge(name: "a draw of 2^31 vertices", label: "huge draw", next: 550); }
+        else if (this.stage == 550) { this.commandRefused(kind: 5, label: "huge instancing", next: 551); }
+        else if (this.stage == 551) { this.awaitHuge(name: "an indexed draw of 2^31 instances", label: "huge instancing", next: 600); }
+        else if (this.stage == 600) { this.commandMisused(kind: 0, label: "slot 2^31", next: 601); }
+        else if (this.stage == 601) { this.awaitNamed(name: "a vertex buffer slot of 2^31 is a validation error at finish, not the end of a web program", label: "slot 2^31", next: 610); }
+        else if (this.stage == 610) { this.commandMisused(kind: 2, label: "vertex offset 2^60", next: 611); }
+        else if (this.stage == 611) { this.awaitNamed(name: "a vertex buffer offset of 2^60 is a validation error at finish, not the end of a web program", label: "vertex offset 2^60", next: 615); }
+        else if (this.stage == 615) { this.commandMisused(kind: 3, label: "vertex size 2^60", next: 616); }
+        else if (this.stage == 616) { this.awaitNamed(name: "a vertex buffer size of 2^60 is a validation error at finish, not the end of a web program", label: "vertex size 2^60", next: 620); }
+        else if (this.stage == 620) { this.commandMisused(kind: 4, label: "index offset 2^60", next: 621); }
+        else if (this.stage == 621) { this.awaitNamed(name: "an index buffer offset of 2^60 is a validation error at finish, not the end of a web program", label: "index offset 2^60", next: 625); }
+        else if (this.stage == 625) { this.commandMisused(kind: 5, label: "group 2^31", next: 626); }
+        else if (this.stage == 626) { this.awaitNamed(name: "a bind group index of 2^31 is a validation error at finish, not the end of a web program", label: "group 2^31", next: 630); }
+        else if (this.stage == 630) { this.commandMisused(kind: 6, label: "scissor x 2^31", next: 631); }
+        else if (this.stage == 631) { this.awaitNamed(name: "a scissor x of 2^31 is a validation error at finish, not the end of a web program", label: "scissor x 2^31", next: 635); }
+        else if (this.stage == 635) { this.commandMisused(kind: 7, label: "scissor 2^32 - 1 wide", next: 636); }
+        else if (this.stage == 636) { this.awaitNamed(name: "a scissor 2^32 - 1 wide and high is a validation error at finish, not the end of a web program", label: "scissor 2^32 - 1 wide", next: 640); }
+        else if (this.stage == 640) { this.commandMisused(kind: 8, label: "slot past the limit", next: 641); }
+        else if (this.stage == 641) { this.awaitNamed(name: "a vertex buffer slot past maxVertexBuffers is a validation error at finish", label: "slot past the limit", next: 645); }
+        else if (this.stage == 645) { this.commandMisused(kind: 9, label: "an offset too many", next: 646); }
+        else if (this.stage == 646) { this.awaitNamed(name: "two dynamic offsets for a group with one dynamic buffer are a validation error at finish", label: "an offset too many", next: 650); }
+        else if (this.stage == 650) { this.commandMisused(kind: 10, label: "depth range reversed", next: 651); }
+        else if (this.stage == 651) { this.awaitNamed(name: "a viewport's minDepth above its maxDepth is a validation error at finish", label: "depth range reversed", next: 655); }
+        else if (this.stage == 655) { this.commandMisused(kind: 11, label: "no index buffer", next: 656); }
+        else if (this.stage == 656) { this.awaitNamed(name: "an indexed draw with no index buffer is a validation error at finish", label: "no index buffer", next: 660); }
+        else if (this.stage == 660) { this.commandMisused(kind: 12, label: "index range too short", next: 661); }
+        else if (this.stage == 661) { this.awaitNamed(name: "an index buffer bound for 2 bytes under a draw of 3 indices is a validation error at finish", label: "index range too short", next: 999); }
         return this.stage >= 999;
     }
 
@@ -335,7 +407,10 @@ type resource PassRun {
                         uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
                         Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
                         CommandEncoder encoder = d.createCommandEncoder();
-                        recorded(d: d, m: m, encoder: encoder, kind: kind, into: b);
+                        match (this.queue) {
+                            case Some(value: q): { recorded(d: d, q: q, m: m, encoder: encoder, kind: kind, into: b); }
+                            case None: { }
+                        };
                         CommandBuffer commands = give encoder.finish();
                         match (this.queue) {
                             case Some(value: q): { q.submit(commands: give commands); }
@@ -464,6 +539,136 @@ type resource PassRun {
         this.next(to: next);
     }
 
+    // A ready read asked for its bytes twice answers the whole range both times, the same bytes. On the web a browser
+    // refuses a second mapped range over the first, which the seam once asked for at each call.
+    unsafe fn void awaitTwice(int32 next) {
+        match (this.device) { case Some(value: d): { d.poll(wait: true); } case None: { } };
+        ReadStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: ReadStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.waited < SETTLE) { return; }
+        string why = match (s) {
+            case Pending: "the map did not finish";
+            case Failed(error: e): e.message();
+            case Ready: "";
+        };
+        if (why.isEmpty()) {
+            DynamicArray<uint8> once = match (this.reading) { case Some(value: r): r.bytes(); case None: DynamicArray.empty(); };
+            DynamicArray<uint8> again = match (this.reading) { case Some(value: r): r.bytes(); case None: DynamicArray.empty(); };
+            isize whole = cast<isize>(ROW) * cast<isize>(SIDE);
+            isize first = once.length();
+            if (first != whole) { why = "the first answer is ${first} bytes, not ${whole}"; }
+            else { why = sameBytes(got: again, want: once); }
+        }
+        this.reading = Optional::None;
+        this.readback = Optional::None;
+        this.found.add(name: "a mapped read asked for its bytes twice answers the same bytes both times, on every leg", why: give why);
+        this.next(to: next);
+    }
+
+    // The copied target's first texel is `topLeft` and its last `bottomRight`, and the channel is empty.
+    unsafe fn void awaitCorners(const ref string name, DynamicArray<uint8> topLeft, DynamicArray<uint8> bottomRight, int32 next) {
+        match (this.device) { case Some(value: d): { d.poll(wait: true); } case None: { } };
+        ReadStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: ReadStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.waited < SETTLE) { return; }
+        string why = match (s) {
+            case Pending: "the map did not finish";
+            case Failed(error: e): e.message();
+            case Ready: "";
+        };
+        if (why.isEmpty()) {
+            DynamicArray<uint8> first = match (this.reading) { case Some(value: r): texelAt(r: r, x: 0, y: 0); case None: DynamicArray.empty(); };
+            DynamicArray<uint8> last = match (this.reading) { case Some(value: r): texelAt(r: r, x: SIDE - 1, y: SIDE - 1); case None: DynamicArray.empty(); };
+            string atFirst = sameBytes(got: first, want: topLeft);
+            string atLast = sameBytes(got: last, want: bottomRight);
+            if (!atFirst.isEmpty()) { why = "the top-left texel: " + atFirst; }
+            else if (!atLast.isEmpty()) { why = "the bottom-right texel: " + atLast; }
+        }
+        Optional<DeviceErrors> errs = this.drain();
+        string heard = match (errs) {
+            case Some(value: e): e.isEmpty() ? "" : "the channel holds " + described(errs: e);
+            case None: "";
+        };
+        if (why.isEmpty()) { why = copy heard; }
+        this.reading = Optional::None;
+        this.readback = Optional::None;
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // A pass whose command the package refuses (`refusedCommand`'s `kind`), begun on a cleared target and labelled
+    // `label`, then ended and finished, its command buffer dropped.
+    unsafe fn void commandRefused(int32 kind, const ref string label, int32 next) {
+        match (this.device) {
+            case Some(value: d): {
+                Texture color = colorTarget(d: d);
+                CommandEncoder encoder = d.createCommandEncoder();
+                RenderPassDescriptor p = passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: nothing()));
+                p.label(text: copy label);
+                RenderPass pass = encoder.beginRenderPass(descriptor: give p);
+                refusedCommand(pass: pass, kind: kind);
+                give pass.end();
+                CommandBuffer done = give encoder.finish();
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: next);
+    }
+
+    // A draw whose count is 2^31 or more, in a pass with no pipeline: on the web, where emdawnwebgpu cannot hand a
+    // browser such a count, refused in the package's words; natively, where WebGPU's own draw takes it, passed on, and
+    // the missing pipeline is the backend's error.
+    unsafe fn void awaitHuge(const ref string name, const ref string label, int32 next) {
+        if (hugeCountsRefused()) {
+            this.awaitOne(name: name + " is refused on the web in the package's words, which emdawnwebgpu cannot hand a browser", label: label, says: "2^31 or more", next: next);
+            return;
+        }
+        Optional<DeviceErrors> got = this.drain();
+        bool none = match (got) { case Some(value: errs): errs.isEmpty(); case None: true; };
+        if (none && this.waited < SETTLE) { return; }
+        string why = match (got) {
+            case Some(value: errs): oneNaming(errs: errs, label: "", says: "");
+            case None: "no device";
+        };
+        if (why.isEmpty()) {
+            string words = match (got) { case Some(value: errs): errs.reports()[0].message(); case None: ""; };
+            if (words.contains(substring: "2^31 or more")) { why = "the package refused it natively: " + words; }
+        }
+        this.found.add(name: name + " is passed on natively, as WebGPU takes it: the missing pipeline is the backend's error", why: give why);
+        this.next(to: next);
+    }
+
+    // A pass whose command WebGPU refuses (`misusedCommand`'s `kind`), begun on a cleared target and labelled `label`.
+    unsafe fn void commandMisused(int32 kind, const ref string label, int32 next) {
+        match (this.device) {
+            case Some(value: d): {
+                match (this.shaders) {
+                    case Some(value: m): {
+                        Texture color = colorTarget(d: d);
+                        CommandEncoder encoder = d.createCommandEncoder();
+                        RenderPassDescriptor p = passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: nothing()));
+                        p.label(text: copy label);
+                        RenderPass pass = encoder.beginRenderPass(descriptor: give p);
+                        misusedCommand(d: d, m: m, pass: pass, kind: kind);
+                        give pass.end();
+                        CommandBuffer done = give encoder.finish();
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: next);
+    }
+
     // An encoder whose pass WebGPU refuses (`misusedPass`'s `kind`), finished and its command buffer dropped.
     unsafe fn void misused(int32 kind, const ref string label, int32 next) {
         match (this.device) {
@@ -580,9 +785,11 @@ unsafe fn RenderPassDescriptor goodPass(ref Device d, int32 kind) {
 }
 
 // The read-back cases, recorded into `encoder`: each ends with its colour copied into `into`.
-unsafe fn void recorded(ref Device d, ref ShaderModule m, ref CommandEncoder encoder, int32 kind, const ref Buffer into) {
+unsafe fn void recorded(ref Device d, ref Queue q, ref ShaderModule m, ref CommandEncoder encoder, int32 kind, const ref Buffer into) {
     Texture color = colorTarget(d: d);
-    if (kind == 0) {
+    if (kind >= 20) {
+        commanded(d: d, q: q, m: m, encoder: encoder, kind: kind, color: color);
+    } else if (kind == 0) {
         // cleared, every channel its own
         RenderPass pass = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: fifths())));
         give pass.end();
@@ -794,6 +1001,313 @@ unsafe fn RenderPassDescriptor misusedPass(ref Device d, int32 kind, const ref s
     }
     p.label(text: copy label);
     return p;
+}
+
+// The little-endian bytes of `values`, each a float32.
+fn DynamicArray<uint8> floatBytes(const ref DynamicArray<float32> values) {
+    DynamicArray<uint8> written = DynamicArray.empty();
+    isize i = 0;
+    while (i < values.length()) {
+        uint32 bits = bitcast<uint32>(values[i]);
+        written.add(item: truncate<uint8>(bits));
+        written.add(item: truncate<uint8>(bits >> 8));
+        written.add(item: truncate<uint8>(bits >> 16));
+        written.add(item: truncate<uint8>(bits >> 24));
+        i = i + 1;
+    }
+    return written;
+}
+// The little-endian bytes of `values`, each a uint16 index.
+fn DynamicArray<uint8> indexBytes(const ref DynamicArray<uint16> values) {
+    DynamicArray<uint8> written = DynamicArray.empty();
+    isize i = 0;
+    while (i < values.length()) {
+        written.add(item: truncate<uint8>(values[i]));
+        written.add(item: truncate<uint8>(values[i] >> 8));
+        i = i + 1;
+    }
+    return written;
+}
+fn DynamicArray<float32> floats(float32 a, float32 b) {
+    DynamicArray<float32> v = DynamicArray.empty();
+    v.add(item: a);
+    v.add(item: b);
+    return v;
+}
+fn void addPair(ref DynamicArray<float32> v, float32 a, float32 b) {
+    v.add(item: a);
+    v.add(item: b);
+}
+// The triangle that covers the target, as three float32x2 positions.
+fn void addCover(ref DynamicArray<float32> v) {
+    addPair(v: v, a: -1.0, b: -1.0);
+    addPair(v: v, a: 3.0, b: -1.0);
+    addPair(v: v, a: -1.0, b: 3.0);
+}
+// A buffer of `usage` holding `bytes`, written through `q`.
+unsafe fn Buffer holding(ref Device d, ref Queue q, BufferUsage usage, const ref DynamicArray<uint8> bytes) {
+    Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: cast<uint64>(bytes.length()), usage: usage | BufferUsage::CopyDst));
+    q.writeBuffer(buffer: b, offset: 0, data: bytes.view());
+    return b;
+}
+// A group layout of one uniform buffer, dynamic or not, at binding 0, read by the fragment stage; and one with nothing.
+unsafe fn BindGroupLayout uniformLayout(ref Device d, bool dynamic) {
+    BufferBindingLayout u = BufferBindingLayout.make();
+    u.hasDynamicOffset = dynamic;
+    BindGroupLayoutDescriptor l = BindGroupLayoutDescriptor.make();
+    l.entry(binding: 0, visibility: ShaderStage::Fragment, layout: BindingLayout::Buffer(layout: u));
+    return d.createBindGroupLayout(descriptor: give l);
+}
+unsafe fn BindGroupLayout emptyLayout(ref Device d) { return d.createBindGroupLayout(descriptor: BindGroupLayoutDescriptor.make()); }
+// A bind group of `layout` holding `size` bytes of `buffer` at binding 0; and one holding nothing.
+unsafe fn BindGroup uniformGroup(ref Device d, ref BindGroupLayout layout, ref Buffer buffer, uint64 size) {
+    BindGroupDescriptor g = BindGroupDescriptor.make(layout: copy layout);
+    g.entry(binding: 0, resource: BindingResource::Buffer(binding: BufferBinding.range(buffer: copy buffer, offset: 0, size: size)));
+    return d.createBindGroup(descriptor: give g);
+}
+unsafe fn BindGroup emptyGroup(ref Device d, ref BindGroupLayout layout) { return d.createBindGroup(descriptor: BindGroupDescriptor.make(layout: copy layout)); }
+
+// The commands' pipelines, by kind, drawing into RGBA8Unorm: 0 `vsBuf`, a position from slot 0; 1 `vsInst`, a
+// position from slot 0 per vertex and a shift from slot 1 per instance; 2 `fsu0` or 3 `fsu1` through `layout`; 4 white
+// blended as the source times the constant; 5 `vs0` with nothing read.
+unsafe fn RenderPipelineDescriptor commandPipeline(ref ShaderModule m, int32 kind, Layout layout) {
+    string entry = kind == 0 ? "vsBuf" : kind == 1 ? "vsInst" : "vs0";
+    VertexState v = VertexState.make(module: copy m, entryPoint: give entry);
+    if (kind == 0 || kind == 1) {
+        VertexBufferLayout at = VertexBufferLayout.make(arrayStride: 8);
+        at.attribute(format: VertexFormat::Float32x2, offset: 0, shaderLocation: 0);
+        v.buffer(layout: give at);
+    }
+    if (kind == 1) {
+        VertexBufferLayout shift = VertexBufferLayout.make(arrayStride: 8);
+        shift.stepMode(mode: VertexStepMode::Instance);
+        shift.attribute(format: VertexFormat::Float32x2, offset: 0, shaderLocation: 1);
+        v.buffer(layout: give shift);
+    }
+    RenderPipelineDescriptor p = RenderPipelineDescriptor.make(layout: give layout, vertex: give v);
+    string fragment = kind == 2 ? "fsu0" : kind == 3 ? "fsu1" : kind == 4 ? "fsWhite" : "fs";
+    FragmentState f = FragmentState.make(module: copy m, entryPoint: give fragment);
+    ColorTargetState t = ColorTargetState.make(format: TextureFormat::RGBA8Unorm);
+    if (kind == 4) {
+        BlendComponent byConstant = BlendComponent.make();
+        byConstant.srcFactor = BlendFactor::Constant;
+        byConstant.dstFactor = BlendFactor::Zero;
+        t.blend = Optional::Some(value: BlendState.make(color: byConstant, alpha: byConstant));
+    }
+    f.target(state: t);
+    p.fragment(state: give f);
+    return p;
+}
+
+// The commands' read-back cases, recorded into `encoder` with `color` the target (`recorded` copies it out).
+unsafe fn void commanded(ref Device d, ref Queue q, ref ShaderModule m, ref CommandEncoder encoder, int32 kind, ref Texture color) {
+    if (kind == 20) {
+        // three positions at zero (a triangle of nothing), then the covering triangle; bound from its 24th byte, 24 bytes
+        DynamicArray<float32> v = DynamicArray.empty();
+        addPair(v: v, a: 0.0, b: 0.0);
+        addPair(v: v, a: 0.0, b: 0.0);
+        addPair(v: v, a: 0.0, b: 0.0);
+        addCover(v: v);
+        Buffer vb = holding(d: d, q: q, usage: BufferUsage::Vertex, bytes: floatBytes(values: v));
+        RenderPipeline p = d.createRenderPipeline(descriptor: commandPipeline(m: m, kind: 0, layout: Layout::Auto));
+        RenderPass pass = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: nothing())));
+        pass.setPipeline(pipeline: p);
+        pass.setVertexBuffer(slot: 0, binding: BufferBinding.range(buffer: copy vb, offset: 24, size: 24));
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    } else if (kind == 21) {
+        // the covering triangle in slot 0, and in slot 1 per instance a shift off the target, then none
+        DynamicArray<float32> v = DynamicArray.empty();
+        addCover(v: v);
+        DynamicArray<float32> shifts = floats(a: 10.0, b: 10.0);
+        addPair(v: shifts, a: 0.0, b: 0.0);
+        addPair(v: shifts, a: 0.0, b: 0.0);
+        Buffer vb = holding(d: d, q: q, usage: BufferUsage::Vertex, bytes: floatBytes(values: v));
+        Buffer sb = holding(d: d, q: q, usage: BufferUsage::Vertex, bytes: floatBytes(values: shifts));
+        RenderPipeline p = d.createRenderPipeline(descriptor: commandPipeline(m: m, kind: 1, layout: Layout::Auto));
+        RenderPass pass = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: nothing())));
+        pass.setPipeline(pipeline: p);
+        pass.setVertexBuffer(slot: 0, binding: BufferBinding.whole(buffer: copy vb));
+        pass.setVertexBuffer(slot: 1, binding: BufferBinding.whole(buffer: copy sb));
+        pass.draw(vertexCount: 3, instanceCount: 2, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    } else if (kind == 22) {
+        // positions: three at zero, then the covering triangle; shifts per instance: off the target, then none. The
+        // index buffer holds 16 bytes of 9s, then the indices 9, 9, 9, 0, 1, 2 (and two of padding): bound from byte 16,
+        // drawn from index 3 with a base vertex of 3, one instance from instance 1
+        DynamicArray<float32> v = DynamicArray.empty();
+        addPair(v: v, a: 0.0, b: 0.0);
+        addPair(v: v, a: 0.0, b: 0.0);
+        addPair(v: v, a: 0.0, b: 0.0);
+        addCover(v: v);
+        DynamicArray<float32> shifts = floats(a: 10.0, b: 10.0);
+        addPair(v: shifts, a: 0.0, b: 0.0);
+        DynamicArray<uint16> indices = DynamicArray.empty();
+        isize i = 0;
+        while (i < 8) { indices.add(item: 0x0909); i = i + 1; }
+        indices.add(item: 9);
+        indices.add(item: 9);
+        indices.add(item: 9);
+        indices.add(item: 0);
+        indices.add(item: 1);
+        indices.add(item: 2);
+        indices.add(item: 0);
+        indices.add(item: 0);
+        Buffer vb = holding(d: d, q: q, usage: BufferUsage::Vertex, bytes: floatBytes(values: v));
+        Buffer sb = holding(d: d, q: q, usage: BufferUsage::Vertex, bytes: floatBytes(values: shifts));
+        Buffer ib = holding(d: d, q: q, usage: BufferUsage::Index, bytes: indexBytes(values: indices));
+        RenderPipeline p = d.createRenderPipeline(descriptor: commandPipeline(m: m, kind: 1, layout: Layout::Auto));
+        RenderPass pass = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: nothing())));
+        pass.setPipeline(pipeline: p);
+        pass.setVertexBuffer(slot: 0, binding: BufferBinding.whole(buffer: copy vb));
+        pass.setVertexBuffer(slot: 1, binding: BufferBinding.whole(buffer: copy sb));
+        pass.setIndexBuffer(binding: BufferBinding.rest(buffer: copy ib, offset: 16), format: IndexFormat::Uint16);
+        pass.drawIndexed(indexCount: 3, instanceCount: 1, firstIndex: 3, baseVertex: 3, firstInstance: 1);
+        give pass.end();
+    } else if (kind == 23) {
+        // an explicit layout of an empty group 0 and a uniform group 1, which holds green
+        BindGroupLayout none = emptyLayout(d: d);
+        BindGroupLayout uniform = uniformLayout(d: d, dynamic: false);
+        PipelineLayoutDescriptor pl = PipelineLayoutDescriptor.make();
+        pl.group(layout: copy none);
+        pl.group(layout: copy uniform);
+        PipelineLayout layout = d.createPipelineLayout(descriptor: give pl);
+        DynamicArray<float32> green = floats(a: 0.0, b: 1.0);
+        addPair(v: green, a: 0.0, b: 1.0);
+        Buffer u = holding(d: d, q: q, usage: BufferUsage::Uniform, bytes: floatBytes(values: green));
+        BindGroup g0 = emptyGroup(d: d, layout: none);
+        BindGroup g1 = uniformGroup(d: d, layout: uniform, buffer: u, size: 16);
+        RenderPipeline p = d.createRenderPipeline(descriptor: commandPipeline(m: m, kind: 3, layout: Layout::Explicit(layout: give layout)));
+        RenderPass pass = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: nothing())));
+        pass.setPipeline(pipeline: p);
+        pass.setBindGroup(index: 0, group: g0);
+        pass.setBindGroup(index: 1, group: g1);
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    } else if (kind == 24) {
+        // a dynamic uniform: red at byte 0 and blue at byte 256, read at a dynamic offset of 256
+        BindGroupLayout dynamic = uniformLayout(d: d, dynamic: true);
+        PipelineLayoutDescriptor pl = PipelineLayoutDescriptor.make();
+        pl.group(layout: copy dynamic);
+        PipelineLayout layout = d.createPipelineLayout(descriptor: give pl);
+        DynamicArray<float32> both = DynamicArray.empty();
+        addPair(v: both, a: 1.0, b: 0.0);
+        addPair(v: both, a: 0.0, b: 1.0);
+        while (both.length() < 64) { both.add(item: 0.0); }
+        addPair(v: both, a: 0.0, b: 0.0);
+        addPair(v: both, a: 1.0, b: 1.0);
+        while (both.length() < 128) { both.add(item: 0.0); }
+        Buffer u = holding(d: d, q: q, usage: BufferUsage::Uniform, bytes: floatBytes(values: both));
+        BindGroup g = uniformGroup(d: d, layout: dynamic, buffer: u, size: 16);
+        RenderPipeline p = d.createRenderPipeline(descriptor: commandPipeline(m: m, kind: 2, layout: Layout::Explicit(layout: give layout)));
+        DynamicArray<uint32> offsets = DynamicArray.empty();
+        offsets.add(item: 256);
+        RenderPass pass = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: nothing())));
+        pass.setPipeline(pipeline: p);
+        pass.setBindGroupWithOffsets(index: 0, group: g, offsets: offsets.view());
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    } else if (kind == 25) {
+        // white times the blend constant
+        RenderPipeline p = d.createRenderPipeline(descriptor: commandPipeline(m: m, kind: 4, layout: Layout::Auto));
+        RenderPass pass = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: nothing())));
+        pass.setPipeline(pipeline: p);
+        pass.setBlendConstant(color: fifths());
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    } else if (kind == 26 || kind == 28) {
+        // the covering triangle through a viewport, or a scissor, of the bottom-right quarter
+        RenderPipeline p = d.createRenderPipeline(descriptor: commandPipeline(m: m, kind: 5, layout: Layout::Auto));
+        RenderPass pass = encoder.beginRenderPass(descriptor: passOf(attachment: ColorAttachment.clearing(view: wholeView(t: color), color: nothing())));
+        pass.setPipeline(pipeline: p);
+        if (kind == 26) { pass.setViewport(x: 2.0, y: 2.0, width: 2.0, height: 2.0, minDepth: 0.0, maxDepth: 1.0); }
+        else { pass.setScissorRect(x: 2, y: 2, width: 2, height: 2); }
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    } else if (kind == 27) {
+        // depth cleared to 0.5; a viewport depth range from 0.6 to 1 puts the triangle's 0.25 at 0.7, behind it
+        Texture depth = depthTarget(d: d, format: TextureFormat::Depth32Float);
+        RenderPipeline tested = d.createRenderPipeline(descriptor: passPipeline(m: m, kind: 1));
+        RenderPass pass = encoder.beginRenderPass(descriptor: withDepth(color: color, depth: DepthStencilAttachment.clearingDepth(view: wholeView(t: depth), value: 0.5)));
+        pass.setPipeline(pipeline: tested);
+        pass.setViewport(x: 0.0, y: 0.0, width: 4.0, height: 4.0, minDepth: 0.6, maxDepth: 1.0);
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    } else {
+        // stencil cleared to 1, an equal test against a reference of 1
+        Texture stencil = depthTarget(d: d, format: TextureFormat::Stencil8);
+        RenderPipeline equal = d.createRenderPipeline(descriptor: passPipeline(m: m, kind: 4));
+        DepthStencilAttachment cleared = DepthStencilAttachment.make(view: wholeView(t: stencil));
+        cleared.stencil(access: StencilAccess::ReadWrite(load: StencilLoad::Clear(value: 1), store: StoreOp::Store));
+        RenderPass pass = encoder.beginRenderPass(descriptor: withDepth(color: color, depth: give cleared));
+        pass.setPipeline(pipeline: equal);
+        pass.setStencilReference(reference: 1);
+        pass.draw(vertexCount: 3, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+        give pass.end();
+    }
+}
+
+// Whether this leg refuses a draw count of 2^31 or more: the web, where emdawnwebgpu hands a browser such a count
+// negative and the browser throws.
+@compileFor(ARCH_WASM32)
+fn bool hugeCountsRefused() { return true; }
+@compileFor(!ARCH_WASM32)
+fn bool hugeCountsRefused() { return false; }
+
+// The commands the package refuses, by kind: 0 a NaN red blend constant; 1 an infinite blue one; 2 a NaN viewport x;
+// 3 an infinite viewport maxDepth; 4 a draw of 2^31 vertices; 5 an indexed draw of 2^31 instances (with no pipeline).
+unsafe fn void refusedCommand(ref RenderPass pass, int32 kind) {
+    if (kind == 0) { pass.setBlendConstant(color: Color.of(r: notANumber(), g: 0.0, b: 0.0, a: 1.0)); }
+    else if (kind == 1) { pass.setBlendConstant(color: Color.of(r: 0.0, g: 0.0, b: infinity(sign: 1.0), a: 1.0)); }
+    else if (kind == 2) { pass.setViewport(x: notANumber32(), y: 0.0, width: 4.0, height: 4.0, minDepth: 0.0, maxDepth: 1.0); }
+    else if (kind == 3) { pass.setViewport(x: 0.0, y: 0.0, width: 4.0, height: 4.0, minDepth: 0.0, maxDepth: infinity32(sign: 1.0)); }
+    else if (kind == 4) { pass.draw(vertexCount: 0x80000000, instanceCount: 1, firstVertex: 0, firstInstance: 0); }
+    else { pass.drawIndexed(indexCount: 3, instanceCount: 0x80000000, firstIndex: 0, baseVertex: 0, firstInstance: 0); }
+}
+
+// The commands WebGPU refuses, by kind: 0 a vertex slot of 2^31 (one of 2^32 - 1 is clamped to the same slot, and Firefox
+// 160 delivers no second error whose words repeat an earlier one's, so the scissor's 2^32 - 1 holds that clamp); 2 a
+// vertex offset of 2^60 and 3 a size of 2^60; 4 an index offset of 2^60; 5 a group index of 2^31; 6 a scissor x of 2^31 and 7 a scissor 2^32 - 1
+// wide and high (each clamped, where a browser would throw); 8 a vertex slot past maxVertexBuffers; 9 two dynamic
+// offsets for one dynamic buffer; 10 a viewport's depth range reversed; 11 an indexed draw with no index buffer; 12 an
+// index buffer bound for 2 bytes under a draw of 3 indices.
+unsafe fn void misusedCommand(ref Device d, ref ShaderModule m, ref RenderPass pass, int32 kind) {
+    Buffer vb = d.createBuffer(descriptor: BufferDescriptor.make(size: 64, usage: BufferUsage::Vertex | BufferUsage::Index));
+    uint64 far = 0x1000000000000000;
+    if (kind == 0) { pass.setVertexBuffer(slot: 0x80000000, binding: BufferBinding.whole(buffer: copy vb)); }
+    else if (kind == 2) { pass.setVertexBuffer(slot: 0, binding: BufferBinding.rest(buffer: copy vb, offset: far)); }
+    else if (kind == 3) { pass.setVertexBuffer(slot: 0, binding: BufferBinding.range(buffer: copy vb, offset: 0, size: far)); }
+    else if (kind == 4) { pass.setIndexBuffer(binding: BufferBinding.rest(buffer: copy vb, offset: far), format: IndexFormat::Uint16); }
+    else if (kind == 5 || kind == 9) {
+        BindGroupLayout dynamic = uniformLayout(d: d, dynamic: true);
+        Buffer u = d.createBuffer(descriptor: BufferDescriptor.make(size: 512, usage: BufferUsage::Uniform));
+        BindGroup g = uniformGroup(d: d, layout: dynamic, buffer: u, size: 16);
+        DynamicArray<uint32> offsets = DynamicArray.empty();
+        offsets.add(item: 0);
+        if (kind == 9) { offsets.add(item: 256); }
+        uint32 index = kind == 5 ? 0x80000000 : 0;
+        pass.setBindGroupWithOffsets(index: index, group: g, offsets: offsets.view());
+    }
+    else if (kind == 6) { pass.setScissorRect(x: 0x80000000, y: 0, width: 1, height: 1); }
+    else if (kind == 7) { pass.setScissorRect(x: 0, y: 0, width: 0xFFFFFFFF, height: 0xFFFFFFFF); }
+    else if (kind == 8) { pass.setVertexBuffer(slot: 8, binding: BufferBinding.whole(buffer: copy vb)); }
+    else if (kind == 10) { pass.setViewport(x: 0.0, y: 0.0, width: 4.0, height: 4.0, minDepth: 0.8, maxDepth: 0.2); }
+    else {
+        RenderPipeline p = d.createRenderPipeline(descriptor: commandPipeline(m: m, kind: 5, layout: Layout::Auto));
+        pass.setPipeline(pipeline: p);
+        if (kind == 12) { pass.setIndexBuffer(binding: BufferBinding.range(buffer: copy vb, offset: 0, size: 2), format: IndexFormat::Uint16); }
+        pass.drawIndexed(indexCount: 3, instanceCount: 1, firstIndex: 0, baseVertex: 0, firstInstance: 0);
+    }
+}
+
+// The four bytes of the RGBA8Unorm texel at (`x`, `y`) of a mapped copy.
+unsafe fn DynamicArray<uint8> texelAt(const ref BufferRead r, uint32 x, uint32 y) {
+    DynamicArray<uint8> all = r.bytes();
+    DynamicArray<uint8> four = DynamicArray.empty();
+    isize at = cast<isize>(y) * cast<isize>(ROW) + cast<isize>(x) * 4;
+    isize i = 0;
+    while (i < 4 && at + i < all.length()) { four.add(item: all[at + i]); i = i + 1; }
+    return four;
 }
 
 // The red, green, blue and alpha bytes of one RGBA8Unorm texel.

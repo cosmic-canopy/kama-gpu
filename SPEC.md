@@ -186,7 +186,8 @@ The sets:
   where a browser would throw and end the program.
 - **`buffer.size()`.**
 - **`buffer.mapRead(offset:, size:) -> BufferRead`,** polled to `ReadStatus` (`Pending`, `Ready` or `Failed(error)`),
-  then `bytes()` copies the mapped range out. Dropping the read unmaps the buffer.
+  then `bytes()` copies the mapped range out, the same bytes however often it is asked. Dropping the read unmaps the
+  buffer.
 
 ## Textures and views
 
@@ -458,8 +459,25 @@ Dawn's is. Firefox reports places in UTF-16 units as Dawn does, the first error 
     to a browser, which throws. A depth slice of 2^32 - 1, webgpu.h's "no slice", is clamped to 2^32 - 2.
   - **An encoder holds a reference on its device,** as a texture does, so a refusal inside its passes reaches the
     device's channel. An adopted encoder has no device, and refuses unreported.
-- **`pass.setPipeline(pipeline:)` and `pass.draw(vertexCount:, instanceCount:, firstVertex:, firstInstance:)`:** draw
-  with a render pipeline.
+- **The pass's commands** (decision 11), each WebGPU's, its errors reported at `encoder.finish()`:
+  - `setPipeline(pipeline:)`;
+  - `setVertexBuffer(slot:, binding:)` and `setIndexBuffer(binding:, format:)`, over a `BufferBinding` (`whole`,
+    `range`, `rest`). There is no unbind: a draw needs every slot its pipeline reads, and ignores the rest;
+  - `setBindGroup(index:, group:)`, and `setBindGroupWithOffsets(index:, group:, offsets:)` for its dynamic buffers'
+    offsets, a `ConstView<uint32>` in binding order;
+  - `setBlendConstant(color:)`, `setViewport(x:, y:, width:, height:, minDepth:, maxDepth:)`,
+    `setScissorRect(x:, y:, width:, height:)` and `setStencilReference(reference:)`;
+  - `draw(vertexCount:, instanceCount:, firstVertex:, firstInstance:)` and `drawIndexed(indexCount:, instanceCount:,
+    firstIndex:, baseVertex:, firstInstance:)`.
+
+  Where a browser would throw (decision 9):
+  - **Clamped,** so WebGPU refuses them as it refuses the number given: a slot, a group index or a scissor value at
+    2^31 or above, to 2^31 - 1, since emdawnwebgpu hands such a number to JavaScript negative; and an offset or a size
+    past 2^53 - 1, as a bind group's are.
+  - **Refused in the package's words, at `finish()`,** as a pass's description is (decision 14): a blend constant or a
+    viewport value that is not a finite number; and, on the web alone, a draw count (vertices, indices or instances)
+    of 2^31 or more, which emdawnwebgpu converts as a 31-bit number, though WebGPU and wgpu-native take it. A pass
+    holds its encoder's device and its label for this, and an adopted pass refuses unreported.
 - **`encoder.copyTextureToBuffer(texture:, buffer:, width:, height:, bytesPerRow:)`:** a region of the texture's first
   level, `bytesPerRow` a multiple of 256.
 - **`encoder.finish() -> CommandBuffer`,** which consumes the encoder. An error the recording made is reported here,
@@ -565,7 +583,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 30 facts, natively, its asynchronous
   pipeline call's abort and its taking a colour target the fragment stage never writes among them;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 272 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 301 cases natively with a display, debug and release.
   Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
@@ -575,7 +593,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   `KAMA_WINDOW_NO_DISPLAY` is set. Under `--frames` it leaves the focus where it is;
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
-- the web leg, headless, on the page's canvases: `tests/` (249 cases) and `examples/clear` (60 frames on `#canvas`)
+- the web leg, headless, on the page's canvases: `tests/` (278 cases) and `examples/clear` (60 frames on `#canvas`)
   under `kama run --target WASM --headless` in Edge, Chrome as installed and the pinned Firefox 160, each with the
   printErrors check. Firefox's run holds each of its differences, so the day one goes, its run fails:
   `maxImmediateSize` to 0 (`--no-immediates`); a WGSL warning to no message (`--no-shader-warnings`); a buffer of

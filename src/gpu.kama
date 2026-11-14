@@ -48,6 +48,9 @@ import {
     gpu::native::commandEncoderAddRef, gpu::native::commandEncoderRelease, gpu::native::commandEncoderBeginRenderPass,
     gpu::native::commandEncoderCopyTextureToBuffer, gpu::native::encoderFinish,
     gpu::native::renderPassEncoderAddRef, gpu::native::renderPassEncoderRelease, gpu::native::renderPassEncoderEnd,
+    gpu::native::renderPassEncoderDrawIndexed, gpu::native::renderPassEncoderSetVertexBuffer, gpu::native::renderPassEncoderSetIndexBuffer,
+    gpu::native::renderPassEncoderSetBindGroup, gpu::native::renderPassEncoderSetBlendConstant, gpu::native::renderPassEncoderSetViewport,
+    gpu::native::renderPassEncoderSetScissorRect, gpu::native::renderPassEncoderSetStencilReference, gpu::native::WGPUColor,
     gpu::native::commandBufferAddRef, gpu::native::commandBufferRelease,
     gpu::native::WGPUBufferDescriptor, gpu::native::WGPUTextureDescriptor, gpu::native::WGPURenderPassDescriptor,
     gpu::native::WGPURenderPassColorAttachment, gpu::native::WGPURenderPassDepthStencilAttachment, gpu::native::WGPUTexelCopyTextureInfo,
@@ -158,6 +161,11 @@ comptime uint32 ARRAY_LAYER_COUNT_UNDEFINED = 0xFFFFFFFF;
 // A count handed to webgpu.h, where 2^32 - 1 means "the rest": a program's 2^32 - 1 is clamped to 2^32 - 2, which no
 // texture has, so WebGPU refuses it as it refuses any count past the texture (decision 9).
 fn uint32 countOf(uint32 n) { return n == 0xFFFFFFFF ? 0xFFFFFFFE : n; }
+// A slot, a group index or a scissor value handed to a pass: one at 2^31 or above is clamped to 2^31 - 1. emdawnwebgpu
+// hands such a number to JavaScript negative, and a browser throws on it (kyoten's .scratch/gpu4-part4/FINDINGS.md); a
+// slot, a group index or a scissor value of 2^31 - 1 is past any device's limit and any target, so WebGPU refuses it
+// as it refuses the number given (decision 9).
+fn uint32 u31Of(uint32 n) { return n >= 0x80000000 ? 0x7FFFFFFF : n; }
 // The most features a set holds or a query copies out: webgpu.h names 22, and an implementation may add its own.
 comptime int32 FEATURES_MAX = 64;
 
@@ -2199,6 +2207,8 @@ type resource BufferBinding {
 
     friend BindGroupDescriptor::raw[buffer, offset, size];
     friend BindGroupDescriptor::refusal[size];
+    friend RenderPass::setVertexBuffer[buffer, offset, size];
+    friend RenderPass::setIndexBuffer[buffer, offset, size];
 
     // The whole buffer.
     public ctor whole(Buffer buffer) {
@@ -2998,6 +3008,14 @@ fn bool hasStencil(TextureFormat format) {
     };
 }
 
+// Whether a draw's count `n` cannot be handed over on this leg: on the web, a count of 2^31 or more, which emdawnwebgpu
+// converts as a 31-bit number and hands a browser negative, so the browser throws, though WebGPU's own draw takes it.
+// Natively wgpu-native takes it, so it is passed on there: the web's limit is emdawnwebgpu's, not WebGPU's.
+@compileFor(ARCH_WASM32)
+fn bool hugeOnThisLeg(uint32 n) { return n >= 0x80000000; }
+@compileFor(!ARCH_WASM32)
+fn bool hugeOnThisLeg(uint32 n) { return false; }
+
 // Whether `x` is a finite number: x - x is 0 for one, and NaN for NaN or an infinity.
 fn bool finiteNumber(float64 x) {
     float64 gap = x - x;
@@ -3720,7 +3738,7 @@ type resource CommandEncoder implements Copyable<This>(bare: give) {
             refuseInPass(pass: raw, device: this.device, message: cast<UnsafeConstPtr<uint8>>(refused.cstr()),
                          length: cast<int32>(refused.length()));
         }
-        return RenderPass.fromDevice(raw: raw, block: this.hold.raw());
+        return RenderPass.fromDevice(raw: raw, block: this.hold.raw(), device: this.device, label: copy descriptor.labelled);
     }
 
     // Copy a `width` × `height` region of `texture`'s first level into `buffer`, `bytesPerRow` apart (a multiple of 256).
@@ -3759,19 +3777,27 @@ type resource CommandEncoder implements Copyable<This>(bare: give) {
 type resource RenderPass implements Copyable<This>(bare: give) {
     UnsafePtr handle;
     StateHold hold = StateHold.empty();   // its device's state, which its errors reach
+    UnsafePtr device = null;              // its encoder's device, held, which a refusal inside it rides; none when adopted
+    string labelled = "";                 // its description's label, which a refusal's words name
 
     friend CommandEncoder::beginRenderPass[fromDevice];
 
     // One made elsewhere; it takes over one reference, and holds no device state.
     public unsafe ctor adopt(UnsafePtr raw) { this.handle = raw; }
-    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block) {
+    unsafe ctor fromDevice(UnsafePtr raw, UnsafePtr block, UnsafePtr device, string label) {
         this.handle = raw;
         this.hold = StateHold.make(block: block);
+        this.device = device;
+        if (device != null) { deviceAddRef(device: device); }
+        this.labelled = give label;
     }
     public unsafe ctor copy(ref RenderPass source) {
         this.handle = source.handle;
         renderPassEncoderAddRef(renderPassEncoder: this.handle);
         this.hold = copy source.hold;
+        this.device = source.device;
+        if (this.device != null) { deviceAddRef(device: this.device); }
+        this.labelled = copy source.labelled;
     }
     public unsafe const fn UnsafePtr raw() { return this.handle; }
 
@@ -3782,15 +3808,110 @@ type resource RenderPass implements Copyable<This>(bare: give) {
 
     // Draw `vertexCount` vertices of each of `instanceCount` instances, from `firstVertex` and `firstInstance` (WebGPU's
     // `draw`).
+    // A count of 2^31 or more is refused on the web alone, where emdawnwebgpu cannot hand it to a browser (`hugeOnThisLeg`).
     public unsafe fn void draw(uint32 vertexCount, uint32 instanceCount, uint32 firstVertex, uint32 firstInstance) {
+        if (hugeOnThisLeg(n: vertexCount) || hugeOnThisLeg(n: instanceCount)) {
+            this.refuse(words: this.named() + " draws ${vertexCount} vertices of ${instanceCount} instances, a count of 2^31 or more, which emdawnwebgpu cannot hand a browser");
+            return;
+        }
         renderPassEncoderDraw(renderPassEncoder: this.handle, vertexCount: vertexCount, instanceCount: instanceCount,
                               firstVertex: firstVertex, firstInstance: firstInstance);
     }
 
+    // Draw `indexCount` indices of the index buffer from `firstIndex`, each added to `baseVertex`, for each of
+    // `instanceCount` instances from `firstInstance` (WebGPU's `drawIndexed`). A count of 2^31 or more is refused on the
+    // web alone, as `draw`'s is.
+    public unsafe fn void drawIndexed(uint32 indexCount, uint32 instanceCount, uint32 firstIndex, int32 baseVertex,
+                                      uint32 firstInstance) {
+        if (hugeOnThisLeg(n: indexCount) || hugeOnThisLeg(n: instanceCount)) {
+            this.refuse(words: this.named() + " draws ${indexCount} indices of ${instanceCount} instances, a count of 2^31 or more, which emdawnwebgpu cannot hand a browser");
+            return;
+        }
+        renderPassEncoderDrawIndexed(renderPassEncoder: this.handle, indexCount: indexCount, instanceCount: instanceCount,
+                                     firstIndex: firstIndex, baseVertex: baseVertex, firstInstance: firstInstance);
+    }
+
+    // The vertex buffer in `slot`: `binding`'s range of its buffer (WebGPU's `setVertexBuffer`). There is no unbind
+    // (decision 11): a draw needs every slot its pipeline reads, and ignores the rest. A slot at 2^31 or above, and an
+    // offset or size past 2^53 - 1, are clamped where a browser would throw, so WebGPU refuses them (decision 9).
+    public unsafe fn void setVertexBuffer(uint32 slot, const ref BufferBinding binding) {
+        renderPassEncoderSetVertexBuffer(renderPassEncoder: this.handle, slotIndex: u31Of(n: slot), buffer: binding.buffer(),
+                                         offset: binding.offset(), size: binding.size());
+    }
+
+    // The index buffer: `binding`'s range of its buffer, its indices in `format` (WebGPU's `setIndexBuffer`). An offset
+    // or size past 2^53 - 1 is clamped, as a vertex buffer's is.
+    public unsafe fn void setIndexBuffer(const ref BufferBinding binding, IndexFormat format) {
+        renderPassEncoderSetIndexBuffer(renderPassEncoder: this.handle, buffer: binding.buffer(),
+                                        format: indexFormatValue(f: format), offset: binding.offset(), size: binding.size());
+    }
+
+    // The bind group at `index` (WebGPU's `setBindGroup`), and with `offsets` for its dynamic buffers, in binding order,
+    // as `setBindGroupWithOffsets`, since kama has no overloading (decision 11). An index at 2^31 or above is clamped.
+    public unsafe fn void setBindGroup(uint32 index, const ref BindGroup group) {
+        renderPassEncoderSetBindGroup(renderPassEncoder: this.handle, groupIndex: u31Of(n: index), group: group.raw(),
+                                      dynamicOffsetCount: 0, dynamicOffsets: null);
+    }
+    public unsafe fn void setBindGroupWithOffsets(uint32 index, const ref BindGroup group, ConstView<uint32> offsets) {
+        renderPassEncoderSetBindGroup(renderPassEncoder: this.handle, groupIndex: u31Of(n: index), group: group.raw(),
+                                      dynamicOffsetCount: cast<usize>(offsets.length()),
+                                      dynamicOffsets: cast<UnsafePtr>(offsets.dataPtr()));
+    }
+
+    // The constant a blend factor of `Constant` reads (WebGPU's `setBlendConstant`). One that is not a finite number is
+    // refused, where a browser throws (decision 9).
+    public unsafe fn void setBlendConstant(Color color) {
+        if (!finiteNumber(x: color.r) || !finiteNumber(x: color.g) || !finiteNumber(x: color.b) || !finiteNumber(x: color.a)) {
+            this.refuse(words: this.named() + " sets a blend constant that is not a finite number (r ${color.r}, g ${color.g}, b ${color.b}, a ${color.a}): WebGPU refuses it");
+            return;
+        }
+        WGPUColor c = WGPUColor.zero();
+        c.r = color.r;
+        c.g = color.g;
+        c.b = color.b;
+        c.a = color.a;
+        renderPassEncoderSetBlendConstant(renderPassEncoder: this.handle, color: cast<UnsafePtr>(addr(of: c)));
+    }
+
+    // Where the target is drawn, in texels, and the depth range it maps to (WebGPU's `setViewport`). A value that is not
+    // a finite number is refused, where a browser throws (decision 9).
+    public unsafe fn void setViewport(float32 x, float32 y, float32 width, float32 height, float32 minDepth,
+                                      float32 maxDepth) {
+        if (!finite32(x: x) || !finite32(x: y) || !finite32(x: width) || !finite32(x: height) || !finite32(x: minDepth)
+            || !finite32(x: maxDepth)) {
+            this.refuse(words: this.named() + " sets a viewport with a value that is not a finite number (x ${x}, y ${y}, width ${width}, height ${height}, minDepth ${minDepth}, maxDepth ${maxDepth}): WebGPU refuses it");
+            return;
+        }
+        renderPassEncoderSetViewport(renderPassEncoder: this.handle, x: x, y: y, width: width, height: height,
+                                     minDepth: minDepth, maxDepth: maxDepth);
+    }
+
+    // The texels drawn: the rest are left as they are (WebGPU's `setScissorRect`). A value at 2^31 or above is clamped.
+    public unsafe fn void setScissorRect(uint32 x, uint32 y, uint32 width, uint32 height) {
+        renderPassEncoderSetScissorRect(renderPassEncoder: this.handle, x: u31Of(n: x), y: u31Of(n: y),
+                                        width: u31Of(n: width), height: u31Of(n: height));
+    }
+
+    // The reference a stencil test compares against, and a Replace writes (WebGPU's `setStencilReference`).
+    public unsafe fn void setStencilReference(uint32 reference) {
+        renderPassEncoderSetStencilReference(renderPassEncoder: this.handle, reference: reference);
+    }
+
+    // A refusal inside the pass (decision 14): reported at its encoder's `finish`, the refused command never reaching
+    // the backend. A pass adopted from elsewhere has no device, and refuses unreported.
+    unsafe fn void refuse(const ref string words) {
+        refuseInPass(pass: this.handle, device: this.device, message: cast<UnsafeConstPtr<uint8>>(words.cstr()),
+                     length: cast<int32>(words.length()));
+    }
+    const fn string named() { return "the render pass '" + this.labelled + "'"; }
+
     // The pass is over; it is spent.
     public unsafe give fn void end() { renderPassEncoderEnd(renderPassEncoder: this.handle); }
 
-    unsafe ~RenderPass() { if (this.handle != null) { renderPassEncoderRelease(renderPassEncoder: this.handle); } }
+    unsafe ~RenderPass() {
+        if (this.handle != null) { renderPassEncoderRelease(renderPassEncoder: this.handle); }
+        if (this.device != null) { deviceRelease(device: this.device); }
+    }
 }
 
 type resource CommandBuffer implements Copyable<This>(bare: give) {

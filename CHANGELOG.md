@@ -5,6 +5,19 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: the render pass's commands** (2026-11-13, kama 0.9.943; GPU-4's fourth part, AGENTS.gpu.md item 12,
+  decision 11): `setVertexBuffer(slot:, binding:)` and `setIndexBuffer(binding:, format:)` over a `BufferBinding`,
+  `setBindGroup(index:, group:)` and `setBindGroupWithOffsets(index:, group:, offsets:)`, `setBlendConstant(color:)`,
+  `drawIndexed(...)`, `setViewport(...)`, `setScissorRect(...)` and `setStencilReference(reference:)`. There is no
+  unbind.
+  - A slot, group index or scissor value at 2^31 or above, and an offset or size past 2^53 - 1, are clamped where a
+    browser would throw, so WebGPU refuses them.
+  - A blend constant or viewport value that is not a finite number is refused in the package's words at
+    `encoder.finish()`; so is a draw count of 2^31 or more on the web alone, which emdawnwebgpu cannot hand a browser.
+
+- **Fixed: a mapped read asked for its bytes twice answered nothing the second time on the web** (2026-11-13). A
+  browser refuses a second mapped range over the first, so the seam now keeps the first until the unmap.
+
 - **Changed, breaking: a render pass is begun from its description** (2026-11-13, kama 0.9.943; GPU-4's fourth part,
   AGENTS.gpu.md item 12, decisions 5, 9, 10, 13 and 14). `encoder.beginRenderPass(descriptor: RenderPassDescriptor)`
   replaces `beginRenderPass(target:, clear:)`.

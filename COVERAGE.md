@@ -13,7 +13,7 @@ From three headers, each by the sha256 of its text with LF line endings:
 - wgpu-native's wgpu.h `7bd23656d394f620a804b1f174444ea17082b6d330a2fca0c0e6b1121ec4b284`
 - emdawnwebgpu's webgpu.h `40e7ecd9647dc922e69d17d888d7038fbd5eb10277621eb414c8ffc278e353be`
 
-**webgpu.h: 88 of 206 called.** On both legs, 88 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
+**webgpu.h: 95 of 206 called.** On both legs, 95 of 199; only in wgpu-native's, 0 of 3; only in emdawnwebgpu's, 0 of 4.
 
 **wgpu.h, wgpu-native's own extensions, apart: 1 of 22 called.**
 
@@ -181,7 +181,7 @@ From three headers, each by the sha256 of its text with LF line endings:
 | `wgpuCommandEncoderRelease` | both | yes |
 | `wgpuDeviceCreateCommandEncoder` | both | yes |
 
-### Render passes and bundles, 7 of 44
+### Render passes and bundles, 14 of 44
 
 | Function | Legs | Called |
 |---|---|---|
@@ -207,7 +207,7 @@ From three headers, each by the sha256 of its text with LF line endings:
 | `wgpuRenderBundleEncoderAddRef` | both | no |
 | `wgpuRenderBundleEncoderRelease` | both | no |
 | `wgpuRenderPassEncoderDraw` | both | yes |
-| `wgpuRenderPassEncoderDrawIndexed` | both | no |
+| `wgpuRenderPassEncoderDrawIndexed` | both | yes |
 | `wgpuRenderPassEncoderDrawIndexedIndirect` | both | no |
 | `wgpuRenderPassEncoderDrawIndirect` | both | no |
 | `wgpuRenderPassEncoderEnd` | both | yes |
@@ -215,16 +215,16 @@ From three headers, each by the sha256 of its text with LF line endings:
 | `wgpuRenderPassEncoderInsertDebugMarker` | both | no |
 | `wgpuRenderPassEncoderPopDebugGroup` | both | no |
 | `wgpuRenderPassEncoderPushDebugGroup` | both | no |
-| `wgpuRenderPassEncoderSetBindGroup` | both | no |
-| `wgpuRenderPassEncoderSetBlendConstant` | both | no |
+| `wgpuRenderPassEncoderSetBindGroup` | both | yes |
+| `wgpuRenderPassEncoderSetBlendConstant` | both | yes |
 | `wgpuRenderPassEncoderSetImmediates` | wgpu-native | no |
-| `wgpuRenderPassEncoderSetIndexBuffer` | both | no |
+| `wgpuRenderPassEncoderSetIndexBuffer` | both | yes |
 | `wgpuRenderPassEncoderSetLabel` | both | no |
 | `wgpuRenderPassEncoderSetPipeline` | both | yes |
-| `wgpuRenderPassEncoderSetScissorRect` | both | no |
-| `wgpuRenderPassEncoderSetStencilReference` | both | no |
+| `wgpuRenderPassEncoderSetScissorRect` | both | yes |
+| `wgpuRenderPassEncoderSetStencilReference` | both | yes |
 | `wgpuRenderPassEncoderSetVertexBuffer` | both | yes |
-| `wgpuRenderPassEncoderSetViewport` | both | no |
+| `wgpuRenderPassEncoderSetViewport` | both | yes |
 | `wgpuRenderPassEncoderAddRef` | both | yes |
 | `wgpuRenderPassEncoderRelease` | both | yes |
 | `wgpuRenderPassEncoderMultiDrawIndirect` | emdawnwebgpu; wgpu.h natively | no |
