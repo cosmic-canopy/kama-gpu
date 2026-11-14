@@ -37,7 +37,7 @@ comptime int32 SURFACE_OUTDATED = 2;
 comptime int32 SURFACE_LOST = 3;
 comptime int32 SURFACE_TIMEOUT = 4;
 
-extern fn UnsafePtr gpuseam_request_adapter(UnsafePtr instance, UnsafePtr compatible, int32 power);
+extern fn UnsafePtr gpuseam_request_adapter(UnsafePtr instance, UnsafePtr compatible, int32 power, int32 fallback);
 extern fn int32 gpuseam_adapter_request_poll(UnsafePtr request);
 extern fn UnsafePtr gpuseam_adapter_request_take(UnsafePtr request);
 extern fn int32 gpuseam_adapter_request_message(UnsafePtr request, UnsafePtr<uint8> dst, int32 capacity);
@@ -94,8 +94,8 @@ extern fn void gpuseam_scope_drop_popped(UnsafePtr pushed);
 extern fn void gpuseam_device_poll(UnsafePtr device, int32 wait);
 extern fn UnsafePtr gpuseam_encoder_finish(UnsafePtr encoder, UnsafePtr state, UnsafePtr<int32> failed);
 
-unsafe fn UnsafePtr requestAdapter(UnsafePtr instance, UnsafePtr compatible, int32 power) {
-    return gpuseam_request_adapter(instance: instance, compatible: compatible, power: power);
+unsafe fn UnsafePtr requestAdapter(UnsafePtr instance, UnsafePtr compatible, int32 power, int32 fallback) {
+    return gpuseam_request_adapter(instance: instance, compatible: compatible, power: power, fallback: fallback);
 }
 unsafe fn int32 adapterRequestPoll(UnsafePtr request) { return gpuseam_adapter_request_poll(request: request); }
 unsafe fn UnsafePtr adapterRequestTake(UnsafePtr request) { return gpuseam_adapter_request_take(request: request); }

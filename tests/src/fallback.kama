@@ -1,0 +1,432 @@
+// GPU-15's cases (ROADMAP_DETAIL.md § The fallback adapter, decided by kyoten's rendering.md § Decided, GFX-1's question
+// 3), a step a tick on every leg: an adapter asked for with WebGPU's `forceFallbackAdapter` is the fallback one (its kind
+// is CPU: WARP natively and in Firefox, SwiftShader in Chromium), and a device from it draws a scene into an offscreen
+// target and reads back the same bytes twice, which is what `@kama/graphics`' byte-for-byte software goldens rest on.
+// The scene is two triangles that cross in depth, with colours interpolated, drawn at 4× MSAA with a depth32float buffer
+// and resolved, so the rasterizer's edge coverage and the depth test both count in the bytes.
+//
+// A leg that offers no fallback adapter (macOS natively, where Metal has none) passes `--no-fallback-adapter`: there the
+// request must fail as any other does, NoAdapter in WebGPU's words, and a fallback adapter offered fails the run, so the
+// flag never hides one.
+//
+// They report through `Verdicts`, which the check reads each tick, as the pass cases do.
+
+import {
+    core::println,
+    std::collections::DynamicArray,
+    gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::AdapterInfo,
+    gpu::AdapterKind, gpu::PowerPreference,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::DeviceErrors,
+    gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::Color,
+    gpu::RenderPassDescriptor, gpu::ColorAttachment, gpu::LoadOp, gpu::StoreOp, gpu::DepthStencilAttachment,
+    gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead, gpu::ReadStatus,
+    gpu::Texture, gpu::TextureDescriptor, gpu::TextureViewDescriptor, gpu::TextureView, gpu::TextureFormat,
+    gpu::TextureUsage, gpu::CompareFunction, gpu::ShaderModuleDescriptor, gpu::ShaderModule,
+    gpu::DepthStencilState, gpu::ColorTargetState, gpu::VertexState, gpu::FragmentState, gpu::Layout,
+    gpu::RenderPipelineDescriptor, gpu::RenderPipeline,
+    Verdicts, readOptions,
+};
+export { FallbackRun };
+
+comptime int32 SETTLE = 120;   // the most ticks a read waits for its map
+comptime uint32 SIDE = 32;     // the target is SIDE by SIDE texels
+comptime uint32 ROW = 256;     // a copied row's bytes: WebGPU's alignment (SIDE × 4 is 128)
+
+// Two triangles that cross in depth: the first flat at 0.5, the second rising from 0.25 to 0.75 through it, each with a
+// colour at every corner, interpolated.
+fn string fallbackWgsl() {
+    return "struct VOut { @builtin(position) pos: vec4f, @location(0) color: vec3f };\n"
+        + "@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {\n"
+        + "  var p = array<vec3f, 6>(vec3f(-0.9, -0.8, 0.5), vec3f(0.8, -0.6, 0.5), vec3f(-0.2, 0.9, 0.5),\n"
+        + "                          vec3f(-0.5, 0.7, 0.25), vec3f(-0.6, -0.4, 0.25), vec3f(0.9, 0.3, 0.75));\n"
+        + "  var c = array<vec3f, 6>(vec3f(1.0, 0.0, 0.0), vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0),\n"
+        + "                          vec3f(1.0, 1.0, 0.0), vec3f(0.0, 1.0, 1.0), vec3f(1.0, 0.0, 1.0));\n"
+        + "  var o: VOut; o.pos = vec4f(p[i], 1.0); o.color = c[i]; return o; }\n"
+        + "@fragment fn fs(v: VOut) -> @location(0) vec4f { return vec4f(v.color, 1.0); }\n";
+}
+
+// The clear colour, and its RGBA8Unorm bytes: 0 and 1 are exact in every implementation.
+fn Color backdrop() { return Color.of(r: 0.0, g: 0.0, b: 0.0, a: 1.0); }
+
+fn string kindName(AdapterKind k) {
+    return match (k) {
+        case DiscreteGPU: "DiscreteGPU";
+        case IntegratedGPU: "IntegratedGPU";
+        case CPU: "CPU";
+        case Unknown: "Unknown";
+    };
+}
+
+fn bool isCpu(AdapterKind k) { return match (k) { case CPU: true; case _: false; }; }
+
+// What an adapter says it is, for a verdict's words.
+unsafe fn string described(const ref Adapter a) {
+    AdapterInfo info = a.info();
+    string kind = kindName(k: info.kind());
+    string vendor = info.vendor();
+    string architecture = info.architecture();
+    string description = info.description();
+    return "kind " + kind + ", vendor '" + vendor + "', architecture '" + architecture + "', description '" + description + "'";
+}
+
+type resource FallbackRun {
+    int32 stage = 0;
+    int32 waited = 0;
+    bool optional;     // `--adapter-optional`: no adapter here at all is a skip
+    bool none;         // `--no-fallback-adapter`: this leg offers no fallback adapter
+    Verdicts found;
+    Optional<Instance> instance = Optional::None;
+    Optional<AdapterRequest> fallbackRequest = Optional::None;
+    Optional<AdapterRequest> hardwareRequest = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+    Optional<RenderPipeline> pipeline = Optional::None;
+    Optional<Buffer> readback = Optional::None;
+    Optional<BufferRead> reading = Optional::None;
+    DynamicArray<uint8> firstBytes = DynamicArray.empty();
+
+    public ctor make(bool adapterOptional, bool noFallbackAdapter) {
+        this.optional = adapterOptional;
+        this.none = noFallbackAdapter;
+        this.found = Verdicts.make();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // One tick's step: true once every case has run.
+    public unsafe fn bool step() {
+        this.waited = this.waited + 1;
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.awaitHardware(); }
+        else if (this.stage == 2) { this.awaitFallback(); }
+        else if (this.stage == 3) { this.awaitDevice(); }
+        else if (this.stage == 10) { this.draw(next: 11); }
+        else if (this.stage == 11) { this.awaitRead(second: false, next: 12); }
+        else if (this.stage == 12) { this.draw(next: 13); }
+        else if (this.stage == 13) { this.awaitRead(second: true, next: 999); }
+        if (this.stage == 999) {
+            this.reading = Optional::None;
+            this.readback = Optional::None;
+            this.pipeline = Optional::None;
+            this.queue = Optional::None;
+            this.device = Optional::None;
+            this.deviceRequest = Optional::None;
+            this.fallbackRequest = Optional::None;
+            this.hardwareRequest = Optional::None;
+            this.instance = Optional::None;
+            return true;
+        }
+        return false;
+    }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
+
+    // An adapter asked for without forceFallbackAdapter first, then one with it, each once the other has settled: a
+    // request is polled until it answers and never again, since a poll after Ready is Failed(Taken).
+    unsafe fn void open() {
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                this.hardwareRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.make(power: PowerPreference::Default)));
+                this.instance = Optional::Some(value: give inst);
+                this.next(to: 1);
+            }
+            case Err(error: e): { string why = e.message(); this.found.add(name: "an instance for the fallback cases", why: give why); this.next(to: 999); }
+        };
+    }
+
+    // The adapter asked for without the setter is not the fallback one; then the fallback request is made.
+    unsafe fn void awaitHardware() {
+        AdapterStatus hs = match (this.hardwareRequest) { case Some(value: r): r.poll(); case None: AdapterStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (hs) { case Pending: true; case _: false; };
+        if (pending) {
+            if (this.waited < SETTLE) { return; }
+            this.found.add(name: "an adapter asked for without forceFallbackAdapter", why: "still pending after ${SETTLE} ticks");
+            this.next(to: 999);
+            return;
+        }
+        this.hardwareRequest = Optional::None;
+        bool skipped = false;
+        match (give hs) {
+            case Ready(adapter: a): {
+                AdapterInfo info = a.info();
+                string said = described(a: a);
+                this.found.add(name: "an adapter asked for without forceFallbackAdapter is not the fallback one here (its kind is not CPU)",
+                               why: isCpu(k: info.kind()) ? "it is: " + said : "");
+            }
+            case Failed(error: e): {
+                bool unavailable = match (e) { case NoAdapter(words: w): true; case _: false; };
+                if (unavailable && this.optional) {
+                    println(s: "skip the fallback cases: there is no WebGPU adapter here (--adapter-optional)");
+                    skipped = true;
+                } else {
+                    string why = e.message();
+                    this.found.add(name: "an adapter asked for without forceFallbackAdapter", why: "refused: " + why);
+                }
+            }
+            case Pending: { }
+        };
+        if (skipped) { this.next(to: 999); return; }
+        match (this.instance) {
+            case Some(value: inst): {
+                AdapterOptions fallback = AdapterOptions.make(power: PowerPreference::Default);
+                fallback.forceFallbackAdapter(on: true);
+                this.fallbackRequest = Optional::Some(value: inst.requestAdapter(options: fallback));
+                this.next(to: 2);
+            }
+            case None: { this.found.add(name: "an instance for the fallback request", why: "the instance is gone"); this.next(to: 999); }
+        };
+    }
+
+    // The adapter asked for with forceFallbackAdapter is the fallback one, or, on a leg with none (`--no-fallback-adapter`),
+    // the request fails as NoAdapter.
+    unsafe fn void awaitFallback() {
+        AdapterStatus fs = match (this.fallbackRequest) { case Some(value: r): r.poll(); case None: AdapterStatus::Failed(error: GpuError::Taken); };
+        bool pending = match (fs) { case Pending: true; case _: false; };
+        if (pending) {
+            if (this.waited < SETTLE) { return; }
+            this.found.add(name: "an adapter asked for with forceFallbackAdapter", why: "still pending after ${SETTLE} ticks");
+            this.next(to: 999);
+            return;
+        }
+        this.fallbackRequest = Optional::None;
+        match (give fs) {
+            case Ready(adapter: a): {
+                AdapterInfo info = a.info();
+                string said = described(a: a);
+                if (this.none) {
+                    this.found.add(name: "--no-fallback-adapter: this leg offers no fallback adapter",
+                                   why: "a fallback adapter was offered (" + said + "), so the flag would hide it");
+                    this.next(to: 999);
+                    return;
+                }
+                println(s: "info the fallback adapter: " + said);
+                this.found.add(name: "an adapter asked for with forceFallbackAdapter is the fallback one (its kind is CPU)",
+                               why: isCpu(k: info.kind()) ? "" : "it is not: " + said);
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: readOptions()));
+                this.next(to: 3);
+            }
+            case Failed(error: e): {
+                string why = e.message();
+                bool unavailable = match (e) { case NoAdapter(words: w): true; case _: false; };
+                if (this.none) {
+                    string said = why.isEmpty() ? "NoAdapter, with no words" : (unavailable ? "" : "not NoAdapter: " + why);
+                    this.found.add(name: "--no-fallback-adapter: with no fallback adapter on this leg, the request fails as NoAdapter, in WebGPU's words",
+                                   why: give said);
+                } else {
+                    this.found.add(name: "an adapter asked for with forceFallbackAdapter", why: "refused: " + why);
+                }
+                this.next(to: 999);
+            }
+            case Pending: { }
+        };
+    }
+
+    unsafe fn void awaitDevice() {
+        if (this.deviceRequest.isNone()) { this.next(to: 999); return; }
+        DeviceStatus s = match (this.deviceRequest) {
+            case Some(value: r): r.poll();
+            case None: DeviceStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending) {
+            if (this.waited < SETTLE) { return; }
+            this.found.add(name: "a device from the fallback adapter", why: "still pending after ${SETTLE} ticks");
+            this.next(to: 999);
+            return;
+        }
+        this.deviceRequest = Optional::None;
+        match (give s) {
+            case Ready(device: d, queue: q): {
+                ShaderModuleDescriptor m = ShaderModuleDescriptor.make(wgsl: fallbackWgsl());
+                m.label(text: "fallback scene");
+                ShaderModule stages = d.createShaderModule(descriptor: give m);
+                this.pipeline = Optional::Some(value: d.createRenderPipeline(descriptor: scenePipeline(m: stages)));
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+                this.next(to: 10);
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a device from the fallback adapter", why: "refused: " + why); this.next(to: 999); }
+            case Pending: { }
+        };
+    }
+
+    // The scene drawn into fresh targets and copied into a fresh buffer, whose map is started.
+    unsafe fn void draw(int32 next) {
+        Optional<Buffer> copied = Optional::None;
+        Optional<BufferRead> started = Optional::None;
+        match (this.device) {
+            case Some(value: d): {
+                match (this.pipeline) {
+                    case Some(value: p): {
+                        uint64 bytes = cast<uint64>(ROW) * cast<uint64>(SIDE);
+                        Buffer b = d.createBuffer(descriptor: BufferDescriptor.make(size: bytes, usage: BufferUsage::MapRead | BufferUsage::CopyDst));
+                        CommandEncoder encoder = d.createCommandEncoder();
+                        Texture resolved = sceneTexture(d: d, format: TextureFormat::RGBA8Unorm,
+                                                        usage: TextureUsage::RenderAttachment | TextureUsage::CopySrc, samples: 1);
+                        Texture four = sceneTexture(d: d, format: TextureFormat::RGBA8Unorm, usage: TextureUsage::RenderAttachment, samples: 4);
+                        Texture depth = sceneTexture(d: d, format: TextureFormat::Depth32Float, usage: TextureUsage::RenderAttachment, samples: 4);
+                        ColorAttachment a = ColorAttachment.make(view: whole(t: four), load: LoadOp::Clear(color: backdrop()), store: StoreOp::Discard);
+                        a.resolveTarget(view: whole(t: resolved));
+                        RenderPassDescriptor pass = RenderPassDescriptor.make();
+                        pass.color(attachment: give a);
+                        pass.depthStencil(attachment: DepthStencilAttachment.clearingDepth(view: whole(t: depth), value: 1.0));
+                        RenderPass rp = encoder.beginRenderPass(descriptor: give pass);
+                        rp.setPipeline(pipeline: p);
+                        rp.draw(vertexCount: 6, instanceCount: 1, firstVertex: 0, firstInstance: 0);
+                        give rp.end();
+                        encoder.copyTextureToBuffer(texture: resolved, buffer: b, width: SIDE, height: SIDE, bytesPerRow: ROW);
+                        CommandBuffer commands = give encoder.finish();
+                        match (this.queue) {
+                            case Some(value: q): { q.submit(commands: give commands); }
+                            case None: { CommandBuffer unsent = give commands; }
+                        };
+                        started = Optional::Some(value: b.mapRead(offset: 0, size: bytes));
+                        copied = Optional::Some(value: give b);
+                    }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+        if (copied.isNone()) {
+            this.found.add(name: "the fallback device draws the scene", why: "no device or pipeline (stage ${this.stage})");
+            this.next(to: 999);
+            return;
+        }
+        this.readback = give copied;
+        this.reading = give started;
+        this.next(to: next);
+    }
+
+    // The first read keeps its texels; the second is held to them, byte for byte, and both to having drawn something.
+    unsafe fn void awaitRead(bool second, int32 next) {
+        match (this.device) { case Some(value: d): { d.poll(wait: true); } case None: { } };
+        ReadStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: ReadStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.waited < SETTLE) { return; }
+        string why = match (s) {
+            case Pending: "the map did not finish";
+            case Failed(error: e): e.message();
+            case Ready: "";
+        };
+        DynamicArray<uint8> got = DynamicArray.empty();
+        if (why.isEmpty()) {
+            got = match (this.reading) { case Some(value: r): texels(r: r); case None: DynamicArray.empty(); };
+        }
+        this.reading = Optional::None;
+        this.readback = Optional::None;
+        if (!second) {
+            if (why.isEmpty()) { why = drawnSomething(got: got); }
+            string errs = this.channel();
+            if (why.isEmpty()) { why = copy errs; }
+            this.found.add(name: "the fallback device draws two triangles crossing in depth at 4x MSAA, resolved: some texels the clear colour and some not, with no WebGPU error",
+                           why: copy why);
+            this.firstBytes = give got;
+            this.next(to: why.isEmpty() ? next : 999);
+            return;
+        }
+        if (why.isEmpty()) { why = sameTexels(got: got, want: this.firstBytes); }
+        string errs = this.channel();
+        if (why.isEmpty()) { why = copy errs; }
+        this.found.add(name: "the fallback device draws the same bytes a second time", why: give why);
+        this.next(to: next);
+    }
+
+    // The device's channel, as a failure's words: "" when it holds nothing.
+    unsafe fn string channel() {
+        match (this.device) {
+            case Some(value: d): {
+                DeviceErrors errs = d.takeErrors();
+                if (errs.isEmpty()) { return ""; }
+                isize n = errs.reports().length();
+                return "the channel holds ${n} error(s), the first: " + errs.reports()[0].message();
+            }
+            case None: { return "the device is gone"; }
+        };
+    }
+}
+
+unsafe fn Texture sceneTexture(ref Device d, TextureFormat format, TextureUsage usage, uint32 samples) {
+    TextureDescriptor t = TextureDescriptor.make(width: SIDE, height: SIDE, format: format, usage: usage);
+    t.sampleCount(count: samples);
+    return d.createTexture(descriptor: give t);
+}
+
+unsafe fn TextureView whole(ref Texture t) { return t.createView(descriptor: TextureViewDescriptor.make()); }
+
+unsafe fn RenderPipelineDescriptor scenePipeline(ShaderModule m) {
+    RenderPipelineDescriptor p = RenderPipelineDescriptor.make(layout: Layout::Auto, vertex: VertexState.make(module: copy m, entryPoint: "vs"));
+    FragmentState f = FragmentState.make(module: copy m, entryPoint: "fs");
+    f.target(state: ColorTargetState.make(format: TextureFormat::RGBA8Unorm));
+    p.fragment(state: give f);
+    p.depthStencil(state: DepthStencilState.make(format: TextureFormat::Depth32Float, depthWriteEnabled: true, depthCompare: CompareFunction::Less));
+    p.multisampleMut().count = 4;
+    p.label(text: "fallback scene");
+    return p;
+}
+
+// A mapped copy's texels, row by row, without the rows' padding.
+unsafe fn DynamicArray<uint8> texels(const ref BufferRead r) {
+    DynamicArray<uint8> all = r.bytes();
+    DynamicArray<uint8> kept = DynamicArray.empty();
+    isize y = 0;
+    while (y < cast<isize>(SIDE)) {
+        isize x = 0;
+        while (x < cast<isize>(SIDE) * 4) {
+            isize at = y * cast<isize>(ROW) + x;
+            if (at < all.length()) { kept.add(item: all[at]); }
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return kept;
+}
+
+// "" when the texels hold the clear colour somewhere and something else somewhere.
+fn string drawnSomething(const ref DynamicArray<uint8> got) {
+    isize want = cast<isize>(SIDE) * cast<isize>(SIDE) * 4;
+    if (got.length() != want) {
+        isize n = got.length();
+        return "${n} bytes read, not ${want}";
+    }
+    isize clear = 0;
+    isize drawn = 0;
+    isize i = 0;
+    while (i < got.length()) {
+        bool isClear = got[i] == 0 && got[i + 1] == 0 && got[i + 2] == 0 && got[i + 3] == 255;
+        if (isClear) { clear = clear + 1; } else { drawn = drawn + 1; }
+        i = i + 4;
+    }
+    if (drawn == 0) { return "every texel is the clear colour: nothing was drawn"; }
+    if (clear == 0) { return "no texel is the clear colour: the scene covers the whole target"; }
+    println(s: "info the fallback scene: ${drawn} texels drawn, ${clear} the clear colour");
+    return "";
+}
+
+fn string sameTexels(const ref DynamicArray<uint8> got, const ref DynamicArray<uint8> want) {
+    if (want.length() == 0) { return "the first read kept no texels"; }
+    if (got.length() != want.length()) {
+        isize g = got.length();
+        isize w = want.length();
+        return "${g} bytes, not ${w}";
+    }
+    isize differ = 0;
+    isize firstAt = -1;
+    isize i = 0;
+    while (i < got.length()) {
+        if (got[i] != want[i]) {
+            if (firstAt < 0) { firstAt = i; }
+            differ = differ + 1;
+        }
+        i = i + 1;
+    }
+    if (differ == 0) { return ""; }
+    uint8 a = got[firstAt];
+    uint8 b = want[firstAt];
+    return "${differ} bytes differ, the first byte ${firstAt}: ${a}, not ${b}";
+}

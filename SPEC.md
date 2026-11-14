@@ -58,6 +58,12 @@ frame, and nothing released by hand. `examples/clear` is the smallest program th
 - **`instance.requestAdapter(options:) -> AdapterRequest`,** from `AdapterOptions.make(power:)` or
   `AdapterOptions.withSurface(surface:, power:)`, which holds a reference on the surface while it lives
   (`PowerPreference`: `Default`, `LowPower`, `HighPerformance`).
+- **`options.forceFallbackAdapter(on:)`** is WebGPU's `forceFallbackAdapter`, false by default: when on, only a fallback
+  adapter may answer, one the implementation runs in software or with reduced performance, whose `info().kind()` is
+  `AdapterKind::CPU`. It is WARP natively on Windows and in Firefox, and SwiftShader in a Chromium browser started with
+  `--enable-unsafe-webgpu` (Chrome also wants `--enable-unsafe-swiftshader`). Where there is none, as on Metal or in a
+  Chromium browser started without those flags, the request fails with `NoAdapter`. A fallback device draws the same
+  bytes on every run, which a golden image compared byte for byte needs.
 - **`request.poll() -> AdapterStatus`:** `Pending`, `Ready(adapter)` or `Failed(error)`. A poll after `Ready` answers
   `Failed(Taken)`. **No adapter here for the request is `GpuError::NoAdapter(words)`,** webgpu.h's `Unavailable`: a
   browser or system without WebGPU (headless Firefox 160 here), or none matching the options. Any other failure is

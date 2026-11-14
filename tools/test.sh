@@ -82,13 +82,17 @@ step "kama check"
 "$KAMA" pkg install tests/kama.json > /dev/null
 "$KAMA" check tests/kama.json || failed=1
 
+# A native leg with no fallback adapter (GPU-15): Metal has none, so on macOS the tests hold the request to NoAdapter.
+nativeFlags=()
+[ "$(uname -s)" = Darwin ] && nativeFlags=(--no-fallback-adapter)
+
 for mode in debug release; do
     step "native, $mode"
     flag=""
     [ "$mode" = release ] && flag="--release"
     out="tests/out/native-$mode/gputests$EXE"
     if "$KAMA" build tests/kama.json $flag -o "$out" > "tests/out/build-$mode.log" 2>&1; then
-        "$out" 2>&1 | tee "tests/out/run-$mode.log" || failed=1
+        "$out" "${nativeFlags[@]}" 2>&1 | tee "tests/out/run-$mode.log" || failed=1
         printed "tests/out/run-$mode.log" "native, $mode"
     else
         tail -20 "tests/out/build-$mode.log"
@@ -175,11 +179,14 @@ else
     # five ways its run passes: it has no immediates, so maxImmediateSize is held to 0 (--no-immediates); its WGSL
     # compiler is naga, which gives no warnings (--no-shader-warnings); a buffer of 2^53 - 256 bytes is an OutOfMemory
     # error there (--huge-buffer-out-of-memory); its render pass errors never name the pass (--unnamed-pass-errors); and
-    # it takes a depth slice of 2^32 - 2 on a 2D view (--unchecked-depth-slice).
+    # it takes a depth slice of 2^32 - 2 on a 2D view (--unchecked-depth-slice). A Chromium browser under `kama run`
+    # offers no fallback adapter (--no-fallback-adapter, GPU-15): Edge offers SwiftShader to WebGPU only with
+    # --enable-unsafe-webgpu, Chrome only with that and --enable-unsafe-swiftshader, and `kama run` passes a browser no
+    # flag of ours (kyoten's KY-57), so the driver below, which passes both, runs the fallback cases in Chromium.
     if browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
         while IFS= read -r browser; do
             name="${browser##*[/\\]}"
-            differences=()
+            differences=(--no-fallback-adapter)
             if [[ "${name,,}" == *firefox* ]]; then
                 differences=(--no-immediates --no-shader-warnings --huge-buffer-out-of-memory --unnamed-pass-errors --unchecked-depth-slice)
             fi

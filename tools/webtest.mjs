@@ -69,11 +69,13 @@ class Cdp {
     }
 }
 
+// `--enable-unsafe-swiftshader` beside `--enable-unsafe-webgpu`: Chrome offers WebGPU its fallback adapter, SwiftShader,
+// only with both (measured on the pinned Chrome for Testing 157; Edge needs the first alone), for GPU-15's cases.
 async function launch(browser, profile) {
     fs.rmSync(profile, { recursive: true, force: true });
     const args = ['--headless=new', '--remote-debugging-port=0', `--user-data-dir=${profile}`, '--no-first-run',
                   '--no-default-browser-check', '--disable-extensions', `--force-device-scale-factor=${SCALE}`,
-                  '--window-size=1280,1024', '--enable-unsafe-webgpu', 'about:blank'];
+                  '--window-size=1280,1024', '--enable-unsafe-webgpu', '--enable-unsafe-swiftshader', 'about:blank'];
     const proc = spawn(browser, args, { stdio: ['ignore', 'ignore', 'pipe'] });
     const url = await new Promise((resolve, reject) => {
         let buf = '';

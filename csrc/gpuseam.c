@@ -561,7 +561,8 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
     }
 }
 
-gpuseam_adapter_request *gpuseam_request_adapter(WGPUInstance instance, WGPUSurface compatible, int32_t power) {
+gpuseam_adapter_request *gpuseam_request_adapter(WGPUInstance instance, WGPUSurface compatible, int32_t power,
+                                                 int32_t fallback) {
     gpuseam_adapter_request *r = (gpuseam_adapter_request *)calloc(1, sizeof *r);
     if (r == NULL) return NULL;
     atomic_init(&r->state, GPUSEAM_PENDING);
@@ -571,6 +572,7 @@ gpuseam_adapter_request *gpuseam_request_adapter(WGPUInstance instance, WGPUSurf
     memset(&opts, 0, sizeof opts);
     opts.powerPreference = (WGPUPowerPreference)power;
     opts.compatibleSurface = compatible;
+    opts.forceFallbackAdapter = fallback != 0;
     WGPURequestAdapterCallbackInfo ci;
     memset(&ci, 0, sizeof ci);
     ci.mode = WGPUCallbackMode_AllowSpontaneous;

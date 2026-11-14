@@ -838,20 +838,23 @@ type resource Instance implements Copyable<This>(bare: give) {
 
     // Ask for an adapter (WebGPU's first step); `poll()` the request until it settles.
     public unsafe fn AdapterRequest requestAdapter(const ref AdapterOptions options) {
-        return AdapterRequest.start(instance: this.handle, compatible: options.surface, power: options.power);
+        return AdapterRequest.start(instance: this.handle, compatible: options.surface, power: options.power,
+                                    fallback: options.fallback);
     }
 
     unsafe ~Instance() { if (this.handle != null) { instanceRelease(instance: this.handle); } }
 }
 
-// What an adapter is asked for (WebGPU's `GPURequestAdapterOptions`): a power preference, and the surface it must
-// present to when there is one, on which it holds a reference, and on its window.
+// What an adapter is asked for (WebGPU's `GPURequestAdapterOptions`): a power preference, the surface it must present
+// to when there is one, on which it holds a reference, and on its window, and whether only a fallback adapter may
+// answer.
 type resource AdapterOptions {
     int32 power;
     UnsafePtr surface;   // null for an adapter that need present nowhere
+    bool fallback = false;
     NativeWindow onWindow = NativeWindow.adopt(kind: NativeKind::None, display: null, window: null);
 
-    friend Instance::requestAdapter[power, surface];
+    friend Instance::requestAdapter[power, surface, fallback];
 
     public unsafe ctor make(PowerPreference power) { this.power = powerValue(p: power); this.surface = null; }
     public unsafe ctor withSurface(const ref Surface surface, PowerPreference power) {
@@ -860,6 +863,13 @@ type resource AdapterOptions {
         surfaceAddRef(surface: this.surface);
         this.onWindow = surface.heldWindow();
     }
+
+    // WebGPU's `forceFallbackAdapter`, false by default: when on, only a fallback adapter may answer, one the
+    // implementation provides in software or with reduced performance (SwiftShader in Chromium, WARP in Firefox and
+    // natively on Windows), whose `info().kind()` is `AdapterKind::CPU`. Where there is none, the request fails as any
+    // other does, with `GpuError::NoAdapter`. A software adapter draws the same bytes on every run, which is what a
+    // golden image compared byte for byte needs.
+    public fn void forceFallbackAdapter(bool on) { this.fallback = on; }
 
     unsafe ~AdapterOptions() { if (this.surface != null) { surfaceRelease(surface: this.surface); } }
 }
@@ -873,9 +883,9 @@ type resource AdapterRequest {
 
     friend Instance::requestAdapter[start];
 
-    unsafe ctor start(UnsafePtr instance, UnsafePtr compatible, int32 power) {
+    unsafe ctor start(UnsafePtr instance, UnsafePtr compatible, int32 power, bool fallback) {
         this.instance = instance;
-        this.slot = requestAdapter(instance: instance, compatible: compatible, power: power);
+        this.slot = requestAdapter(instance: instance, compatible: compatible, power: power, fallback: fallback ? 1 : 0);
     }
 
     // Pending until the adapter has answered; then Ready once, handing the adapter over, or Failed with the

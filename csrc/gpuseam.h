@@ -44,7 +44,8 @@ typedef struct gpuseam_adapter_request gpuseam_adapter_request;
 
 // Ask `instance` for an adapter (`compatible` may be NULL: an offscreen one). `power` is a WGPUPowerPreference. The
 // slot holds a reference on the instance while it lives. NULL only when the slot cannot be allocated.
-gpuseam_adapter_request *gpuseam_request_adapter(WGPUInstance instance, WGPUSurface compatible, int32_t power);
+gpuseam_adapter_request *gpuseam_request_adapter(WGPUInstance instance, WGPUSurface compatible, int32_t power,
+                                                 int32_t fallback);
 // GPUSEAM_PENDING, _READY, _FAILED or _UNAVAILABLE, after processing the instance's events.
 int32_t gpuseam_adapter_request_poll(gpuseam_adapter_request *request);
 // A READY request's adapter, handed over once (NULL after).

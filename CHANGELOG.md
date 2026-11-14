@@ -5,6 +5,11 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: the fallback adapter** (2026-11-14, kama 0.9.947; GPU-15, AGENTS.gpu.md item 13).
+  `AdapterOptions.forceFallbackAdapter(on:)`, WebGPU's `forceFallbackAdapter`: only a fallback adapter may answer, a
+  software one (WARP natively on Windows and in Firefox, SwiftShader in Chromium started with WebGPU's flags), whose
+  kind is `AdapterKind::CPU`. Where there is none, the request fails with `NoAdapter`.
+
 - **New: `examples/triangle`** (2026-11-13, kama 0.9.943; GPU-4's fifth and last part, AGENTS.gpu.md item 12,
   decision 15). A triangle spun in a window, natively and in a browser, drawn through a vertex buffer, an index buffer
   and a bind group whose uniform is written each frame, through a layout written out, with nothing released by hand.

@@ -33,7 +33,7 @@ import {
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::WindowOptions, window::Size, window::NativeWindow,
     addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly, readOptions, heapInUse,
-    ShaderRun, Verdicts, BindingRun, PipelineRun, PassRun,
+    ShaderRun, Verdicts, BindingRun, PipelineRun, PassRun, FallbackRun,
 };
 
 comptime uint32 SIDE = 64;
@@ -561,6 +561,11 @@ unsafe fn bool unnamedPassErrors() { return hasFlag(flag: "--unnamed-pass-errors
 // every other leg is held to WebGPU's validation error. Only Firefox's leg passes it.
 unsafe fn bool uncheckedDepthSlice() { return hasFlag(flag: "--unchecked-depth-slice"); }
 
+// `--no-fallback-adapter`: a leg that offers no fallback adapter (macOS natively, where Metal has none) is held to
+// refusing one as NoAdapter, in WebGPU's words, where every other leg is held to giving one (GPU-15). A fallback adapter
+// offered under the flag fails the run, so it never hides one.
+unsafe fn bool noFallbackAdapter() { return hasFlag(flag: "--no-fallback-adapter"); }
+
 type resource Check implements App {
     Optional<Instance> instance = Optional::None;
     Optional<AdapterPool> pool = Optional::None;      // the adapters, one for each device below
@@ -586,13 +591,14 @@ type resource Check implements App {
     Optional<Queue> queue = Optional::None;
     Optional<Buffer> readback = Optional::None;
     Optional<BufferRead> read = Optional::None;
-    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 the error cases, 5 the shader cases, 6 the binding cases, 7 the pipeline cases, 8 done
+    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 the error cases, 5 the shader cases, 6 the binding cases, 7 the pipeline cases, 8 the pass cases, 9 the fallback cases, 10 done
     Optional<SurfaceRun> surfaces = Optional::None;
     Optional<ErrorRun> errorRun = Optional::None;
     Optional<ShaderRun> shaderRun = Optional::None;
     Optional<BindingRun> bindingRun = Optional::None;
     Optional<PipelineRun> pipelineRun = Optional::None;
     Optional<PassRun> passRun = Optional::None;
+    Optional<FallbackRun> fallbackRun = Optional::None;
     Instant began = monotonicNow();
     int32 runs = 0;
     int32 failures = 0;
@@ -661,7 +667,8 @@ type resource Check implements App {
         if (this.stage == 6) { this.bindingStep(); }
         if (this.stage == 7) { this.pipelineStep(); }
         if (this.stage == 8) { this.passStep(); }
-        if (this.stage == 9) { return this.finish(); }
+        if (this.stage == 9) { this.fallbackStep(); }
+        if (this.stage == 10) { return this.finish(); }
         return 1;
     }
 
@@ -751,6 +758,23 @@ type resource Check implements App {
         pending.verdicts().clear();
         this.passRun = Optional::Some(value: give pending);
         if (done) { this.passRun = Optional::None; this.stage = 9; }
+    }
+
+    // GPU-15's cases, the fallback adapter (tests/src/fallback.kama), a step this tick, their verdicts reported here.
+    unsafe fn void fallbackStep() {
+        Optional<FallbackRun> taken = replace(place: this.fallbackRun, with: Optional::None);
+        FallbackRun pending = match (give taken) { case Some(value: r): give r; case None: FallbackRun.make(adapterOptional: adapterOptional(), noFallbackAdapter: noFallbackAdapter()); };
+        bool done = pending.step();
+        isize i = 0;
+        while (i < pending.verdicts().count()) {
+            string name = pending.verdicts().nameAt(at: i);
+            string why = pending.verdicts().whyAt(at: i);
+            this.verdict(name: name, why: why);
+            i = i + 1;
+        }
+        pending.verdicts().clear();
+        this.fallbackRun = Optional::Some(value: give pending);
+        if (done) { this.fallbackRun = Optional::None; this.stage = 10; }
     }
 
     unsafe fn void awaitAdapter() {

@@ -45,8 +45,8 @@ errors reach its own holders (GPU-1), a surface holds its window (GPU-2), an acq
 differences from Dawn are handled (GPU-14). **GPU-4, the render pipeline set, is built** (item 12, decisions 1 to 15),
 in five parts: shader modules; layouts, bind groups, samplers and `writeBuffer`; render pipelines both ways, with
 `printErrors`; textures, views and the pass by description, and the pass's eight commands; and `examples/triangle`,
-whose last frame is read back from its window on every leg. `@kama/graphics`' GFX-1, the lit cube, comes next, and the
-first row it pulls is GPU-15, the fallback adapter, for its byte-for-byte software goldens (decided 2026-11-14).
+whose last frame is read back from its window on every leg. **GPU-15, the fallback adapter, is built** (item 13), for
+`@kama/graphics`' byte-for-byte software goldens (decided 2026-11-14), and its GFX-1, the lit cube, comes next.
 `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
@@ -1472,6 +1472,39 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       isolates", the same way. Each now waits by the clock, as every wait on the package's own threads does, and then
       holds the count exactly: the held start passes, and a pool one isolate short or one over still fails both, as 1
       or 3 run, not 2.
+13. **Built on 2026-11-14: the fallback adapter (GPU-15)** (kama 0.9.947), pulled by `@kama/graphics`' GFX-1 for its
+    goldens, rendered on a software GPU and compared byte for byte (kyoten's `docs/design/rendering.md` § Decided,
+    GFX-1's question 3). Its shape follows decision 1 of item 12: `AdapterOptions` is a `type resource`, so its part is
+    set by a method, `forceFallbackAdapter(on:)`, under WebGPU's name and default.
+    - **The cases** (`tests/src/fallback.kama`, a step a tick on every leg): an adapter asked for without the flag is not
+      CPU here; one asked for with it is CPU; a device from it draws two triangles crossing in depth at 4× MSAA with a
+      depth32float buffer, resolved, into a 32 × 32 target, and reads back the same bytes a second time, some texels the
+      clear colour and some not, with no WebGPU error. The two adapters are asked for one after the other, since a
+      request is polled until it answers and never again.
+    - **What each leg gives** (each `info()` printed by the run): natively WARP (kind CPU, vendor `10.0.26100.9818`, the
+      rest blank) with 452 texels drawn; Firefox 160 WARP (kind CPU, every string blank), 452; the pinned Chrome for
+      Testing and Edge through the driver SwiftShader (vendor `google`, architecture `swiftshader`), 453.
+    - **Chromium gives WebGPU its fallback only when asked on its command line** (measured through the driver, one flag
+      at a time): Edge with `--enable-unsafe-webgpu`, Chrome for Testing with that and `--enable-unsafe-swiftshader`,
+      and either with neither, which is what `kama run` passes, answers null. So the driver passes both, and a
+      Chromium browser under `kama run` passes `--no-fallback-adapter` until `kama run` can hand a browser flags
+      (kyoten's KY-57).
+    - **`--no-fallback-adapter`:** a leg that offers no fallback adapter holds the request to `NoAdapter` in WebGPU's
+      words, and a leg that offers one fails the run under it (shown natively: "a fallback adapter was offered … so
+      the flag would hide it"). The gate passes it to Chromium under `kama run`, and natively on macOS, where Metal has
+      none; the Mac's leg is still to be run.
+    - **Red first:** against a setter that stored nothing, natively and in Edge the flagged request gave the AMD Radeon
+      880M (IntegratedGPU natively, Unknown in Edge). 305 cases natively, 282 in Chrome for Testing and Firefox, 280 in
+      Edge under `kama run`.
+    - **Mutations: 9 of 9 caught,** seven natively and two in the pinned Chrome for Testing, each run built and failed on
+      its own: the seam never setting the flag (natively and on the web), the seam always setting it, the setter storing
+      nothing or the opposite, the options defaulting to the fallback adapter, `requestAdapter` passing false, the
+      request's start passing 0 to the seam, and the driver dropping `--enable-unsafe-swiftshader`. The two that put
+      every adapter on WARP were caught by the process ending, which is the next entry's finding.
+    - **Found on the way, natively on WARP:** with every case on the fallback adapter, the pass case that tests a depth
+      stored by an earlier pass through a read-only depth attachment loses the device ("Parent device is lost"), and
+      the next `queue.submit` ends the process in wgpu-native's panic. A lost device's submit is not skipped as a failed
+      `finish`'s is (item 2, decision 3), so this is investigated and fixed in a commit of its own.
 
 ## Where the truth is
 

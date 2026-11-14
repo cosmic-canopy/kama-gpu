@@ -18,12 +18,9 @@ sections in the order `@kama/graphics` pulls them.
 
 ## NOW: what `@kama/graphics`' first slice pulls
 
-The render pipeline set is built ([SPEC.md](SPEC.md); the git log has how). `@kama/graphics`' GFX-1, the lit cube,
-comes next, and pulls these rows as it goes.
-
-| id | item | why |
-|---|---|---|
-| GPU-15 | **The fallback adapter**: WebGPU's `forceFallbackAdapter`, for `@kama/graphics`' software goldens (SwiftShader on the web, WARP natively), compared byte for byte | [detail](ROADMAP_DETAIL.md#fallback-adapter) |
+Nothing here is under way. The render pipeline set and the fallback adapter are built ([SPEC.md](SPEC.md); the git log
+has how), and `@kama/graphics`' GFX-1, the lit cube, is next. The first row below that it pulls moves up here when it
+does.
 
 ## LATER: the rest of webgpu.h before 1.0
 
