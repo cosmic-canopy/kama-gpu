@@ -9,10 +9,10 @@
 #
 # Run it from msys2 UCRT64 on Windows (bash -lic, so emcc and node are on PATH for the web leg), or any shell elsewhere.
 # It needs what tools/check-bindings.sh needs: kama, and wgpu-native's SDK at $KAMA_WGPU_DIR (default
-# third_party/wgpu/<platform>). The web leg is built when `emcc` is on PATH and run, headless, in every browser
-# tools/browsers.mjs finds (AGENTS.gpu.md item 11): under `kama run --target WASM` in Edge and Chrome as installed and in
-# the pinned Firefox, and through tools/webtest.mjs in the pinned Chrome for Testing (KAMA_BROWSER names one). Each part
-# is skipped, and says so, without what it needs.
+# third_party/wgpu/<platform>). The web leg is built when `emcc` is on PATH and run, headless, under
+# `kama run --target WASM` in every browser tools/browsers.mjs finds (AGENTS.gpu.md item 11): Edge and Chrome as
+# installed, the pinned Firefox and the pinned Chrome for Testing (KAMA_BROWSER names one). Each part is skipped, and says
+# so, without what it needs.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -179,43 +179,38 @@ else
     # five ways its run passes: it has no immediates, so maxImmediateSize is held to 0 (--no-immediates); its WGSL
     # compiler is naga, which gives no warnings (--no-shader-warnings); a buffer of 2^53 - 256 bytes is an OutOfMemory
     # error there (--huge-buffer-out-of-memory); its render pass errors never name the pass (--unnamed-pass-errors); and
-    # it takes a depth slice of 2^32 - 2 on a 2D view (--unchecked-depth-slice). A Chromium browser under `kama run`
-    # offers no fallback adapter (--no-fallback-adapter, GPU-15): Edge offers SwiftShader to WebGPU only with
-    # --enable-unsafe-webgpu, Chrome only with that and --enable-unsafe-swiftshader, and `kama run` passes a browser no
-    # flag of ours (kyoten's KY-57), so the driver below, which passes both, runs the fallback cases in Chromium.
+    # it takes a depth slice of 2^32 - 2 on a 2D view (--unchecked-depth-slice).
+    #
+    # Chromium offers WebGPU its fallback adapter (GPU-15) only when its command line asks: Edge with
+    # --enable-unsafe-webgpu, Chrome with that and --enable-unsafe-swiftshader. The pinned Chrome for Testing is started
+    # with both (tools/browsers.mjs flags, decided with the owner on 2026-11-14), so it runs the fallback cases; Edge and
+    # an installed Chrome run as a player's do, on their real GPU, and offer none (--no-fallback-adapter).
     if browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
+        cft=0
         while IFS= read -r browser; do
             name="${browser##*[/\\]}"
-            differences=(--no-fallback-adapter)
-            if [[ "${name,,}" == *firefox* ]]; then
-                differences=(--no-immediates --no-shader-warnings --huge-buffer-out-of-memory --unnamed-pass-errors --unchecked-depth-slice)
-            fi
-            echo "-- kama run, $browser ${differences[*]}"
-            KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless -- "${differences[@]}" 2>&1 | tee tests/out/run-web.log || failed=1
+            flags=()
+            while IFS= read -r f; do [ -n "$f" ] && flags+=("$f"); done < <(node tools/browsers.mjs flags "$browser" | tr -d '\r')
+            # A leg's differences follow the browser, never its flags: a Chrome for Testing started without the flags that
+            # offer the fallback adapter fails its fallback cases rather than skipping them.
+            case "$(node tools/browsers.mjs kind "$browser" | tr -d '\r')" in
+            firefox)
+                differences=(--no-immediates --no-shader-warnings --huge-buffer-out-of-memory --unnamed-pass-errors --unchecked-depth-slice) ;;
+            chrome-for-testing) differences=(); cft=1 ;;
+            *) differences=(--no-fallback-adapter) ;;
+            esac
+            echo "-- kama run, $browser${flags[*]:+ ${flags[*]}}${differences[*]:+ -- ${differences[*]}}"
+            KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless ${flags[@]+"${flags[@]}"} -- ${differences[@]+"${differences[@]}"} 2>&1 | tee tests/out/run-web.log || failed=1
             printed tests/out/run-web.log "$name"
             echo "-- kama run, $browser: examples/clear on #canvas for 60 frames"
-            KAMA_BROWSER="$browser" bounded "$KAMA" run examples/clear/kama.json --target WASM --headless -- --frames 60 || failed=1
+            KAMA_BROWSER="$browser" bounded "$KAMA" run examples/clear/kama.json --target WASM --headless ${flags[@]+"${flags[@]}"} -- --frames 60 || failed=1
             echo "-- kama run, $browser: examples/triangle on #canvas for 60 frames, read back"
-            KAMA_BROWSER="$browser" bounded "$KAMA" run examples/triangle/kama.json --target WASM --headless -- --frames 60 2>&1 | tee tests/out/run-triangle-web.log || failed=1
+            KAMA_BROWSER="$browser" bounded "$KAMA" run examples/triangle/kama.json --target WASM --headless ${flags[@]+"${flags[@]}"} -- --frames 60 2>&1 | tee tests/out/run-triangle-web.log || failed=1
             readBack tests/out/run-triangle-web.log "$name"
         done <<< "$browsers"
+        [ "$cft" = 1 ] || echo "skip no Chrome for Testing pinned under ~/browsers, so no Chromium leg ran the fallback cases"
     else
-        echo "skip no browser for kama run (Edge or Chrome installed, or Firefox pinned under ~/browsers; or set KAMA_BROWSER)"
-    fi
-    # The pinned Chrome for Testing, through the stopgap driver: it never loads a page under `kama run` (kyoten's KY-53).
-    if browsers="$(node tools/browsers.mjs driver 2>/dev/null)"; then
-        while IFS= read -r browser; do
-            echo "-- the driver, $browser"
-            node tools/webtest.mjs tests/out/web gputests.html --browser "$browser" 2>&1 | tee tests/out/run-driver.log || failed=1
-            printed tests/out/run-driver.log "the driver"
-            echo "-- the driver, $browser: examples/clear on #canvas for 60 frames"
-            node tools/webtest.mjs tests/out/clear-web "clear.html?arg=--frames&arg=60" --browser "$browser" || failed=1
-            echo "-- the driver, $browser: examples/triangle on #canvas for 60 frames, read back"
-            node tools/webtest.mjs tests/out/triangle-web "triangle.html?arg=--frames&arg=60" --browser "$browser" 2>&1 | tee tests/out/run-triangle-driver.log || failed=1
-            readBack tests/out/run-triangle-driver.log "the driver"
-        done <<< "$browsers"
-    else
-        echo "skip no Chrome for Testing pinned under ~/browsers, so no driver run"
+        echo "skip no browser for kama run (Edge or Chrome installed, Firefox or Chrome for Testing pinned under ~/browsers; or set KAMA_BROWSER)"
     fi
 fi
 

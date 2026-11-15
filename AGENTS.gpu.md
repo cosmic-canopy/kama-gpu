@@ -552,6 +552,28 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
     channel's, the reverse of Dawn's order, which the check does not hold. `--adapter-optional` is passed by no leg, and
     kept for a host with no GPU. The stopgap `ffrun.sh` retires.
 
+    **Decided by the owner on 2026-11-14 (kyoten's twenty-sixth session), as recommended: the driver retires**
+    (decision 3's condition met; kyoten's rendering.md § Decided). kama 0.9.956 hands a browser the flags a run names
+    (`--chromium-arg`, kyoten's KY-57, fixed), and the pinned Chrome for Testing loads a page under `kama run` once
+    given `--disable-features=NetworkServiceSandbox` (measured the day before on `@kama/graphics`' tests).
+    - **The pinned Chrome for Testing runs under `kama run`,** its flags on its own command line
+      (`tools/browsers.mjs flags`): `--enable-unsafe-webgpu` and `--enable-unsafe-swiftshader`, which offer WebGPU
+      SwiftShader, so it runs item 13's fallback cases; `--disable-features=NetworkServiceSandbox`; and `--scale 1.5`, as
+      the driver ran it. Never in the tests' `kama.json`, whose `chromiumArgs` would reach Edge too.
+    - **Edge and an installed Chrome take no flag** and run as a player's do, on their real GPU, holding that no fallback
+      adapter is offered (`--no-fallback-adapter`): `--enable-unsafe-webgpu` would unlock what Chromium holds back from
+      pages (Dawn's unsafe APIs and its adapter blocklist).
+    - **`tools/webtest.mjs` is deleted.** `@kama/window` keeps its own for trusted input (kama's KR-378, its WIN-24).
+    - **`tools/browsers.mjs kind`** says which leg a browser runs (firefox, chrome-for-testing, edge, chrome), so a
+      leg's differences follow the browser, never its flags: a Chrome for Testing missing a flag fails rather than
+      passing with fewer cases.
+    - **Built the same night, every leg green:** 309 cases natively, debug and release, 283 in Edge, 286 in Firefox 160
+      and in Chrome for Testing under `kama run`, on SwiftShader as the driver gave it (453 texels), and both examples'
+      60 frames in each. **Mutations: 6 of 6 caught,** each held to the gate: either SwiftShader flag dropped (the
+      fallback request refused), `--disable-features=NetworkServiceSandbox` dropped and Chrome for Testing read as an
+      installed Chrome (no page, so no case ran), Edge given Chrome for Testing's flags and Chrome for Testing kept on
+      `--no-fallback-adapter` (each offered a fallback adapter the flag says it must not be).
+
 12. **Decided on 2026-11-12, before it was built: the render pipeline set (GPU-4).** Measured first (kyoten's
     `.scratch/gpu4-pipelines/`, its `FINDINGS.md`): natively a C probe on wgpu-native v29.0.1.1 over Vulkan on the AMD
     Radeon 880M, one process per case; on the web a plain WebGPU page in headless Edge 157, and emdawnwebgpu's

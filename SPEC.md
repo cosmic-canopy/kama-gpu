@@ -626,9 +626,11 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   `maxImmediateSize` to 0 (`--no-immediates`); a WGSL warning to no message (`--no-shader-warnings`); a buffer of
   2^53 - 256 bytes to an out-of-memory error, which is how Firefox reports it (`--huge-buffer-out-of-memory`); a render
   pass error to not naming the pass, as wgpu's never do (`--unnamed-pass-errors`); and a depth slice of 2^32 - 2 on a 2D
-  view to being taken (`--unchecked-depth-slice`). All three also run through `tools/webtest.mjs` in the pinned Chrome for Testing, which
-  does not run under `kama run` (kyoten's KY-53). `--adapter-optional`, which turns a missing adapter into a named
-  skip, is passed by no leg; it is kept for a host with no GPU.
+  view to being taken (`--unchecked-depth-slice`). All three also run under `kama run` in the pinned Chrome for Testing,
+  started as `tools/browsers.mjs` says, with the flags that offer WebGPU SwiftShader, so it runs the fallback adapter's
+  cases; Edge and an installed Chrome run on their real GPU as a player's do, and hold that none is offered
+  (`--no-fallback-adapter`). `--adapter-optional`, which turns a missing adapter into a named skip, is passed by no leg;
+  it is kept for a host with no GPU.
 
 What runs on one leg only: wgpu-native's own timing (an error in the channel when its call returns, a scope's pop ready
 at once, the seam's scopes) and its aborts natively; a window wider than `maxTextureDimension2D` on the web, since no

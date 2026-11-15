@@ -5,6 +5,9 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The gate runs every browser under `kama run`, the pinned Chrome for Testing among them with the flags that offer
+  WebGPU SwiftShader, started as `tools/browsers.mjs` says (AGENTS.gpu.md item 11), so the DevTools driver,
+  `tools/webtest.mjs`, is retired. The gate needs kama 0.9.956 (`--chromium-arg`) or later.
 - **Fixed: a lost device's next submit or map ended the process natively** (2026-11-14, kama 0.9.947; AGENTS.gpu.md
   item 13). wgpu-native panics at a submit to a lost or destroyed device, and a map makes an empty submit first. Now the
   package asks before each whether the device can still take work: a submit to one that cannot goes nowhere, a map of
