@@ -5,6 +5,9 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- The tests program and both examples state their pace, `run(app:, pace: Pace::EveryRefresh)`, as kama 0.9.958's
+  `std::app` asks (KR-281 4g), each ticking as it did; their manifests need kama 0.9.958 or later. Green on kama
+  0.9.960 at the same counts (2026-11-15).
 - The gate runs every browser under `kama run`, the pinned Chrome for Testing among them with the flags that offer
   WebGPU SwiftShader, started as `tools/browsers.mjs` says (AGENTS.gpu.md item 11), so the DevTools driver,
   `tools/webtest.mjs`, is retired. The gate needs kama 0.9.956 (`--chromium-arg`) or later.

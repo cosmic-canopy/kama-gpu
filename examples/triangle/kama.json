@@ -2,7 +2,7 @@
   "name": "triangle",
   "version": "0.1.0",
   "kind": "executable",
-  "kama": ">=0.9.943",
+  "kama": ">=0.9.958",
   "description": "A triangle spun in a window through a vertex buffer, an index buffer and a bind group, on @kama/gpu and @kama/window, natively and in a browser; --frames N reads its last frame back",
   "entry": "src/main.kama",
   "webgpu": true,

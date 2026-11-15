@@ -17,7 +17,7 @@
 import {
     core::println,
     core::env::envOr, core::env::args, core::env::Args,
-    std::app::App, std::app::Lifecycle, std::app::run, std::app::quit,
+    std::app::App, std::app::Lifecycle, std::app::run, std::app::Pace, std::app::quit,
     std::collections::DynamicArray,
     std::memory::Owned, std::memory::replace,
     std::time::Instant, std::time::monotonicNow,
@@ -2933,7 +2933,7 @@ fn void endOnTheWeb(bool failed) { }
 
 unsafe fn void runChecks() {
     Owned<App> app = new Check.make();
-    run(app: give app);
+    run(app: give app, pace: Pace::EveryRefresh);
 }
 
 fn uint8 main() {

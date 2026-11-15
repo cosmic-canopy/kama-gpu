@@ -19,7 +19,7 @@
 import {
     core::println,
     core::env::args, core::env::Args,
-    std::app::App, std::app::Lifecycle, std::app::run, std::app::quit,
+    std::app::App, std::app::Lifecycle, std::app::run, std::app::Pace, std::app::quit,
     std::collections::ConstView,
     std::fmt::ParseError, std::fmt::Parseable,
     std::math::radians,
@@ -486,7 +486,7 @@ type resource Triangle implements App {
 
 unsafe fn void runTriangle() {
     Owned<App> app = new Triangle.make();
-    run(app: give app);
+    run(app: give app, pace: Pace::EveryRefresh);
 }
 
 fn uint8 main() {

@@ -14,7 +14,7 @@
 import {
     core::println,
     core::env::args, core::env::Args,
-    std::app::App, std::app::Lifecycle, std::app::run, std::app::quit,
+    std::app::App, std::app::Lifecycle, std::app::run, std::app::Pace, std::app::quit,
     std::fmt::ParseError, std::fmt::Parseable,
     std::memory::Owned,
     std::time::sleep, std::time::Duration,
@@ -290,7 +290,7 @@ type resource Clear implements App {
 
 unsafe fn void runClear() {
     Owned<App> app = new Clear.make();
-    run(app: give app);
+    run(app: give app, pace: Pace::EveryRefresh);
 }
 
 fn uint8 main() {
