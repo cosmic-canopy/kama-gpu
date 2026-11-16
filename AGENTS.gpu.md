@@ -46,7 +46,9 @@ differences from Dawn are handled (GPU-14). **GPU-4, the render pipeline set, is
 in five parts: shader modules; layouts, bind groups, samplers and `writeBuffer`; render pipelines both ways, with
 `printErrors`; textures, views and the pass by description, and the pass's eight commands; and `examples/triangle`,
 whose last frame is read back from its window on every leg. **GPU-15, the fallback adapter, is built** (item 13), for
-`@kama/graphics`' byte-for-byte software goldens (decided 2026-11-14), and its GFX-1, the lit cube, comes next.
+`@kama/graphics`' byte-for-byte software goldens (decided 2026-11-14), and its GFX-1, the lit cube, is under way.
+**`queue.writeTexture` is built** (item 14, 2026-11-16), brought forward from GPU-8 for GFX-1's first texture, so the
+safe API calls 96 of webgpu.h's 206 functions.
 `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
@@ -632,6 +634,8 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
     4. **`queue.writeBuffer(buffer:, offset:, data:)` comes forward from GPU-8,** taking a `ConstView<uint8>`, which kama's
        byte views give only over a type proved free of padding and pointers. It is the production path for data that
        changes each frame, not a stopgap. `writeTexture`, `mappedAtCreation` and staging buffers stay in GPU-8.
+       **Amended by the owner on 2026-11-16:** `writeTexture` comes forward too, for `@kama/graphics`' first texture
+       (item 14); `mappedAtCreation`, staging buffers and the copies stay in GPU-8.
     5. **A render pass and a texture are made from WebGPU's full description,** replacing the narrow calls (one way to
        do a thing; the package is unpublished, so `examples/clear` and `tests/` move with it):
        - `encoder.beginRenderPass(descriptor:)` replaces `beginRenderPass(target:, clear:)`: color attachments, each with
@@ -1556,6 +1560,48 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       return, the state keeping no device (each ends the process again), and a loss never published (natively and on
       the web: the device never says it is lost). The eighth, a known loss not answered at once, is equivalent: the check
       finds the loss again at the next submit, at the cost of one more empty encoder.
+14. **Built on 2026-11-16: `queue.writeTexture`, brought forward from GPU-8** (kama 0.9.965), pulled by `@kama/graphics`'
+    GFX-1 for its first texture, three.js r187's DFG table, a 16 × 16 RG16Float texture its direct light reads (kyoten's
+    `docs/design/rendering.md` § Decided, GFX-1's part 3, the lights). The owner's word (2026-11-16, "A: writeTexture
+    now", after asking whether it was a stopgap: it is not; kama lacked nothing, the package had not wrapped WebGPU's
+    call). Item 12's decision 4 is amended with it; the copies, `mappedAtCreation` and staging buffers stay in GPU-8.
+    - **Its shape is WebGPU's, by description, as decision 5's:** `queue.writeTexture(destination:, data:, layout:,
+      size:)`, the destination a `TexelCopyTextureInfo` (`make(texture:)`, then `mipLevel(level:)`, `origin(x:, y:,
+      z:)`, `aspect(kind:)`), the data a `ConstView<uint8>` as `writeBuffer`'s, the layout a `TexelCopyBufferLayout`
+      (`make()`, then `offset(bytes:)`, `bytesPerRow(bytes:)`, `rowsPerImage(count:)`, each stride unsaid unless set),
+      and the size an `Extent3D` made memberwise. GPU-8's copies will take the same two descriptions.
+    - **Measured first** (kyoten's `.scratch/s30/wt-probe/`, a C probe on wgpu-native v29.0.1.1, one case a process,
+      and emdawnwebgpu's `library_webgpu.js`): natively every misuse is a validation error inside the call (rows too
+      short, data too short, past the edge, no CopyDst, a mip level or an aspect the texture lacks, an offset past the
+      data, multisampled, Depth32Float, 16 rows with no `bytesPerRow`, too few rows per image, an invalid or destroyed
+      texture, and offsets, origins, sizes and mip levels of 2^32 - 1 or 2^60). Only a null pointer with a size above 0
+      ends the process, which a `ConstView` never hands it: an empty view's null pointer comes with a size of 0, which is
+      a validation error. emdawnwebgpu reads every 32-bit field unsigned and the offset as an `i53`, so on the web only
+      an offset past 2^53 - 1 would throw. **So nothing is refused in the package's words:** the offset is clamped
+      (decision 9), and a stride of 2^32 - 1, webgpu.h's "unsaid", is taken as 2^32 - 2.
+    - **The cases** (`tests/src/uploads.kama`, a step a tick on every leg): a 16 × 16 RG16Float texture written with its
+      rows 64 bytes apart reads back as written, through `copyTextureToBuffer`; a 3 × 2 region at (5, 6), from 100
+      bytes into its data with rows 12 bytes apart, lands there and nowhere else; a write into the second mip level and
+      the second array layer lands there, the first reading zero; two layers in one write, their images 4 rows apart; a
+      Stencil8 texture's stencil; one row with no `bytesPerRow`, and an empty region from no data, each taken with no
+      error; and the writes WebGPU refuses, each one validation error, the offset of 2^60 and 16 × 16 texels from no
+      data at all among them; and a write into a destroyed device's texture never ends the program. 339 cases natively,
+      313 in Edge, 316 in Firefox and Chrome for Testing.
+    - **Found in Firefox 160:** every write from past the end of its data is worded alike ("Copy at offset 1 bytes
+      would end up overrunning the bounds of the Source buffer of size 0"), whatever the offset, since Firefox slices
+      the data at the offset before wgpu sees it, and Firefox drops an error whose words repeat an earlier one's (SPEC §
+      A device's errors and its loss). So one case writes from past the end of its data, the offset of 2^60, and
+      another from exactly its end, whose words differ.
+    - **Red first:** against a `writeTexture` that did nothing, 17 of the 29 cases then written failed natively; the
+      twelve that passed are the takes and the levels left zero, which the mutations hold.
+    - **Mutations: 18 of 19 caught,** 17 natively and one in Edge, Firefox and Chrome for Testing, each run built and
+      failed on its own (kyoten's `.scratch/s30/gpu-tools/mut_writetexture.py`): the mip level, each origin
+      coordinate, the origin's x and y swapped, the aspect, the offset, either stride, the width and height swapped, the
+      depth or half the data dropped on their way to webgpu.h, and the offset, origin, mip level, aspect and
+      rowsPerImage setters each storing nothing; and, on the web alone, the offset unclamped, where Edge and Chrome
+      throw ("Value is outside the 'unsigned long long' value range") and every browser's run ends. The nineteenth, a
+      stride of 2^32 - 1 passed on unclamped, is equivalent: webgpu.h then reads it as unsaid, and a write of more than
+      one row is refused either way, only in other words, while one row is taken either way.
 
 ## Where the truth is
 

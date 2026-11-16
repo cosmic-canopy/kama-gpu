@@ -513,6 +513,20 @@ Dawn's is. Firefox reports places in UTF-16 units as Dawn does, the first error 
   - **A byte count not a multiple of 4 is refused in the package's words,** where a browser would throw, and nothing is
     written. An offset past 2^53 - 1 is clamped.
   - On an adopted queue, which has no device to report through, such a refusal is dropped.
+- **`queue.writeTexture(destination:, data:, layout:, size:)`,** WebGPU's `writeTexture` (AGENTS.gpu.md item 14): the
+  texels of a region `size` wide written from `data`, a `ConstView<uint8>`, before any later submit's work.
+  - **`TexelCopyTextureInfo.make(texture:)`,** WebGPU's `GPUTexelCopyTextureInfo`: the texture's first mip level, from
+    its first texel, every aspect. Its parts: `mipLevel(level:)`, `origin(x:, y:, z:)` (`z` a 3D texture's depth or an
+    array layer) and `aspect(kind:)`.
+  - **`TexelCopyBufferLayout.make()`,** WebGPU's `GPUTexelCopyBufferLayout`: the texels from the data's start, each
+    stride unsaid. Its parts: `offset(bytes:)`, `bytesPerRow(bytes:)` and `rowsPerImage(count:)`. WebGPU needs
+    `bytesPerRow` only for more than one row and `rowsPerImage` only for more than one image, and, unlike a buffer's
+    copy into a texture, neither needs any alignment. A stride of 2^32 - 1, which webgpu.h reads as unsaid, is taken as
+    2^32 - 2.
+  - **`Extent3D.of(width:, height:, depthOrArrayLayers:)`,** WebGPU's `GPUExtent3D`, the region's size in texels.
+  - What WebGPU refuses is a validation error on both legs: rows or images closer than the texels need, data too
+    short, a region past the texture, a texture without `CopyDst`, multisampled or of a depth format, a mip level or an
+    aspect it lacks, an invalid texture. An offset past 2^53 - 1 is clamped, where a browser would throw.
 
 ## Surfaces
 
@@ -602,7 +616,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 30 facts, natively, its asynchronous
   pipeline call's abort and its taking a colour target the fragment stage never writes among them;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 301 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 339 cases natively with a display, debug and release.
   Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
@@ -620,7 +634,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   `raw()`, `adopt`, `extern fn` or webgpu.h name, so nothing in it is released by hand;
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
-- the web leg, headless, on the page's canvases: `tests/` (278 cases), `examples/clear` (60 frames on `#canvas`) and
+- the web leg, headless, on the page's canvases: `tests/` (313 cases in Edge, 316 in Firefox and Chrome for Testing), `examples/clear` (60 frames on `#canvas`) and
   `examples/triangle` (60 frames on `#canvas`, the last read back) under `kama run --target WASM --headless` in Edge,
   Chrome as installed and the pinned Firefox 160, each with the printErrors check and the read back's line. Firefox's run holds each of its differences, so the day one goes, its run fails:
   `maxImmediateSize` to 0 (`--no-immediates`); a WGSL warning to no message (`--no-shader-warnings`); a buffer of

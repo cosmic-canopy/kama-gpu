@@ -33,7 +33,7 @@ import {
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::WindowOptions, window::Size, window::NativeWindow,
     addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly, readOptions, heapInUse,
-    ShaderRun, Verdicts, BindingRun, PipelineRun, PassRun, FallbackRun, LostRun,
+    ShaderRun, Verdicts, BindingRun, PipelineRun, PassRun, FallbackRun, LostRun, UploadRun,
 };
 
 comptime uint32 SIDE = 64;
@@ -600,6 +600,7 @@ type resource Check implements App {
     Optional<PassRun> passRun = Optional::None;
     Optional<FallbackRun> fallbackRun = Optional::None;
     Optional<LostRun> lostRun = Optional::None;
+    Optional<UploadRun> uploadRun = Optional::None;
     Instant began = monotonicNow();
     int32 runs = 0;
     int32 failures = 0;
@@ -670,7 +671,8 @@ type resource Check implements App {
         if (this.stage == 8) { this.passStep(); }
         if (this.stage == 9) { this.fallbackStep(); }
         if (this.stage == 10) { this.lostStep(); }
-        if (this.stage == 11) { return this.finish(); }
+        if (this.stage == 11) { this.uploadStep(); }
+        if (this.stage == 12) { return this.finish(); }
         return 1;
     }
 
@@ -794,6 +796,23 @@ type resource Check implements App {
         pending.verdicts().clear();
         this.lostRun = Optional::Some(value: give pending);
         if (done) { this.lostRun = Optional::None; this.stage = 11; }
+    }
+
+    // `queue.writeTexture` (tests/src/uploads.kama, item 14), a step this tick, its verdicts reported here.
+    unsafe fn void uploadStep() {
+        Optional<UploadRun> taken = replace(place: this.uploadRun, with: Optional::None);
+        UploadRun pending = match (give taken) { case Some(value: r): give r; case None: UploadRun.make(adapterOptional: adapterOptional()); };
+        bool done = pending.step();
+        isize i = 0;
+        while (i < pending.verdicts().count()) {
+            string name = pending.verdicts().nameAt(at: i);
+            string why = pending.verdicts().whyAt(at: i);
+            this.verdict(name: name, why: why);
+            i = i + 1;
+        }
+        pending.verdicts().clear();
+        this.uploadRun = Optional::Some(value: give pending);
+        if (done) { this.uploadRun = Optional::None; this.stage = 12; }
     }
 
     unsafe fn void awaitAdapter() {

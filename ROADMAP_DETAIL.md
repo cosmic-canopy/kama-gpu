@@ -30,7 +30,9 @@ whether the safe API offers it, and how, on each leg.
 ## GPU-8: the rest of webgpu.h
 
 COVERAGE.md's remaining rows, once GPU-5 to GPU-7 have taken theirs:
-- uploads and copies: `writeTexture`, and the buffer and texture copies;
+- the copies: buffer to buffer, buffer to texture and texture to texture, each from WebGPU's description, and
+  `copyTextureToBuffer` taking it too in place of its narrow call (`writeTexture` and its two descriptions,
+  AGENTS.gpu.md item 14, came forward from this row);
 - mapped writes and `mappedAtCreation`;
 - labels on every handle, and debug groups and markers;
 - external textures;

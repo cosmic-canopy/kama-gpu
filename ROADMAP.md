@@ -19,8 +19,8 @@ sections in the order `@kama/graphics` pulls them.
 ## NOW: what `@kama/graphics`' first slice pulls
 
 Nothing here is under way. The render pipeline set and the fallback adapter are built ([SPEC.md](SPEC.md); the git log
-has how), and `@kama/graphics`' GFX-1, the lit cube, is next. The first row below that it pulls moves up here when it
-does.
+has how), and `@kama/graphics`' GFX-1, the lit cube, is under way: `writeTexture` came forward from GPU-8 for its first
+texture ([AGENTS.gpu.md](AGENTS.gpu.md) item 14). The next row below that it pulls moves up here when it does.
 
 ## LATER: the rest of webgpu.h before 1.0
 
@@ -29,7 +29,7 @@ does.
 | GPU-5 | **Compute**: compute pipelines and passes, storage buffers and storage textures | [detail](ROADMAP_DETAIL.md#compute) |
 | GPU-6 | **Queries and timestamps**: query sets, occlusion queries, timestamps and their resolve | [detail](ROADMAP_DETAIL.md#queries) |
 | GPU-7 | **Indirect draws and dispatches, and render bundles** | [detail](ROADMAP_DETAIL.md#indirect) |
-| GPU-8 | **The rest of webgpu.h**, from COVERAGE.md's uncalled rows: texture uploads and copies, mapped writes, labels and debug groups, external textures, WGSL language features | [detail](ROADMAP_DETAIL.md#the-rest) |
+| GPU-8 | **The rest of webgpu.h**, from COVERAGE.md's uncalled rows: the buffer and texture copies, mapped writes, labels and debug groups, external textures, WGSL language features | [detail](ROADMAP_DETAIL.md#the-rest) |
 | GPU-9 | **A safe destroy** for buffers, textures, query sets and devices, its form decided when the row comes up | [detail](ROADMAP_DETAIL.md#destroy) |
 | GPU-10 | **wgpu-native's own extensions** (`wgpu.h`), as `@kama/graphics`' design pass decided: native features offered as device features, and ray tracing and mesh shaders through wgpu-native PR #630, pinned until it merges | [detail](ROADMAP_DETAIL.md#extensions) |
 | GPU-11 | **A surface on every platform**: X11, Wayland and Cocoa through `@kama/window`'s native handles, and Android's window | [detail](ROADMAP_DETAIL.md#platforms) |

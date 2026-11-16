@@ -5,6 +5,12 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: `queue.writeTexture(destination:, data:, layout:, size:)`** (2026-11-16, kama 0.9.965; AGENTS.gpu.md item 14),
+  WebGPU's `writeTexture`, brought forward from GPU-8 for `@kama/graphics`' first texture: `TexelCopyTextureInfo` (a
+  texture, its mip level, origin and aspect), `TexelCopyBufferLayout` (an offset, and the strides, each unsaid unless
+  set) and `Extent3D`. Rows need no alignment. What WebGPU refuses is a validation error on both legs; an offset past
+  2^53 - 1 is clamped, where a browser would throw.
+
 - The tests program and both examples state their pace, `run(app:, pace: Pace::EveryRefresh)`, as kama 0.9.958's
   `std::app` asks (KR-281 4g), each ticking as it did; their manifests need kama 0.9.958 or later. Green on kama
   0.9.960 at the same counts (2026-11-15).

@@ -1258,6 +1258,7 @@ _Static_assert(WGPU_LIMIT_U64_UNDEFINED == 0xFFFFFFFFFFFFFFFFull, "gpu.kama's LI
 // A view's "the rest" of the mip levels and of the array layers, #defines likewise unseen.
 _Static_assert(WGPU_MIP_LEVEL_COUNT_UNDEFINED == 0xFFFFFFFFu, "gpu.kama's MIP_LEVEL_COUNT_UNDEFINED");
 _Static_assert(WGPU_ARRAY_LAYER_COUNT_UNDEFINED == 0xFFFFFFFFu, "gpu.kama's ARRAY_LAYER_COUNT_UNDEFINED");
+_Static_assert(WGPU_COPY_STRIDE_UNDEFINED == 0xFFFFFFFFu, "gpu.kama's COPY_STRIDE_UNDEFINED");
 
 // ---- a surface -------------------------------------------------------------------------------------------------------
 

@@ -38,7 +38,7 @@ import {
     gpu::native::adapterAddRef, gpu::native::adapterRelease, gpu::native::adapterGetLimits,
     gpu::native::deviceAddRef, gpu::native::deviceRelease, gpu::native::deviceGetQueue, gpu::native::deviceGetLimits,
     gpu::native::deviceCreateBuffer, gpu::native::deviceCreateTexture, gpu::native::deviceCreateCommandEncoder,
-    gpu::native::queueAddRef, gpu::native::queueRelease, gpu::native::queueWriteBuffer,
+    gpu::native::queueAddRef, gpu::native::queueRelease, gpu::native::queueWriteBuffer, gpu::native::queueWriteTexture,
     gpu::native::bufferAddRef, gpu::native::bufferRelease, gpu::native::bufferGetSize,
     gpu::native::textureAddRef, gpu::native::textureRelease, gpu::native::textureCreateView,
     gpu::native::textureGetWidth, gpu::native::textureGetHeight, gpu::native::textureGetDepthOrArrayLayers,
@@ -54,7 +54,7 @@ import {
     gpu::native::commandBufferAddRef, gpu::native::commandBufferRelease,
     gpu::native::WGPUBufferDescriptor, gpu::native::WGPUTextureDescriptor, gpu::native::WGPURenderPassDescriptor,
     gpu::native::WGPURenderPassColorAttachment, gpu::native::WGPURenderPassDepthStencilAttachment, gpu::native::WGPUTexelCopyTextureInfo,
-    gpu::native::WGPUTexelCopyBufferInfo, gpu::native::WGPUExtent3D, gpu::native::WGPUTextureViewDescriptor, gpu::native::WGPUStringView,
+    gpu::native::WGPUTexelCopyBufferInfo, gpu::native::WGPUTexelCopyBufferLayout, gpu::native::WGPUExtent3D, gpu::native::WGPUTextureViewDescriptor, gpu::native::WGPUStringView,
     gpu::native::WGPUBufferUsage, gpu::native::WGPUTextureUsage, gpu::native::WGPUShaderStage, gpu::native::WGPUMapMode,
     gpu::native::WGPUTextureDimension, gpu::native::WGPULoadOp,
     gpu::native::WGPUStoreOp, gpu::native::WGPUTextureAspect, gpu::native::WGPUPowerPreference,
@@ -122,6 +122,7 @@ export {
     Device, Queue, DeviceRequest, DeviceStatus, GpuError, PowerPreference,
     Buffer, BufferDescriptor, BufferUsage, BufferRead, ReadStatus,
     Texture, TextureDescriptor, TextureDimension, TextureUsage, TextureView, TextureViewDescriptor, TextureAspect, ShaderStage,
+    TexelCopyTextureInfo, TexelCopyBufferLayout, Extent3D,
     CommandEncoder, RenderPass, CommandBuffer, Color, RenderPassDescriptor, ColorAttachment, LoadOp, StoreOp,
     DepthStencilAttachment, DepthLoad, DepthAccess, StencilLoad, StencilAccess,
     Surface, SurfaceTexture, SurfaceError, SurfaceCapabilities, SurfaceConfig, PresentMode, AlphaMode, ConfigureError,
@@ -158,6 +159,8 @@ fn uint64 inRange(uint64 v) { return v > SIZE_LIMIT ? SIZE_LIMIT : v; }
 // webgpu.h's WGPU_MIP_LEVEL_COUNT_UNDEFINED and WGPU_ARRAY_LAYER_COUNT_UNDEFINED: a view's "the rest". Asserted likewise.
 comptime uint32 MIP_LEVEL_COUNT_UNDEFINED = 0xFFFFFFFF;
 comptime uint32 ARRAY_LAYER_COUNT_UNDEFINED = 0xFFFFFFFF;
+// webgpu.h's WGPU_COPY_STRIDE_UNDEFINED: a copy's `bytesPerRow` or `rowsPerImage` left unsaid. Asserted likewise.
+comptime uint32 COPY_STRIDE_UNDEFINED = 0xFFFFFFFF;
 // A count handed to webgpu.h, where 2^32 - 1 means "the rest": a program's 2^32 - 1 is clamped to 2^32 - 2, which no
 // texture has, so WebGPU refuses it as it refuses any count past the texture (decision 9).
 fn uint32 countOf(uint32 n) { return n == 0xFFFFFFFF ? 0xFFFFFFFE : n; }
@@ -1506,6 +1509,32 @@ type resource Queue implements Copyable<This>(bare: give) {
                          data: cast<UnsafePtr>(data.dataPtr()), size: cast<usize>(n));
     }
 
+    // `data` written into a texture (WebGPU's `writeTexture`; AGENTS.gpu.md item 14): the texels of a region `size`
+    // texels wide, from `destination`, laid out in `data` as `layout` says, before any later submit's work. Unlike a
+    // buffer's copy into a texture, the rows need no alignment. What WebGPU refuses is a validation error on both legs;
+    // an offset past 2^53 - 1 is clamped, where a browser would throw (decision 9).
+    public unsafe fn void writeTexture(const ref TexelCopyTextureInfo destination, ConstView<uint8> data,
+                                       const ref TexelCopyBufferLayout layout, Extent3D size) {
+        WGPUTexelCopyTextureInfo dst = WGPUTexelCopyTextureInfo.zero();
+        dst.texture = destination.target.raw();
+        dst.mipLevel = destination.level;
+        dst.origin.x = destination.atX;
+        dst.origin.y = destination.atY;
+        dst.origin.z = destination.atZ;
+        dst.aspect = aspectValue(a: destination.part);
+        WGPUTexelCopyBufferLayout lay = WGPUTexelCopyBufferLayout.zero();
+        lay.offset = inRange(v: layout.start);
+        lay.bytesPerRow = layout.stride;
+        lay.rowsPerImage = layout.rows;
+        WGPUExtent3D ext = WGPUExtent3D.zero();
+        ext.width = size.width;
+        ext.height = size.height;
+        ext.depthOrArrayLayers = size.depthOrArrayLayers;
+        queueWriteTexture(queue: this.handle, destination: cast<UnsafePtr>(addr(of: dst)), data: cast<UnsafePtr>(data.dataPtr()),
+                          dataSize: cast<usize>(data.length()), dataLayout: cast<UnsafePtr>(addr(of: lay)),
+                          writeSize: cast<UnsafePtr>(addr(of: ext)));
+    }
+
     // Natively a command buffer reaches wgpu-native only when its finish reported nothing and its device can still take
     // work, since a submit of either ends the process there; a browser drops both (item 2's decision 3, item 13).
     public unsafe fn void submit(CommandBuffer commands) {
@@ -1517,6 +1546,56 @@ type resource Queue implements Copyable<This>(bare: give) {
         if (this.handle != null) { queueRelease(queue: this.handle); }
         if (this.device != null) { deviceRelease(device: this.device); }
     }
+}
+
+// WebGPU's `GPUTexelCopyTextureInfo` (AGENTS.gpu.md item 14): where in a texture a copy lands, its first mip level
+// from its first texel, every aspect, unless its parts say otherwise.
+type resource TexelCopyTextureInfo {
+    Texture target;
+    uint32 level = 0;
+    uint32 atX = 0;
+    uint32 atY = 0;
+    uint32 atZ = 0;
+    TextureAspect part = TextureAspect::All;
+
+    friend Queue::writeTexture[target, level, atX, atY, atZ, part];
+
+    public ctor make(Texture texture) { this.target = give texture; }
+    public fn void mipLevel(uint32 level) { this.level = level; }
+    // The texel the region starts at; `z` is a 3D texture's depth, or an array layer.
+    public fn void origin(uint32 x, uint32 y, uint32 z) {
+        this.atX = x;
+        this.atY = y;
+        this.atZ = z;
+    }
+    // The aspect a depth-stencil texture's copy reaches: its stencil, say.
+    public fn void aspect(TextureAspect kind) { this.part = kind; }
+}
+
+// WebGPU's `GPUTexelCopyBufferLayout` (item 14): where a copy's texels lie in linear data, from `offset` bytes in, each
+// row of texel blocks `bytesPerRow` bytes after the last, and each image `rowsPerImage` rows after the last. Each stride
+// is left unsaid unless set: WebGPU needs `bytesPerRow` only for more than one row, and `rowsPerImage` for more than
+// one image. A stride of 2^32 - 1 is taken as 2^32 - 2, since webgpu.h reads 2^32 - 1 as unsaid.
+type resource TexelCopyBufferLayout {
+    uint64 start = 0;
+    uint32 stride = COPY_STRIDE_UNDEFINED;
+    uint32 rows = COPY_STRIDE_UNDEFINED;
+
+    friend Queue::writeTexture[start, stride, rows];
+
+    public ctor make() { }
+    public fn void offset(uint64 bytes) { this.start = bytes; }
+    public fn void bytesPerRow(uint32 bytes) { this.stride = countOf(n: bytes); }
+    public fn void rowsPerImage(uint32 count) { this.rows = countOf(n: count); }
+}
+
+// WebGPU's `GPUExtent3D`, a region's size in texels, made memberwise: its depth is a 3D texture's, or a count of array
+// layers. `Extent3D.of(width: 16, height: 16, depthOrArrayLayers: 1)`.
+@generate(of)
+type value Extent3D {
+    public uint32 width;
+    public uint32 height;
+    public uint32 depthOrArrayLayers;
 }
 
 // ---- buffers ---------------------------------------------------------------------------------------------------------

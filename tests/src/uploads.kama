@@ -1,0 +1,536 @@
+// `queue.writeTexture` (AGENTS.gpu.md item 14), brought forward from GPU-8 for @kama/graphics' first texture, a step a
+// tick on every leg: writes WebGPU takes read back as written, through `copyTextureToBuffer`, wherever they land (rows
+// not a multiple of 256 bytes apart, an offset into the data, an origin, a mip level, an array layer, the stencil
+// aspect); and each write WebGPU refuses is one validation error, never the end of the program (decision 9), the
+// write at an offset of 2^60 among them, which a browser would throw on.
+//
+// A texture starts zeroed (WebGPU's own rule), so a write that lands elsewhere is seen as a texel left zero, or a
+// zero texel written.
+
+import {
+    core::println,
+    std::collections::DynamicArray,
+    gpu::Instance, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::PowerPreference,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::DeviceErrors,
+    gpu::CommandEncoder, gpu::CommandBuffer, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage, gpu::BufferRead,
+    gpu::ReadStatus, gpu::Texture, gpu::TextureDescriptor, gpu::TextureFormat, gpu::TextureUsage, gpu::TextureAspect,
+    gpu::TexelCopyTextureInfo, gpu::TexelCopyBufferLayout, gpu::Extent3D,
+    Verdicts, readOptions, destroyDevice,
+};
+export { UploadRun };
+
+comptime int32 SETTLE = 60;   // the most ticks a case waits for an error the browser owes, or a map
+comptime int32 QUIET = 10;    // the ticks a case waits to see that no error comes
+
+// The bytes of `n` RG16Float texels, each half float finite (its high byte below 0x3C, so never an infinity or a NaN,
+// which a backend might canonicalise): the table @kama/graphics writes is such.
+fn DynamicArray<uint8> halves(isize n) {
+    DynamicArray<uint8> list = DynamicArray.empty();
+    for (isize i = 0; i < n * 2; i = i + 1) {
+        list.add(item: truncate<uint8>(i * 7 + 3));
+        list.add(item: truncate<uint8>((i * 5) % 60));
+    }
+    return list;
+}
+
+// `n` bytes counting up from `first`, wrapping.
+fn DynamicArray<uint8> counting(isize n, isize first) {
+    DynamicArray<uint8> list = DynamicArray.empty();
+    for (isize i = 0; i < n; i = i + 1) { list.add(item: truncate<uint8>(first + i)); }
+    return list;
+}
+
+fn DynamicArray<uint8> zeros(isize n) {
+    DynamicArray<uint8> list = DynamicArray.empty();
+    for (isize i = 0; i < n; i = i + 1) { list.add(item: 0); }
+    return list;
+}
+
+// The region case's texture as it should read: 8x8 RGBA8Unorm, zero but for the 3x2 texels at (5, 6), each row of the
+// region from `data`, 100 bytes in and 12 bytes apart.
+fn DynamicArray<uint8> regionWant(const ref DynamicArray<uint8> data) {
+    DynamicArray<uint8> want = zeros(n: 8 * 8 * 4);
+    for (isize row = 0; row < 2; row = row + 1) {
+        for (isize b = 0; b < 12; b = b + 1) { want[(6 + row) * 32 + 5 * 4 + b] = data[100 + row * 12 + b]; }
+    }
+    return want;
+}
+
+// "" when `got`, rows `stride` bytes apart, holds `want`'s rows of `row` bytes.
+fn string sameRows(const ref DynamicArray<uint8> got, isize stride, const ref DynamicArray<uint8> want, isize row) {
+    isize rows = want.length() / row;
+    if (got.length() < (rows - 1) * stride + row) {
+        isize g = got.length();
+        return "the read holds ${g} bytes";
+    }
+    for (isize r = 0; r < rows; r = r + 1) {
+        for (isize b = 0; b < row; b = b + 1) {
+            if (got[r * stride + b] != want[r * row + b]) {
+                uint8 a = got[r * stride + b];
+                uint8 w = want[r * row + b];
+                return "row ${r}, byte ${b}: ${a}, not ${w}";
+            }
+        }
+    }
+    return "";
+}
+
+// The channel's reports, for a failure's words.
+fn string reportsSaid(const ref DeviceErrors errs) {
+    isize n = errs.reports().length();
+    if (n == 0) { return "nothing"; }
+    string first = errs.reports()[0].message();
+    return "${n} report(s), the first: ${first}";
+}
+
+// "" when `errs` holds one validation error.
+fn string oneValidation(const ref DeviceErrors errs) {
+    if (errs.reports().length() != 1) { return "want one error; " + reportsSaid(errs: errs); }
+    bool validation = match (errs.reports()[0].kind()) { case Validation: true; case _: false; };
+    string words = errs.reports()[0].message();
+    if (!validation) { return "not a validation error: ${words}"; }
+    return "";
+}
+
+type resource UploadRun {
+    int32 stage = 0;
+    int32 waited = 0;
+    bool optional;   // `--adapter-optional`: no adapter here is a skip
+    Verdicts found;
+    Optional<Instance> instance = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+    Optional<Texture> held = Optional::None;      // the texture a case wrote, kept for the case after it
+    Optional<Buffer> readBuffer = Optional::None;
+    Optional<BufferRead> reading = Optional::None;
+    DynamicArray<uint8> wanted;                   // what the read should hold, row after row
+    isize wantedRow = 0;                          // the bytes of one of its rows
+
+    public ctor make(bool adapterOptional) {
+        this.optional = adapterOptional;
+        this.found = Verdicts.make();
+        this.wanted = DynamicArray.empty();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // One tick's step: true once every case has run.
+    public unsafe fn bool step() {
+        this.waited = this.waited + 1;
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.awaitAdapter(); }
+        else if (this.stage == 2) { this.awaitDevice(); }
+        else if (this.stage == 10) { this.table(); }
+        else if (this.stage == 11) { this.awaitRead(name: "a 16x16 RG16Float texture written with its rows 64 bytes apart reads back as written", next: 12); }
+        else if (this.stage == 12) { this.awaitNone(name: "and the write is taken with no error", next: 20); }
+        else if (this.stage == 20) { this.region(); }
+        else if (this.stage == 21) { this.awaitRead(name: "a 3x2 region written at (5, 6) of an 8x8 texture, from 100 bytes into its data with rows 12 bytes apart, lands there and nowhere else", next: 22); }
+        else if (this.stage == 22) { this.awaitNone(name: "and the region's write is taken with no error", next: 30); }
+        else if (this.stage == 30) { this.levelOne(width: 4, next: 31); }
+        else if (this.stage == 31) { this.awaitNone(name: "a 4x4 write into the second mip level of an 8x8 texture is taken with no error", next: 32); }
+        else if (this.stage == 32) { this.readHeld(width: 8, height: 8, want: zeros(n: 8 * 8 * 4), next: 33); }
+        else if (this.stage == 33) { this.awaitRead(name: "and it lands in that level: the first level reads zero", next: 34); }
+        else if (this.stage == 34) { this.levelOne(width: 8, next: 35); }
+        else if (this.stage == 35) { this.awaitOne(name: "an 8x8 write into the second mip level of an 8x8 texture, past that level's 4x4, is a validation error", next: 40); }
+        else if (this.stage == 40) { this.layerOne(); }
+        else if (this.stage == 41) { this.awaitNone(name: "a 4x4 write into the second array layer of a 4x4 texture of two is taken with no error", next: 42); }
+        else if (this.stage == 42) { this.readHeld(width: 4, height: 4, want: zeros(n: 4 * 4 * 4), next: 43); }
+        else if (this.stage == 43) { this.awaitRead(name: "and it lands in that layer: the first layer reads zero", next: 44); }
+        else if (this.stage == 44) { this.bothLayers(rowsPerImage: 4, layers: 2, next: 45); }
+        else if (this.stage == 45) { this.awaitNone(name: "a write of both array layers, its images 4 rows apart, is taken with no error", next: 46); }
+        else if (this.stage == 46) { this.bothLayers(rowsPerImage: 2, layers: 2, next: 47); }
+        else if (this.stage == 47) { this.awaitOne(name: "a write of both array layers whose images are 2 rows apart, fewer than their 4, is a validation error", next: 48); }
+        else if (this.stage == 48) { this.bothLayers(rowsPerImage: 4, layers: 3, next: 49); }
+        else if (this.stage == 49) { this.awaitOne(name: "a write of three array layers into a texture of two is a validation error", next: 50); }
+        else if (this.stage == 50) { this.stencil(); }
+        else if (this.stage == 51) { this.awaitNone(name: "a write of a Stencil8 texture's stencil aspect is taken with no error", next: 52); }
+        else if (this.stage == 52) { this.misuse(kind: 1, next: 53); }
+        else if (this.stage == 53) { this.awaitOne(name: "a write of a colour texture's depth aspect is a validation error", next: 60); }
+        else if (this.stage == 60) { this.misuse(kind: 2, next: 61); }
+        else if (this.stage == 61) { this.awaitOne(name: "a write whose rows are 32 bytes apart, less than a row's 64, is a validation error", next: 62); }
+        else if (this.stage == 62) { this.misuse(kind: 3, next: 63); }
+        else if (this.stage == 63) { this.awaitOne(name: "a write of 1024 bytes of texels from 512 bytes of data is a validation error", next: 64); }
+        else if (this.stage == 64) { this.misuse(kind: 4, next: 65); }
+        else if (this.stage == 65) { this.awaitOne(name: "a write past the texture's edge is a validation error", next: 66); }
+        else if (this.stage == 66) { this.misuse(kind: 5, next: 67); }
+        else if (this.stage == 67) { this.awaitOne(name: "a write into a texture without CopyDst is a validation error", next: 68); }
+        else if (this.stage == 68) { this.misuse(kind: 6, next: 69); }
+        else if (this.stage == 69) { this.awaitOne(name: "a write into a mip level the texture lacks is a validation error", next: 70); }
+        else if (this.stage == 70) { this.misuse(kind: 7, next: 71); }
+        else if (this.stage == 71) { this.awaitOne(name: "a write from the end of its data, with no texel left in it, is a validation error", next: 72); }
+        else if (this.stage == 72) { this.misuse(kind: 8, next: 73); }
+        else if (this.stage == 73) { this.awaitOne(name: "a write into a multisampled texture is a validation error", next: 74); }
+        else if (this.stage == 74) { this.misuse(kind: 9, next: 75); }
+        else if (this.stage == 75) { this.awaitOne(name: "a write into a Depth32Float texture is a validation error", next: 76); }
+        else if (this.stage == 76) { this.misuse(kind: 10, next: 77); }
+        else if (this.stage == 77) { this.awaitOne(name: "a write of 16 rows with no bytesPerRow is a validation error", next: 78); }
+        else if (this.stage == 78) { this.misuse(kind: 11, next: 79); }
+        else if (this.stage == 79) { this.awaitOne(name: "a write from an offset of 2^60, past the end of its data, is a validation error, not the end of the program", next: 80); }
+        else if (this.stage == 80) { this.misuse(kind: 12, next: 81); }
+        else if (this.stage == 81) { this.awaitOne(name: "a write of 16x16 texels from no data at all is a validation error, not the end of the program", next: 82); }
+        else if (this.stage == 82) { this.misuse(kind: 13, next: 83); }
+        else if (this.stage == 83) { this.awaitOne(name: "a texture 0 wide is a validation error", next: 84); }
+        else if (this.stage == 84) { this.writeHeld(next: 85); }
+        else if (this.stage == 85) { this.awaitOne(name: "and a write into that invalid texture is a validation error of its own", next: 90); }
+        else if (this.stage == 90) { this.misuse(kind: 14, next: 91); }
+        else if (this.stage == 91) { this.awaitNone(name: "a write of one row with no bytesPerRow is taken with no error, as WebGPU allows", next: 92); }
+        else if (this.stage == 92) { this.misuse(kind: 15, next: 93); }
+        else if (this.stage == 93) { this.awaitNone(name: "a write of an empty region, 0 by 0, from no data is taken with no error", next: 100); }
+        else if (this.stage == 100) { this.afterDestroy(); }
+        else if (this.stage == 101) { this.afterDestroyFlushed(); }
+        return this.stage >= 999;
+    }
+
+    unsafe fn void next(int32 to) { this.stage = to; this.waited = 0; }
+
+    unsafe fn void open() {
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.make(power: PowerPreference::Default)));
+                this.instance = Optional::Some(value: give inst);
+                this.next(to: 1);
+            }
+            case Err(error: e): { string why = e.message(); this.found.add(name: "an instance for the upload cases", why: give why); this.next(to: 999); }
+        };
+    }
+
+    unsafe fn void awaitAdapter() {
+        if (this.adapterRequest.isNone()) { this.next(to: 999); return; }
+        AdapterStatus s = match (this.adapterRequest) {
+            case Some(value: r): r.poll();
+            case None: AdapterStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.adapterRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(adapter: a): {
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: readOptions()));
+                this.next(to: 2);
+            }
+            case Failed(error: e): {
+                bool none = match (e) { case NoAdapter(words: w): true; case _: false; };
+                if (none && this.optional) {
+                    println(s: "skip the upload cases: there is no WebGPU adapter here (--adapter-optional)");
+                } else {
+                    string why = e.message();
+                    this.found.add(name: "an adapter for the upload cases", why: give why);
+                }
+                this.next(to: 999);
+            }
+        };
+    }
+
+    unsafe fn void awaitDevice() {
+        if (this.deviceRequest.isNone()) { this.next(to: 999); return; }
+        DeviceStatus s = match (this.deviceRequest) {
+            case Some(value: r): r.poll();
+            case None: DeviceStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.deviceRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(device: d, queue: q): {
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+                this.next(to: 10);
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a device for the upload cases", why: give why); this.next(to: 999); }
+        };
+    }
+
+    // An empty command buffer submitted: on the web, what lets a pending error through to the channel.
+    unsafe fn void flush() {
+        match (this.device) {
+            case Some(value: d): {
+                match (this.queue) {
+                    case Some(value: q): { CommandEncoder enc = d.createCommandEncoder(); CommandBuffer cb = give enc.finish(); q.submit(commands: give cb); }
+                    case None: { }
+                };
+            }
+            case None: { }
+        };
+    }
+
+    unsafe fn Optional<DeviceErrors> drain() {
+        match (this.device) {
+            case Some(value: d): { return Optional::Some(value: d.takeErrors()); }
+            case None: { return Optional::None; }
+        };
+    }
+
+    // Once QUIET ticks have passed, the channel holds nothing.
+    unsafe fn void awaitNone(const ref string name, int32 next) {
+        if (this.waited < QUIET) { return; }
+        Optional<DeviceErrors> got = this.drain();
+        string why = match (got) {
+            case Some(value: errs): errs.isEmpty() ? "" : "the channel holds " + reportsSaid(errs: errs);
+            case None: "no device";
+        };
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // Once an error arrives, or SETTLE ticks pass: one validation error.
+    unsafe fn void awaitOne(const ref string name, int32 next) {
+        Optional<DeviceErrors> got = this.drain();
+        bool none = match (got) { case Some(value: errs): errs.isEmpty(); case None: true; };
+        if (none && this.waited < SETTLE) { return; }
+        string why = match (got) {
+            case Some(value: errs): oneValidation(errs: errs);
+            case None: "no device";
+        };
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // A texture on the run's device, labelled.
+    unsafe fn Texture made(uint32 width, uint32 height, TextureFormat format, TextureUsage usage, uint32 layers, uint32 mips,
+                           uint32 samples, string label) {
+        TextureDescriptor t = TextureDescriptor.make(width: width, height: height, format: format, usage: usage);
+        t.depthOrArrayLayers(count: layers);
+        t.mipLevelCount(count: mips);
+        t.sampleCount(count: samples);
+        t.label(text: give label);
+        return match (this.device) {
+            case Some(value: d): d.createTexture(descriptor: give t);
+            case None: { panic(msg: "the upload cases make textures only once the device is there"); }
+        };
+    }
+
+    // `data` written into `texture` through the run's queue: `width` x `height` x `depth` texels from `destination`'s
+    // level, origin and aspect, laid out as `layout` says.
+    unsafe fn void put(const ref TexelCopyTextureInfo destination, const ref DynamicArray<uint8> data,
+                       const ref TexelCopyBufferLayout layout, uint32 width, uint32 height, uint32 depth) {
+        match (this.queue) {
+            case Some(value: q): {
+                q.writeTexture(destination: destination, data: data.view(), layout: layout,
+                               size: Extent3D.of(width: width, height: height, depthOrArrayLayers: depth));
+            }
+            case None: { }
+        };
+    }
+
+    // The held texture's first level and layer, `width` x `height` RGBA8 or RG16 texels (4 bytes each), copied out and
+    // mapped; `want` is what it should hold, row after row.
+    unsafe fn void readHeld(uint32 width, uint32 height, DynamicArray<uint8> want, int32 next) {
+        uint64 size = 256 * cast<uint64>(height);
+        match (this.device) {
+            case Some(value: d): {
+                BufferDescriptor bd = BufferDescriptor.make(size: size, usage: BufferUsage::MapRead | BufferUsage::CopyDst);
+                bd.label(text: "upload read back");
+                Buffer b = d.createBuffer(descriptor: give bd);
+                CommandEncoder enc = d.createCommandEncoder();
+                match (this.held) {
+                    case Some(value: t): { enc.copyTextureToBuffer(texture: t, buffer: b, width: width, height: height, bytesPerRow: 256); }
+                    case None: { }
+                };
+                CommandBuffer cb = give enc.finish();
+                match (this.queue) { case Some(value: q): { q.submit(commands: give cb); } case None: { CommandBuffer unsent = give cb; } };
+                this.reading = Optional::Some(value: b.mapRead(offset: 0, size: size));
+                this.readBuffer = Optional::Some(value: give b);
+            }
+            case None: { }
+        };
+        this.wantedRow = cast<isize>(width) * 4;
+        this.wanted = give want;
+        this.next(to: next);
+    }
+
+    // The read mapped, its rows held to what was wanted.
+    unsafe fn void awaitRead(const ref string name, int32 next) {
+        match (this.device) { case Some(value: d): { d.poll(wait: true); } case None: { } };
+        ReadStatus s = match (this.reading) {
+            case Some(value: r): r.poll();
+            case None: ReadStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (pending && this.waited < SETTLE) { return; }
+        string why = match (s) {
+            case Pending: "the map did not finish";
+            case Failed(error: e): e.message();
+            case Ready: "";
+        };
+        if (why.isEmpty()) {
+            DynamicArray<uint8> got = match (this.reading) { case Some(value: r): r.bytes(); case None: DynamicArray.empty(); };
+            why = sameRows(got: got, stride: 256, want: this.wanted, row: this.wantedRow);
+        }
+        this.reading = Optional::None;
+        this.readBuffer = Optional::None;
+        this.found.add(name: copy name, why: give why);
+        this.next(to: next);
+    }
+
+    // The DFG table's shape: 16x16 RG16Float, its rows 64 bytes apart in the data, and read back.
+    unsafe fn void table() {
+        Texture t = this.made(width: 16, height: 16, format: TextureFormat::RG16Float,
+                              usage: TextureUsage::TextureBinding | TextureUsage::CopyDst | TextureUsage::CopySrc,
+                              layers: 1, mips: 1, samples: 1, label: "table");
+        DynamicArray<uint8> data = halves(n: 16 * 16);
+        TexelCopyBufferLayout layout = TexelCopyBufferLayout.make();
+        layout.bytesPerRow(bytes: 64);
+        this.put(destination: TexelCopyTextureInfo.make(texture: copy t), data: data, layout: layout, width: 16, height: 16, depth: 1);
+        this.held = Optional::Some(value: give t);
+        this.readHeld(width: 16, height: 16, want: give data, next: 11);
+    }
+
+    // A 3x2 region at (5, 6) of an 8x8 RGBA8Unorm texture, from 100 bytes into the data, its rows 12 bytes apart.
+    unsafe fn void region() {
+        Texture t = this.made(width: 8, height: 8, format: TextureFormat::RGBA8Unorm,
+                              usage: TextureUsage::CopyDst | TextureUsage::CopySrc, layers: 1, mips: 1, samples: 1, label: "region");
+        DynamicArray<uint8> data = counting(n: 200, first: 1);
+        TexelCopyTextureInfo at = TexelCopyTextureInfo.make(texture: copy t);
+        at.origin(x: 5, y: 6, z: 0);
+        TexelCopyBufferLayout layout = TexelCopyBufferLayout.make();
+        layout.offset(bytes: 100);
+        layout.bytesPerRow(bytes: 12);
+        this.put(destination: at, data: data, layout: layout, width: 3, height: 2, depth: 1);
+        this.held = Optional::Some(value: give t);
+        this.readHeld(width: 8, height: 8, want: regionWant(data: data), next: 21);
+    }
+
+    // A `width` x `width` write into the second mip level of an 8x8 texture with two.
+    unsafe fn void levelOne(uint32 width, int32 next) {
+        Texture t = this.made(width: 8, height: 8, format: TextureFormat::RGBA8Unorm,
+                              usage: TextureUsage::CopyDst | TextureUsage::CopySrc, layers: 1, mips: 2, samples: 1, label: "levels");
+        DynamicArray<uint8> data = counting(n: 8 * 8 * 4, first: 9);
+        TexelCopyTextureInfo at = TexelCopyTextureInfo.make(texture: copy t);
+        at.mipLevel(level: 1);
+        TexelCopyBufferLayout layout = TexelCopyBufferLayout.make();
+        layout.bytesPerRow(bytes: width * 4);
+        this.put(destination: at, data: data, layout: layout, width: width, height: width, depth: 1);
+        this.held = Optional::Some(value: give t);
+        this.flush();
+        this.next(to: next);
+    }
+
+    // A 4x4 write into the second layer of a 4x4 texture of two.
+    unsafe fn void layerOne() {
+        Texture t = this.made(width: 4, height: 4, format: TextureFormat::RGBA8Unorm,
+                              usage: TextureUsage::CopyDst | TextureUsage::CopySrc, layers: 2, mips: 1, samples: 1, label: "layers");
+        DynamicArray<uint8> data = counting(n: 4 * 4 * 4, first: 17);
+        TexelCopyTextureInfo at = TexelCopyTextureInfo.make(texture: copy t);
+        at.origin(x: 0, y: 0, z: 1);
+        TexelCopyBufferLayout layout = TexelCopyBufferLayout.make();
+        layout.bytesPerRow(bytes: 16);
+        this.put(destination: at, data: data, layout: layout, width: 4, height: 4, depth: 1);
+        this.held = Optional::Some(value: give t);
+        this.flush();
+        this.next(to: 41);
+    }
+
+    // `layers` layers of a 4x4 texture of two in one write, its images `rowsPerImage` rows apart in the data.
+    unsafe fn void bothLayers(uint32 rowsPerImage, uint32 layers, int32 next) {
+        Texture t = this.made(width: 4, height: 4, format: TextureFormat::RGBA8Unorm,
+                              usage: TextureUsage::CopyDst, layers: 2, mips: 1, samples: 1, label: "both layers");
+        DynamicArray<uint8> data = counting(n: 3 * 4 * 4 * 4, first: 3);
+        TexelCopyBufferLayout layout = TexelCopyBufferLayout.make();
+        layout.bytesPerRow(bytes: 16);
+        layout.rowsPerImage(count: rowsPerImage);
+        this.put(destination: TexelCopyTextureInfo.make(texture: copy t), data: data, layout: layout, width: 4, height: 4, depth: layers);
+        this.flush();
+        this.next(to: next);
+    }
+
+    // A Stencil8 texture's stencil aspect, a byte a texel.
+    unsafe fn void stencil() {
+        Texture t = this.made(width: 4, height: 4, format: TextureFormat::Stencil8,
+                              usage: TextureUsage::RenderAttachment | TextureUsage::CopyDst, layers: 1, mips: 1, samples: 1,
+                              label: "stencil");
+        DynamicArray<uint8> data = counting(n: 16, first: 1);
+        TexelCopyTextureInfo at = TexelCopyTextureInfo.make(texture: copy t);
+        at.aspect(kind: TextureAspect::StencilOnly);
+        TexelCopyBufferLayout layout = TexelCopyBufferLayout.make();
+        layout.bytesPerRow(bytes: 4);
+        this.put(destination: at, data: data, layout: layout, width: 4, height: 4, depth: 1);
+        this.flush();
+        this.next(to: 51);
+    }
+
+    // A write WebGPU refuses, or, from 14, one it takes at an edge of what it allows: a 16x16 RG16Float texture's.
+    unsafe fn void misuse(int32 kind, int32 next) {
+        TextureFormat format = TextureFormat::RG16Float;
+        TextureUsage usage = TextureUsage::TextureBinding | TextureUsage::CopyDst;
+        uint32 samples = 1;
+        uint32 side = 16;
+        if (kind == 5) { usage = TextureUsage::TextureBinding; }
+        if (kind == 8) { format = TextureFormat::RGBA8Unorm; usage = TextureUsage::RenderAttachment | TextureUsage::CopyDst; samples = 4; }
+        if (kind == 9) { format = TextureFormat::Depth32Float; usage = TextureUsage::RenderAttachment | TextureUsage::CopyDst; }
+        if (kind == 13) { side = 0; }
+        Texture t = this.made(width: side, height: 16, format: format, usage: usage, layers: 1, mips: 1, samples: samples,
+                              label: "misused ${kind}");
+        if (kind == 13) {
+            // the texture alone: its own error first, then a write into it (writeHeld)
+            this.held = Optional::Some(value: give t);
+            this.flush();
+            this.next(to: next);
+            return;
+        }
+        DynamicArray<uint8> data = halves(n: 16 * 16);
+        if (kind == 3) { data = halves(n: 16 * 8); }
+        if (kind == 12 || kind == 15) { data = DynamicArray.empty(); }
+        TexelCopyTextureInfo at = TexelCopyTextureInfo.make(texture: copy t);
+        if (kind == 1) { at.aspect(kind: TextureAspect::DepthOnly); }
+        if (kind == 4) { at.origin(x: 8, y: 0, z: 0); }
+        if (kind == 6) { at.mipLevel(level: 3); }
+        TexelCopyBufferLayout layout = TexelCopyBufferLayout.make();
+        if (kind != 10 && kind != 14) { layout.bytesPerRow(bytes: 64); }
+        if (kind == 2) { layout.bytesPerRow(bytes: 32); }
+        // From the end of the data, not past it: Firefox 160 words every write from past the end alike ("Copy at offset 1
+        // bytes…"), and drops an error whose words repeat an earlier one's (SPEC § A device's errors), so 11's alone is
+        if (kind == 7) { layout.offset(bytes: 1024); }
+        if (kind == 11) { layout.offset(bytes: 1152921504606846976); }
+        uint32 width = 16;
+        uint32 height = 16;
+        if (kind == 14) { height = 1; }
+        if (kind == 15) { width = 0; height = 0; }
+        if (kind == 7) { height = 8; }
+        this.put(destination: at, data: data, layout: layout, width: width, height: height, depth: 1);
+        this.flush();
+        this.next(to: next);
+    }
+
+    // A 16x16 write into the held texture.
+    unsafe fn void writeHeld(int32 next) {
+        DynamicArray<uint8> data = halves(n: 16 * 16);
+        TexelCopyBufferLayout layout = TexelCopyBufferLayout.make();
+        layout.bytesPerRow(bytes: 64);
+        Optional<TexelCopyTextureInfo> at = match (this.held) {
+            case Some(value: t): Optional::Some(value: TexelCopyTextureInfo.make(texture: copy t));
+            case None: Optional::None;
+        };
+        match (at) {
+            case Some(value: a): { this.put(destination: a, data: data, layout: layout, width: 16, height: 16, depth: 1); }
+            case None: { }
+        };
+        this.flush();
+        this.next(to: next);
+    }
+
+    // The device destroyed through its raw handle, as a loss would leave it, then a write: the program goes on.
+    unsafe fn void afterDestroy() {
+        Texture t = this.made(width: 16, height: 16, format: TextureFormat::RG16Float,
+                              usage: TextureUsage::TextureBinding | TextureUsage::CopyDst, layers: 1, mips: 1, samples: 1,
+                              label: "after destroy");
+        match (this.device) { case Some(value: d): { destroyDevice(device: d.raw()); } case None: { } };
+        DynamicArray<uint8> data = halves(n: 16 * 16);
+        TexelCopyBufferLayout layout = TexelCopyBufferLayout.make();
+        layout.bytesPerRow(bytes: 64);
+        this.put(destination: TexelCopyTextureInfo.make(texture: copy t), data: data, layout: layout, width: 16, height: 16, depth: 1);
+        this.next(to: 101);
+    }
+
+    unsafe fn void afterDestroyFlushed() {
+        this.flush();
+        this.found.add(name: "a write into a texture of a destroyed device, and the submit after it, never end the program", why: "");
+        this.held = Optional::None;
+        this.queue = Optional::None;
+        this.device = Optional::None;
+        this.instance = Optional::None;
+        this.next(to: 999);
+    }
+}
