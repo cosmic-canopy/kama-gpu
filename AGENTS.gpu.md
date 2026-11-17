@@ -1603,6 +1603,47 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       stride of 2^32 - 1 passed on unclamped, is equivalent: webgpu.h then reads it as unsaid, and a write of more than
       one row is refused either way, only in other words, while one row is taken either way.
 
+15. **Built on 2026-11-17: the page half under Closure, and every web leg in a release build too** (kama 0.9.966,
+    kyoten's thirty-second session). kama 0.9.966 (KR-289) runs Closure over a wasm release, and Closure renames every
+    property name it cannot prove the browser's. No leg had built a wasm release, so nothing here had met Closure.
+    **Decided by the owner the same day** (kyoten's rendering.md § Decided, "(A) Debug + release"): every wasm leg runs
+    debug and release, as the native legs do.
+    - **Found by the release leg, red first on 0.9.966:** every release web build of a program using this package
+      failed to link.
+      - `js/gpuseam.js` named `GPUTextureUsage.RENDER_ATTACHMENT`, and Closure has no declaration of the
+        `GPUTextureUsage` namespace. emscripten 6.0.13 drops emdawnwebgpu's `webgpu-externs.js`, since Closure carries
+        WebGPU externs of its own (emscripten's `tools/building.py`, `filter_closure_args`), and those declare WebGPU's
+        methods and dictionaries but not that namespace.
+      - The usage is now its value, 0x10, as emdawnwebgpu passes usages, and the canvas configuration's keys are quoted,
+        as emdawnwebgpu's dictionaries are.
+      - Nothing broke on 0.9.965, which never ran Closure.
+    - **The legs** (`tools/test.sh`): the tests and both examples are built for the web, debug and release, and each
+      runs under `kama run` in Edge, Firefox and Chrome for Testing in both builds.
+      - Each program says its build first (`build: debug` or `build: release`, from a `@compileFor` pair; the examples
+        print it too), and the gate fails a run whose program says another.
+      - A release build's JS that still names emscripten's `UTF8ToString` was not run through Closure, and fails.
+      - **Found on the way:** the gate made neither `tests/out/` nor the root's and the examples' dependencies. A
+        long-lived checkout had them, and a fresh clone has not; the gate now makes both.
+    - **`tools/closure-names.mjs`** (the same tool as `@kama/window`'s) checks the tests' release build. Every name
+      `js/gpuseam.js` writes or reads, and every quoted one, must be in it, except the file's own, listed on its
+      `// closure-own:` line: emdawnwebgpu's `getJsObject` and `TextureFormat`, which are inside the program.
+    - **The counts, on 0.9.966:**
+      - natively, 339, debug and release;
+      - in Edge, 313, debug and release;
+      - in Firefox and Chrome for Testing, 316, debug and release;
+      - both examples on every leg in both builds, the triangle read back as drawn.
+    - **Mutations: 9 of 10 caught,** each a whole gate on kama 0.9.966 in Edge, since what they hold is the gate's wiring
+      and one build's JS (kyoten's `.scratch/s32/gpu/mutations/`):
+      - the usage named by its namespace again, which no release web build of the tests or either example survives;
+      - the `closure-own` list missing a name;
+      - the web's release builds made in debug, each `kama run` of the tests and both examples run in debug, and
+        Closure turned off in the tests' manifest;
+      - the tests and the triangle each saying `debug` in a release build.
+
+      **The tenth, the configuration's keys unquoted, is equivalent:** Closure's own WebGPU declarations keep a
+      dictionary's keys, so the release build held all 18 names and every case passed. They stay quoted, as
+      emdawnwebgpu's are, so they do not depend on those declarations.
+
 ## Where the truth is
 
 - **This package's own documents,** above: the SPEC, the ROADMAP and its detail, COVERAGE.md, and the CHANGELOG.

@@ -2950,7 +2950,17 @@ fn void endOnTheWeb(bool failed) { if (failed) { quit(code: 1); } else { quit(co
 @compileFor(!ARCH_WASM32)
 fn void endOnTheWeb(bool failed) { }
 
+// What this program was built as, which its run prints first, so the gate holds each leg to the build it names: a release
+// leg that lost its `--release` says `debug`, and fails, rather than passing as a release leg that tested no release build
+// (a wasm release runs Closure over the page's JS since kama 0.9.966, KR-289).
+@compileFor(RELEASE)
+fn string buildKind() { return "release"; }
+@compileFor(DEBUG)
+fn string buildKind() { return "debug"; }
+
 unsafe fn void runChecks() {
+    string built = buildKind();
+    println(s: "build: ${built}");
     Owned<App> app = new Check.make();
     run(app: give app, pace: Pace::EveryRefresh);
 }

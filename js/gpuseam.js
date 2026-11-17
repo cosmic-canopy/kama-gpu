@@ -1,5 +1,11 @@
 // js/gpuseam.js: @kama/gpu's page half, linked into a program built for the web (`jsLibraries`): what the seam asks the
 // page that webgpu.h cannot (AGENTS.gpu.md item 11).
+//
+// A release build runs Closure over this file (kama 0.9.966, KR-289), which renames every name it cannot prove the
+// browser's. A name the browser reads keeps its own: WebGPU's methods are in Closure's declarations, and a dictionary's
+// keys are quoted. These are emdawnwebgpu's, inside the program, which Closure renames alike everywhere, and the gate
+// (tools/closure-names.mjs) holds every other name to its release build:
+// closure-own: getJsObject TextureFormat
 
 mergeInto(LibraryManager.library, {
   // 1 when the canvas `selector` names gives a WebGPU context, else 0. emdawnwebgpu's `wgpuInstanceCreateSurface`
@@ -42,7 +48,10 @@ mergeInto(LibraryManager.library, {
       device.pushErrorScope('validation');
       var threw = false;
       try {
-        context.configure({ device: device, format: format, usage: GPUTextureUsage.RENDER_ATTACHMENT, alphaMode: 'opaque' });
+        // The dictionary's keys are quoted, as emdawnwebgpu's are, and the usage is GPUTextureUsage.RENDER_ATTACHMENT's
+        // value: a release build's Closure has no declaration of the `GPUTextureUsage` namespace, so naming it fails the
+        // build.
+        context.configure({ 'device': device, 'format': format, 'usage': 0x10, 'alphaMode': 'opaque' });
       } catch (err) { threw = true; }
       device.popErrorScope().then(function (error) {
         if (error && refused.indexOf(format) < 0) refused.push(format);

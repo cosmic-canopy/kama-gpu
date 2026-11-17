@@ -5,6 +5,11 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Fixed: a release build for the web failed to link under Closure** (2026-11-17, kama 0.9.966; AGENTS.gpu.md item
+  15). kama 0.9.966 runs Closure over a wasm release (KR-289), and the page half named `GPUTextureUsage`, which Closure
+  has no declaration of. It passes the usage's value instead, and quotes the canvas configuration's keys. A program
+  needs no change. The gate now runs every web leg in a release build too, and `tools/closure-names.mjs` holds the page
+  half's names to it.
 - **New: `queue.writeTexture(destination:, data:, layout:, size:)`** (2026-11-16, kama 0.9.965; AGENTS.gpu.md item 14),
   WebGPU's `writeTexture`, brought forward from GPU-8 for `@kama/graphics`' first texture: `TexelCopyTextureInfo` (a
   texture, its mip level, origin and aspect), `TexelCopyBufferLayout` (an offset, and the strides, each unsaid unless

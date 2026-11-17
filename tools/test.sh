@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # tools/test.sh — @kama/gpu's gate: the tests program built debug and release and run natively, a window cleared for
 # 60 frames and a triangle drawn for 60 and read back from its window (both skipped when KAMA_WINDOW_NO_DISPLAY is set),
-# the xfails refused, the tests and both examples built for the web and run in every
-# headless browser present, the bindings checked against the headers, and what wgpu-native does that the seam is built
-# on (tools/check-facts.sh).
+# the xfails refused, the tests and both examples built for the web, debug and release, and run in every headless browser
+# present, a release build's JS held to Closure's renaming (tools/closure-names.mjs), the bindings checked against the
+# headers, and what wgpu-native does that the seam is built on (tools/check-facts.sh).
 #
 #   tools/test.sh
 #
@@ -68,6 +68,33 @@ readBack() {
 # waits for ever (kyoten's KY-53).
 bounded() { if command -v timeout >/dev/null 2>&1; then timeout 300 "$@"; else "$@"; fi; }
 
+# Every leg runs a debug build and a release build, natively and on the web (kyoten's rendering.md § Decided,
+# 2026-11-17): a wasm release runs Closure over the page's JS since kama 0.9.966 (KR-289), which renames every name it
+# cannot prove the browser's, and a game ships that build.
+#
+# A tests run's first line is what its program was built as (`build: debug` or `build: release`), so a leg that lost its
+# `--release` fails here rather than passing as the leg it names.
+builtAs() {
+    local log="$1" mode="$2" leg="$3"
+    if tr -d '\r' < "$log" | grep -qx "build: $mode"; then
+        echo "ok   $leg ran a $mode build"
+    else
+        echo "FAIL $leg: its program never said \"build: $mode\", so the leg ran another build"
+        failed=1
+    fi
+}
+# A release build's JS that still names emscripten's `UTF8ToString` was never run through Closure: a root manifest's
+# `"release": { "closure": false }` would do that, and the leg would test nothing of what a game ships.
+closured() {
+    local js="$1" leg="$2"
+    if grep -q 'UTF8ToString' "$js"; then
+        echo "FAIL $leg: $js still names UTF8ToString, so Closure never ran over it"
+        failed=1
+    else
+        echo "ok   $leg: Closure ran over $js"
+    fi
+}
+
 step "the roadmap"
 tools/check-roadmap.sh || failed=1
 
@@ -78,6 +105,11 @@ step "wgpu-native's facts (tests/facts)"
 tools/check-facts.sh || failed=1
 
 step "kama check"
+# A fresh clone has neither its output folder nor any manifest's dependencies installed.
+mkdir -p tests/out
+for manifest in kama.json examples/clear/kama.json examples/triangle/kama.json; do
+    "$KAMA" pkg install "$manifest" > /dev/null || failed=1
+done
 "$KAMA" check kama.json || failed=1
 "$KAMA" pkg install tests/kama.json > /dev/null
 "$KAMA" check tests/kama.json || failed=1
@@ -94,6 +126,7 @@ for mode in debug release; do
     if "$KAMA" build tests/kama.json $flag -o "$out" > "tests/out/build-$mode.log" 2>&1; then
         "$out" "${nativeFlags[@]}" 2>&1 | tee "tests/out/run-$mode.log" || failed=1
         printed "tests/out/run-$mode.log" "native, $mode"
+        builtAs "tests/out/run-$mode.log" "$mode" "native, $mode"
     else
         tail -20 "tests/out/build-$mode.log"
         failed=1
@@ -157,56 +190,82 @@ else
     cat tests/out/xfail-usage.log; echo "FAIL refused, but not as 3 unrelated-type mixes and a private fromBits"; failed=1
 fi
 
-step "the web leg: built, and run in every headless browser present"
+step "the web leg: built debug and release, and run in every headless browser present"
+# Each program built for the web in both builds, so a build that fails, as a release build Closure refuses does, fails the
+# gate even with no browser to run it in.
+webBuild() {
+    local manifest="$1" out="$2" mode="$3" flag=""
+    [ "$mode" = release ] && flag="--release"
+    mkdir -p "$(dirname "$out")"
+    if ! "$KAMA" build "$manifest" $flag --target WASM -o "$out" > "${out%.html}-build.log" 2>&1; then
+        tail -20 "${out%.html}-build.log"
+        echo "FAIL $manifest did not build for the web, $mode"
+        failed=1
+        return 1
+    fi
+}
 if ! command -v emcc >/dev/null 2>&1; then
     echo "skip no emcc on PATH (run from an interactive UCRT64 shell, bash -lic)"
-elif ! "$KAMA" build tests/kama.json --target WASM -o tests/out/web/gputests.html > tests/out/build-web.log 2>&1; then
-    tail -20 tests/out/build-web.log
-    failed=1
-elif ! "$KAMA" build examples/clear/kama.json --target WASM -o tests/out/clear-web/clear.html > tests/out/build-clear-web.log 2>&1; then
-    tail -20 tests/out/build-clear-web.log
-    failed=1
-elif ! "$KAMA" build examples/triangle/kama.json --target WASM -o tests/out/triangle-web/triangle.html > tests/out/build-triangle-web.log 2>&1; then
-    tail -20 tests/out/build-triangle-web.log
-    failed=1
-elif ! command -v node >/dev/null 2>&1; then
-    echo "ok   built tests/out/web/gputests.html, tests/out/clear-web/clear.html and tests/out/triangle-web/triangle.html"
-    echo "skip no node on PATH, so no browser run"
 else
-    # Under `kama run` (AGENTS.gpu.md item 11), bounded since it has no time limit of its own: Edge and Chrome as
-    # installed, and the pinned Firefox, whose headless page has WebGPU since kama 0.9.940 sets its pref (kyoten's
-    # KY-54, fixed), so every leg runs every case, the printErrors check and the clear. Firefox differs from Dawn in
-    # five ways its run passes: it has no immediates, so maxImmediateSize is held to 0 (--no-immediates); its WGSL
-    # compiler is naga, which gives no warnings (--no-shader-warnings); a buffer of 2^53 - 256 bytes is an OutOfMemory
-    # error there (--huge-buffer-out-of-memory); its render pass errors never name the pass (--unnamed-pass-errors); and
-    # it takes a depth slice of 2^32 - 2 on a 2D view (--unchecked-depth-slice).
-    #
-    # Chromium offers WebGPU its fallback adapter (GPU-15) only when its command line asks: Edge with
-    # --enable-unsafe-webgpu, Chrome with that and --enable-unsafe-swiftshader. The pinned Chrome for Testing is started
-    # with both (tools/browsers.mjs flags, decided with the owner on 2026-11-14), so it runs the fallback cases; Edge and
-    # an installed Chrome run as a player's do, on their real GPU, and offer none (--no-fallback-adapter).
-    if browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
+    for mode in debug release; do
+        webBuild tests/kama.json "tests/out/web-$mode/gputests.html" "$mode" || true
+        webBuild examples/clear/kama.json "tests/out/clear-web-$mode/clear.html" "$mode" || true
+        webBuild examples/triangle/kama.json "tests/out/triangle-web-$mode/triangle.html" "$mode" || true
+    done
+    # The release builds' JS: each run through Closure, and every name js/gpuseam.js hands the browser kept in the tests'.
+    for js in tests/out/web-release/gputests.js tests/out/clear-web-release/clear.js tests/out/triangle-web-release/triangle.js; do
+        [ -f "$js" ] && closured "$js" "the release build"
+    done
+    if [ -f tests/out/web-release/gputests.js ] && command -v node >/dev/null 2>&1; then
+        node tools/closure-names.mjs js/gpuseam.js tests/out/web-release/gputests.js || failed=1
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        echo "skip no node on PATH, so no browser run"
+    elif browsers="$(node tools/browsers.mjs run 2>/dev/null)"; then
+        # Under `kama run` (AGENTS.gpu.md item 11), bounded since it has no time limit of its own: Edge and Chrome as
+        # installed, and the pinned Firefox, whose headless page has WebGPU since kama 0.9.940 sets its pref (kyoten's
+        # KY-54, fixed), so every leg runs every case, the printErrors check and the clear. Firefox differs from Dawn in
+        # five ways its run passes: it has no immediates, so maxImmediateSize is held to 0 (--no-immediates); its WGSL
+        # compiler is naga, which gives no warnings (--no-shader-warnings); a buffer of 2^53 - 256 bytes is an OutOfMemory
+        # error there (--huge-buffer-out-of-memory); its render pass errors never name the pass (--unnamed-pass-errors);
+        # and it takes a depth slice of 2^32 - 2 on a 2D view (--unchecked-depth-slice).
+        #
+        # Chromium offers WebGPU its fallback adapter (GPU-15) only when its command line asks: Edge with
+        # --enable-unsafe-webgpu, Chrome with that and --enable-unsafe-swiftshader. The pinned Chrome for Testing is
+        # started with both (tools/browsers.mjs flags, decided with the owner on 2026-11-14), so it runs the fallback
+        # cases; Edge and an installed Chrome run as a player's do, on their real GPU, and offer none
+        # (--no-fallback-adapter).
+        #
+        # Each browser runs the tests and both examples in a debug build, then in a release build, each run held to the
+        # build its program says it is.
         cft=0
         while IFS= read -r browser; do
             name="${browser##*[/\\]}"
             flags=()
             while IFS= read -r f; do [ -n "$f" ] && flags+=("$f"); done < <(node tools/browsers.mjs flags "$browser" | tr -d '\r')
-            # A leg's differences follow the browser, never its flags: a Chrome for Testing started without the flags that
-            # offer the fallback adapter fails its fallback cases rather than skipping them.
+            # A leg's differences follow the browser, never its flags: a Chrome for Testing started without the flags
+            # that offer the fallback adapter fails its fallback cases rather than skipping them.
             case "$(node tools/browsers.mjs kind "$browser" | tr -d '\r')" in
             firefox)
                 differences=(--no-immediates --no-shader-warnings --huge-buffer-out-of-memory --unnamed-pass-errors --unchecked-depth-slice) ;;
             chrome-for-testing) differences=(); cft=1 ;;
             *) differences=(--no-fallback-adapter) ;;
             esac
-            echo "-- kama run, $browser${flags[*]:+ ${flags[*]}}${differences[*]:+ -- ${differences[*]}}"
-            KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json --target WASM --headless ${flags[@]+"${flags[@]}"} -- ${differences[@]+"${differences[@]}"} 2>&1 | tee tests/out/run-web.log || failed=1
-            printed tests/out/run-web.log "$name"
-            echo "-- kama run, $browser: examples/clear on #canvas for 60 frames"
-            KAMA_BROWSER="$browser" bounded "$KAMA" run examples/clear/kama.json --target WASM --headless ${flags[@]+"${flags[@]}"} -- --frames 60 || failed=1
-            echo "-- kama run, $browser: examples/triangle on #canvas for 60 frames, read back"
-            KAMA_BROWSER="$browser" bounded "$KAMA" run examples/triangle/kama.json --target WASM --headless ${flags[@]+"${flags[@]}"} -- --frames 60 2>&1 | tee tests/out/run-triangle-web.log || failed=1
-            readBack tests/out/run-triangle-web.log "$name"
+            for mode in debug release; do
+                flag=""
+                [ "$mode" = release ] && flag="--release"
+                echo "-- kama run, $browser, $mode${flags[*]:+ ${flags[*]}}${differences[*]:+ -- ${differences[*]}}"
+                KAMA_BROWSER="$browser" bounded "$KAMA" run tests/kama.json $flag --target WASM --headless ${flags[@]+"${flags[@]}"} -- ${differences[@]+"${differences[@]}"} 2>&1 | tee "tests/out/run-web-$mode.log" || failed=1
+                printed "tests/out/run-web-$mode.log" "$name, $mode"
+                builtAs "tests/out/run-web-$mode.log" "$mode" "kama run, $name, $mode"
+                echo "-- kama run, $browser, $mode: examples/clear on #canvas for 60 frames"
+                KAMA_BROWSER="$browser" bounded "$KAMA" run examples/clear/kama.json $flag --target WASM --headless ${flags[@]+"${flags[@]}"} -- --frames 60 2>&1 | tee "tests/out/run-clear-web-$mode.log" || failed=1
+                builtAs "tests/out/run-clear-web-$mode.log" "$mode" "examples/clear, $name, $mode"
+                echo "-- kama run, $browser, $mode: examples/triangle on #canvas for 60 frames, read back"
+                KAMA_BROWSER="$browser" bounded "$KAMA" run examples/triangle/kama.json $flag --target WASM --headless ${flags[@]+"${flags[@]}"} -- --frames 60 2>&1 | tee "tests/out/run-triangle-web-$mode.log" || failed=1
+                readBack "tests/out/run-triangle-web-$mode.log" "$name, $mode"
+                builtAs "tests/out/run-triangle-web-$mode.log" "$mode" "examples/triangle, $name, $mode"
+            done
         done <<< "$browsers"
         [ "$cft" = 1 ] || echo "skip no Chrome for Testing pinned under ~/browsers, so no Chromium leg ran the fallback cases"
     else

@@ -288,7 +288,16 @@ type resource Clear implements App {
     }
 }
 
+// What this program was built as, its first line: @kama/gpu's gate runs it in a debug and a release build, and holds
+// each run to the build it names.
+@compileFor(RELEASE)
+fn string buildKind() { return "release"; }
+@compileFor(DEBUG)
+fn string buildKind() { return "debug"; }
+
 unsafe fn void runClear() {
+    string built = buildKind();
+    println(s: "build: ${built}");
     Owned<App> app = new Clear.make();
     run(app: give app, pace: Pace::EveryRefresh);
 }
