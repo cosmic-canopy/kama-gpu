@@ -98,6 +98,14 @@ closured() {
 step "the roadmap"
 tools/check-roadmap.sh || failed=1
 
+step "the dependencies"
+# A fresh clone has neither its output folder nor any manifest's dependencies installed, and the bindings check asks
+# kama where the package's functions are called, which needs the package's own.
+mkdir -p tests/out
+for manifest in kama.json examples/clear/kama.json examples/triangle/kama.json tests/kama.json; do
+    "$KAMA" pkg install "$manifest" > /dev/null || failed=1
+done
+
 step "the bindings"
 tools/check-bindings.sh || failed=1
 
@@ -105,13 +113,7 @@ step "wgpu-native's facts (tests/facts)"
 tools/check-facts.sh || failed=1
 
 step "kama check"
-# A fresh clone has neither its output folder nor any manifest's dependencies installed.
-mkdir -p tests/out
-for manifest in kama.json examples/clear/kama.json examples/triangle/kama.json; do
-    "$KAMA" pkg install "$manifest" > /dev/null || failed=1
-done
 "$KAMA" check kama.json || failed=1
-"$KAMA" pkg install tests/kama.json > /dev/null
 "$KAMA" check tests/kama.json || failed=1
 
 # A native leg with no fallback adapter (GPU-15): Metal has none, so on macOS the tests hold the request to NoAdapter.
