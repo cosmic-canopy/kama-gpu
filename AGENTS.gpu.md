@@ -48,7 +48,8 @@ in five parts: shader modules; layouts, bind groups, samplers and `writeBuffer`;
 whose last frame is read back from its window on every leg. **GPU-15, the fallback adapter, is built** (item 13), for
 `@kama/graphics`' byte-for-byte software goldens (decided 2026-11-14), and its GFX-1, the lit cube, is under way.
 **`queue.writeTexture` is built** (item 14, 2026-11-16), brought forward from GPU-8 for GFX-1's first texture, so the
-safe API calls 96 of webgpu.h's 206 functions.
+safe API calls 96 of webgpu.h's 206 functions. **GPU-16, DXC natively on Windows, is built** (item 16, 2026-11-18):
+Microsoft's `dxcompiler.dll`, fetched by `tools/fetch-dxc.sh`, and one line printed when Direct3D 12 falls to FXC.
 `tools/test.sh` passes before every commit.
 
 ## Where this departs from kama's design (s8-gpu-wrapper)
@@ -1643,6 +1644,51 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       **The tenth, the configuration's keys unquoted, is equivalent:** Closure's own WebGPU declarations keep a
       dictionary's keys, so the release build held all 18 names and every case passed. They stay quoted, as
       emdawnwebgpu's are, so they do not depend on those declarations.
+
+16. **Built on 2026-11-18: DXC natively on Windows (GPU-16)** (kama 0.9.978), filed and built for `@kama/graphics`'
+    tone-mapping goldens. kyoten's `docs/design/rendering.md` § Decided holds the decisions, each the owner's:
+    - **2026-11-17: natively on Windows, wgpu-native compiles with DXC.** WARP natively, under FXC, and WARP in Firefox,
+      under its DXC, drew r187's AgX ramp with 2 of its 2,048 texels a step apart, so `@kama/graphics`' one golden per
+      software GPU could not be written. FXC is wgpu-native's "old, slow, and unmaintained" compiler and stops at Shader
+      Model 5.1, where `ShaderF16`, 64-bit integers, wave operations, mesh shaders and ray tracing (GPU-10) need 6.
+    - **2026-11-18: Microsoft's own release, fetched** ("ya it sounds like we fetch it", after "How do others do this?
+      Direct X is meant to be used... why are we trying to work around things?"). wgpu's and Bevy's documentation have a
+      game ship `dxcompiler.dll` from Microsoft's DXC releases. Built from source instead, DXC needs either Visual
+      Studio's toolchain and with it Microsoft's runtime (Firefox's build imports `MSVCP140.dll` and `VCRUNTIME140.dll`)
+      or patches to build under mingw-w64 (its Windows path is MSVC's and ATL's alone; kyoten's
+      `.scratch/s35/dxc/FINDINGS.md`). Microsoft's `dxcompiler.dll` links its runtime statically and imports only
+      Windows' DLLs.
+    - **Measured first** (kyoten's `.scratch/s35/dxc/probe2/`, a C probe on wgpu-native v29.0.1.1, and
+      `.scratch/s34/dxc/probe/`): with webgpu.h's `dx12ShaderCompiler` left undefined, as this package leaves it,
+      wgpu-native loads `dxcompiler.dll` as the instance is made when Windows' loader finds it, and then Direct3D 12
+      offers 44 features, `ShaderF16` among them, on the Radeon 880M and on WARP; without it, 33 and no `ShaderF16`, and
+      nothing is logged, even at the warning level. `dxil.dll` is not needed: `dxcompiler.dll` alone gives 44. Asking for
+      DXC outright (`WGPUDx12Compiler_Dxc`) gave no adapter at all, with the DLL or without, so the package does not.
+    - **What the package does:** nothing changes what wgpu-native does. The seam's adapter callback asks, natively on
+      Windows, whether `dxcompiler.dll` is loaded once an adapter on Direct3D 12 answers (`GetModuleHandleW`, which is
+      what wgpu-native did, not a guess at the loader's search), and if it is not, prints one line to stderr, once a
+      process, naming the fix: FXC is the next method down and never stops a program. An adopted adapter is not asked.
+    - **`tools/fetch-dxc.sh`** fetches v1.9.2609's release (`dxc_2026_09_29.zip`, pinned by SHA-256) into
+      `third_party/dxc/<platform>/`, git-ignored, as wgpu-native's SDK is: `dxcompiler.dll` for the host's architecture
+      and the release's `LICENSE-MS.txt`, `LICENSE-LLVM.txt` and `LICENCE-MIT.txt`. Nothing of Microsoft's is committed.
+      Whoever ships a program takes Microsoft's terms for distributable code with it: an application adding significant
+      primary functionality, its distributors and end users agreeing to terms that protect it and Microsoft at least as
+      much (a game's EULA), and an indemnity except for claims based solely on the unmodified code. Steam's common
+      redistributables do not include DXC, so it ships in a game's own depot, beside the program, once kama copies it
+      there (KR-350, as for `wgpu_native.dll`).
+    - **The cases:** natively on Direct3D 12 the fallback adapter offers `ShaderF16` (`tests/src/fallback.kama`); a
+      backend that is not Direct3D 12 is a named skip. The gate puts the DLL on the native legs' PATH, needs it on
+      Windows, and runs the debug build once more without it under `--no-dxc`, held to no `ShaderF16`, so the flag never
+      hides DXC; the legs with DXC are held to never printing the FXC line, and that leg to printing it once. **Red
+      first:** without the DLL, the case failed natively ("ShaderF16 is not offered, so wgpu-native compiles with FXC"),
+      and the gate's line check found no line. Every other case passed under DXC as under FXC: 340 natively, debug,
+      release and without DXC, 313 in Edge, 316 in Firefox and Chrome for Testing, each debug and release.
+    - **Mutations: 7 of 8 caught,** each by its own FAIL lines in a native run of the gate (kyoten's
+      `.scratch/s35/gpu/list1.py`): the seam never reporting, reporting with DXC loaded, asking for another DLL, or
+      reporting at every adapter; and the gate leaving DXC off the PATH, running the leg without DXC with it on the
+      PATH, or without `--no-dxc`. **The eighth, the report on every backend, is not caught here:** every native adapter
+      on this machine answers on Direct3D 12, and the package's API cannot ask for another backend. It stays in the
+      seam, since a Vulkan adapter answering on Windows needs no DXC.
 
 ## Where the truth is
 

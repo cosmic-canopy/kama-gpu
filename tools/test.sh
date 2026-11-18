@@ -31,16 +31,41 @@ export KAMA_WGPU_DIR="${KAMA_WGPU_DIR:-$ROOT/third_party/wgpu/$PLAT}"
 [ -d "$KAMA_WGPU_DIR/lib" ] || { echo "test: no wgpu-native SDK at $KAMA_WGPU_DIR (see tools/check-bindings.sh)" >&2; exit 1; }
 # the native leg links wgpu_native dynamically: the loader finds it on PATH (Windows) or the rpath kama sets
 export PATH="$KAMA_WGPU_DIR/lib:$PATH"
+# DXC natively on Windows (AGENTS.gpu.md item 16): wgpu-native compiles Direct3D 12's shaders with it when Windows' loader
+# finds dxcompiler.dll, and with FXC otherwise. So the native legs put Microsoft's release, fetched by tools/fetch-dxc.sh,
+# on the PATH, and one more leg runs the debug build without it (`--no-dxc`).
+DXC_DIR=""
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        DXC_DIR="${KAMA_DXC_DIR:-$ROOT/third_party/dxc/$PLAT}"
+        [ -f "$DXC_DIR/dxcompiler.dll" ] || { echo "test: no dxcompiler.dll at $DXC_DIR (run tools/fetch-dxc.sh)" >&2; exit 1; }
+        NO_DXC_PATH="$PATH"
+        export PATH="$DXC_DIR:$PATH"
+        ;;
+esac
 
 failed=0
 step() { echo; echo "== $*"; }
+# The line a native Windows program prints once when Direct3D 12 compiles its shaders with FXC (AGENTS.gpu.md item 16):
+# never on a leg with DXC, and once on the leg without it.
+FXC_LINE='^@kama/gpu: Direct3D 12 compiles this program.s shaders with FXC'
+fxcLine() {
+    local log="$1" leg="$2" want="$3" got
+    got="$(grep -c "$FXC_LINE" "$log" || true)"
+    if [ "$got" = "$want" ]; then
+        echo "ok   the FXC line printed $want time(s) ($leg)"
+    else
+        echo "FAIL the FXC line ($leg): printed $got time(s), where $want"
+        failed=1
+    fi
+}
 # printErrors (AGENTS.gpu.md item 12, decision 3, item 2): a tests run's output holds the two validation errors the
 # printing device's channel takes, each printed once under its own header (Dawn's words name a label twice): one left to
 # the channel, and one caught by a scope dropped without its pop. The error a popped scope caught is never printed. Every
 # other device the tests open reads its own channel and prints nothing, so the run prints exactly these two.
 printed() {
     local log="$1" leg="$2" headers validation left orphaned scoped
-    headers="$(grep -c '^@kama/gpu: ' "$log" || true)"
+    headers="$(grep '^@kama/gpu: ' "$log" | grep -vc "$FXC_LINE" || true)"
     validation="$(grep -c '^@kama/gpu: a validation error: ' "$log" || true)"
     left="$(grep -c 'printed by default' "$log" || true)"
     orphaned="$(grep -c 'printed from an abandoned scope' "$log" || true)"
@@ -129,11 +154,26 @@ for mode in debug release; do
         "$out" "${nativeFlags[@]}" 2>&1 | tee "tests/out/run-$mode.log" || failed=1
         printed "tests/out/run-$mode.log" "native, $mode"
         builtAs "tests/out/run-$mode.log" "$mode" "native, $mode"
+        if [ -n "$DXC_DIR" ]; then fxcLine "tests/out/run-$mode.log" "native, $mode" 0; fi
     else
         tail -20 "tests/out/build-$mode.log"
         failed=1
     fi
 done
+
+if [ -n "$DXC_DIR" ]; then
+    step "native, debug, without DXC (--no-dxc)"
+    out="tests/out/native-debug/gputests$EXE"
+    if [ -x "$out" ]; then
+        PATH="$NO_DXC_PATH" "$out" --no-dxc "${nativeFlags[@]}" 2>&1 | tee tests/out/run-fxc.log || failed=1
+        printed tests/out/run-fxc.log "native, without DXC"
+        builtAs tests/out/run-fxc.log debug "native, without DXC"
+        fxcLine tests/out/run-fxc.log "native, without DXC" 1
+    else
+        echo "FAIL native, without DXC: the debug build is missing"
+        failed=1
+    fi
+fi
 
 step "a window cleared for 60 frames (examples/clear)"
 if [ -n "${KAMA_WINDOW_NO_DISPLAY:-}" ]; then

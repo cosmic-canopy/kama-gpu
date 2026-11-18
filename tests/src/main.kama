@@ -566,6 +566,11 @@ unsafe fn bool uncheckedDepthSlice() { return hasFlag(flag: "--unchecked-depth-s
 // offered under the flag fails the run, so it never hides one.
 unsafe fn bool noFallbackAdapter() { return hasFlag(flag: "--no-fallback-adapter"); }
 
+// `--no-dxc`: a native leg on Windows run with no dxcompiler.dll beside it or on its PATH is held to Direct3D 12
+// compiling with FXC, where every other native Windows leg is held to DXC (AGENTS.gpu.md item 16). DXC found under the
+// flag fails the run, so it never hides DXC.
+unsafe fn bool noDxc() { return hasFlag(flag: "--no-dxc"); }
+
 type resource Check implements App {
     Optional<Instance> instance = Optional::None;
     Optional<AdapterPool> pool = Optional::None;      // the adapters, one for each device below
@@ -767,7 +772,7 @@ type resource Check implements App {
     // GPU-15's cases, the fallback adapter (tests/src/fallback.kama), a step this tick, their verdicts reported here.
     unsafe fn void fallbackStep() {
         Optional<FallbackRun> taken = replace(place: this.fallbackRun, with: Optional::None);
-        FallbackRun pending = match (give taken) { case Some(value: r): give r; case None: FallbackRun.make(adapterOptional: adapterOptional(), noFallbackAdapter: noFallbackAdapter()); };
+        FallbackRun pending = match (give taken) { case Some(value: r): give r; case None: FallbackRun.make(adapterOptional: adapterOptional(), noFallbackAdapter: noFallbackAdapter(), noDxc: noDxc()); };
         bool done = pending.step();
         isize i = 0;
         while (i < pending.verdicts().count()) {

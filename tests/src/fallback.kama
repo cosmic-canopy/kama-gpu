@@ -9,13 +9,18 @@
 // request must fail as any other does, NoAdapter in WebGPU's words, and a fallback adapter offered fails the run, so the
 // flag never hides one.
 //
+// On Direct3D 12 the fallback adapter also says which compiler wgpu-native compiles shaders with (AGENTS.gpu.md item 16):
+// it offers ShaderF16 only under DXC, so natively on Windows it must, with dxcompiler.dll on the PATH as the gate puts
+// it. The gate's leg without the DLL passes `--no-dxc` and holds the opposite, FXC, and ShaderF16 offered under the flag
+// fails the run, so the flag never hides DXC.
+//
 // They report through `Verdicts`, which the check reads each tick, as the pass cases do.
 
 import {
     core::println,
     std::collections::DynamicArray,
     gpu::Instance, gpu::Adapter, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::AdapterInfo,
-    gpu::AdapterKind, gpu::PowerPreference,
+    gpu::AdapterKind, gpu::PowerPreference, gpu::Backend, gpu::Feature,
     gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError, gpu::DeviceErrors,
     gpu::CommandEncoder, gpu::CommandBuffer, gpu::RenderPass, gpu::Color,
     gpu::RenderPassDescriptor, gpu::ColorAttachment, gpu::LoadOp, gpu::StoreOp, gpu::DepthStencilAttachment,
@@ -74,6 +79,7 @@ type resource FallbackRun {
     int32 waited = 0;
     bool optional;     // `--adapter-optional`: no adapter here at all is a skip
     bool none;         // `--no-fallback-adapter`: this leg offers no fallback adapter
+    bool fxc;          // `--no-dxc`: no dxcompiler.dll is found here, so Direct3D 12 compiles with FXC
     Verdicts found;
     Optional<Instance> instance = Optional::None;
     Optional<AdapterRequest> fallbackRequest = Optional::None;
@@ -86,9 +92,10 @@ type resource FallbackRun {
     Optional<BufferRead> reading = Optional::None;
     DynamicArray<uint8> firstBytes = DynamicArray.empty();
 
-    public ctor make(bool adapterOptional, bool noFallbackAdapter) {
+    public ctor make(bool adapterOptional, bool noFallbackAdapter, bool noDxc) {
         this.optional = adapterOptional;
         this.none = noFallbackAdapter;
+        this.fxc = noDxc;
         this.found = Verdicts.make();
     }
 
@@ -179,6 +186,30 @@ type resource FallbackRun {
         };
     }
 
+    // Which compiler Direct3D 12 compiles shaders with here (AGENTS.gpu.md item 16): it offers ShaderF16 only under DXC.
+    // Every other backend (a browser's, Metal, Vulkan) compiles shaders its own way and is not asked.
+    unsafe fn void compilerCase(const ref Adapter a) {
+        AdapterInfo info = a.info();
+        bool d3d12 = match (info.backend()) { case D3D12: true; case _: false; };
+        if (!d3d12) {
+            if (this.fxc) {
+                this.found.add(name: "--no-dxc: this leg compiles on Direct3D 12",
+                               why: "the fallback adapter is not on Direct3D 12, so the flag holds nothing");
+            } else {
+                println(s: "skip the shader compiler's case: the fallback adapter is not on Direct3D 12");
+            }
+            return;
+        }
+        bool f16 = a.features().has(feature: Feature::ShaderF16);
+        if (this.fxc) {
+            this.found.add(name: "--no-dxc: with no dxcompiler.dll found, Direct3D 12 compiles with FXC, so the fallback adapter offers no ShaderF16",
+                           why: f16 ? "ShaderF16 is offered, so DXC was found and the flag would hide it" : "");
+        } else {
+            this.found.add(name: "natively on Direct3D 12, shaders compile with DXC: the fallback adapter offers ShaderF16, which D3D12 offers only under DXC",
+                           why: f16 ? "" : "ShaderF16 is not offered, so wgpu-native compiles with FXC: no dxcompiler.dll beside the program or on the PATH (tools/fetch-dxc.sh)");
+        }
+    }
+
     // The adapter asked for with forceFallbackAdapter is the fallback one, or, on a leg with none (`--no-fallback-adapter`),
     // the request fails as NoAdapter.
     unsafe fn void awaitFallback() {
@@ -204,6 +235,7 @@ type resource FallbackRun {
                 println(s: "info the fallback adapter: " + said);
                 this.found.add(name: "an adapter asked for with forceFallbackAdapter is the fallback one (its kind is CPU)",
                                why: isCpu(k: info.kind()) ? "" : "it is not: " + said);
+                this.compilerCase(a: a);
                 this.deviceRequest = Optional::Some(value: a.requestDevice(options: readOptions()));
                 this.next(to: 3);
             }

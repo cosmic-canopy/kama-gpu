@@ -564,6 +564,10 @@ static void adapter_request_free(gpuseam_adapter_request *r) {
     free(r);
 }
 
+#if !defined(__EMSCRIPTEN__) && defined(_WIN32)
+static void report_fxc(WGPUAdapter adapter);   // below, after <windows.h>
+#endif
+
 static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGPUStringView message, void *u1, void *u2) {
     (void)u2;
     gpuseam_adapter_request *r = (gpuseam_adapter_request *)u1;
@@ -574,6 +578,9 @@ static void on_adapter(WGPURequestAdapterStatus status, WGPUAdapter adapter, WGP
         outcome = status == WGPURequestAdapterStatus_Unavailable ? GPUSEAM_UNAVAILABLE : GPUSEAM_FAILED;
     } else {
         r->adapter = adapter;
+#if !defined(__EMSCRIPTEN__) && defined(_WIN32)
+        report_fxc(adapter);
+#endif
     }
     int expected = GPUSEAM_PENDING;
     if (!atomic_compare_exchange_strong_explicit(&r->state, &expected, outcome, memory_order_acq_rel, memory_order_acquire)) {
@@ -1333,6 +1340,29 @@ static void sleep_ms(int32_t ms) {
     struct timespec ts = { ms / 1000, (long)(ms % 1000) * 1000000L };
     nanosleep(&ts, NULL);
 #endif
+}
+#endif
+
+#if !defined(__EMSCRIPTEN__) && defined(_WIN32)
+// DXC natively on Windows (AGENTS.gpu.md item 16): wgpu-native loads dxcompiler.dll as its instance is made when Windows'
+// loader finds it beside the program or on the PATH, and compiles Direct3D 12's shaders with it; with none it compiles
+// them with FXC, which stops at Shader Model 5.1, and says nothing (measured on v29.0.1.1). So the first adapter on
+// Direct3D 12 to answer while dxcompiler.dll is not loaded says so, once a process, naming the fix. It never stops the
+// program: FXC is the next method down. An adopted adapter is its maker's, and is not asked.
+static atomic_int fxc_reported;
+
+static void report_fxc(WGPUAdapter adapter) {
+    WGPUAdapterInfo info;
+    memset(&info, 0, sizeof info);
+    if (wgpuAdapterGetInfo(adapter, &info) != WGPUStatus_Success) return;
+    WGPUBackendType backend = info.backendType;
+    wgpuAdapterInfoFreeMembers(info);
+    if (backend != WGPUBackendType_D3D12 || GetModuleHandleW(L"dxcompiler.dll") != NULL) return;
+    if (atomic_exchange_explicit(&fxc_reported, 1, memory_order_relaxed) != 0) return;
+    fputs("@kama/gpu: Direct3D 12 compiles this program's shaders with FXC (Shader Model 5.1): no dxcompiler.dll was found "
+          "beside the program or on the PATH. Ship DXC's dxcompiler.dll beside it (@kama/gpu's tools/fetch-dxc.sh) for "
+          "Shader Model 6.\n", stderr);
+    fflush(stderr);
 }
 #endif
 

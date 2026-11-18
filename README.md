@@ -12,6 +12,8 @@ made both ways, a render pass described in full with its commands, copies and po
 The design is kama's (its `docs/ROADMAP_DETAIL.md` § 8, KR-25), and kyoten builds it as its first consumer.
 
 A consumer sets `"webgpu": true` in its own `kama.json` (kama reads that key from the root manifest only); natively,
-kama finds wgpu-native's SDK at `$KAMA_WGPU_DIR`, which `../kama/tools/fetch-webgpu.sh` fills.
+kama finds wgpu-native's SDK at `$KAMA_WGPU_DIR`, which `../kama/tools/fetch-webgpu.sh` fills. On Windows a program also
+ships Microsoft's `dxcompiler.dll` beside it, which `tools/fetch-dxc.sh` fetches with its licence, so Direct3D 12
+compiles its shaders with DXC rather than FXC ([SPEC.md](SPEC.md) § Instances, adapters and devices).
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.

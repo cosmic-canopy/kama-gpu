@@ -5,6 +5,12 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: DXC natively on Windows** (2026-11-18, kama 0.9.978; AGENTS.gpu.md item 16, GPU-16). On Direct3D 12,
+  wgpu-native compiles a program's shaders with Microsoft's DXC when `dxcompiler.dll` is beside the program or on the
+  PATH, and with FXC, Shader Model 5.1, otherwise. `tools/fetch-dxc.sh` fetches Microsoft's v1.9.2609 release, pinned,
+  into `third_party/dxc/<platform>/` with its licences, and a Windows program ships `dxcompiler.dll` beside it under
+  Microsoft's terms. Without it the first adapter on Direct3D 12 prints one line, once, and the program runs on FXC.
+  The gate needs the DLL on Windows, and holds a run without it to FXC.
 - **Fixed: a release build for the web failed to link under Closure** (2026-11-17, kama 0.9.966; AGENTS.gpu.md item
   15). kama 0.9.966 runs Closure over a wasm release (KR-289), and the page half named `GPUTextureUsage`, which Closure
   has no declaration of. It passes the usage's value instead, and quotes the canvas configuration's keys. A program

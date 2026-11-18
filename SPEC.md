@@ -75,6 +75,17 @@ frame, and nothing released by hand. `examples/clear` is the smallest program th
   - `limits()`, a `Limits`: WebGPU's limits as public fields, with `Limits.defaults()` WebGPU's defaults table;
   - `features()`, a `FeatureSet` of `Feature` (webgpu.h's 22): `FeatureSet.empty()`, `with(feature:)` and
     `has(feature:)`.
+- **Natively on Direct3D 12, shaders compile with DXC where it is found** (AGENTS.gpu.md item 16). wgpu-native compiles
+  a program's WGSL with Microsoft's DXC when Windows' loader finds `dxcompiler.dll` beside the program or on the PATH,
+  and with FXC, which Windows carries, otherwise. FXC stops at Shader Model 5.1, so under it a Direct3D 12 adapter
+  offers no `ShaderF16`, and 64-bit integers, wave operations, mesh shaders and ray tracing are DXC's alone. The package
+  never stops a program over it: the first adapter on Direct3D 12 to answer without DXC prints one line to stderr, once
+  a process (`@kama/gpu: Direct3D 12 compiles this program's shaders with FXC (Shader Model 5.1): …`).
+  `tools/fetch-dxc.sh` fetches Microsoft's release, pinned, into `third_party/dxc/<platform>/` with its three licences.
+  A Windows program ships `dxcompiler.dll` beside it under Microsoft's terms (`LICENSE-MS.txt` there: whoever
+  distributes it has its end users agree to terms that protect it, and indemnifies Microsoft); kama does not copy it
+  there yet, as it does not copy `wgpu_native.dll` (kama's KR-350). `dxil.dll` is not needed. A browser compiles with
+  its own compiler, and Vulkan and Metal need neither.
 - **An adapter gives one device, on every leg,** as a browser gives: once a request of any copy of it is granted, the
   adapter is consumed, and a later request fails with `GpuError::Consumed` at once, without asking WebGPU. A request
   that settles after another consumed the adapter fails the same way, and only a granted request consumes. A program
@@ -616,8 +627,12 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 30 facts, natively, its asynchronous
   pipeline call's abort and its taking a colour target the fragment stage never writes among them;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 339 cases natively with a display, debug and release.
-  Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 340 cases natively with a display, debug and release.
+  Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock. On Windows the
+  native legs run with `dxcompiler.dll` on the PATH (`tools/fetch-dxc.sh`, which the gate needs there), and the fallback
+  adapter is held to DXC by its `ShaderF16`; one more run of the debug build has no DXC (`--no-dxc`) and is held to FXC,
+  `ShaderF16` offered failing it, and to the FXC line printed once, where the legs with DXC are held to never printing
+  it.
   Its windows open with `@kama/window`'s `focused: false`, so a run never takes the keyboard (`tests/src/quiet.kama`),
   and a window it minimises is minimised without activation;
 - `printErrors`, held from outside the program: each run's output holds the printing device's two errors, printed

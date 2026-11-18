@@ -11,7 +11,7 @@ in the git log.
 > **`GPU-<n>` is a permanent id, not a position.** It is assigned once, from the counter below, which the same edit
 > bumps; it is never reused or renumbered, and a shipped row's id retires with it.
 
-**Next id: GPU-16**
+**Next id: GPU-17**
 
 **The goal before 1.0 is every call in webgpu.h** ([AGENTS.gpu.md](AGENTS.gpu.md#what-this-is)), grown by the spec's
 sections in the order `@kama/graphics` pulls them.
@@ -20,7 +20,8 @@ sections in the order `@kama/graphics` pulls them.
 
 Nothing here is under way. The render pipeline set and the fallback adapter are built ([SPEC.md](SPEC.md); the git log
 has how), and `@kama/graphics`' GFX-1, the lit cube, is under way: `writeTexture` came forward from GPU-8 for its first
-texture ([AGENTS.gpu.md](AGENTS.gpu.md) item 14). The next row below that it pulls moves up here when it does.
+texture ([AGENTS.gpu.md](AGENTS.gpu.md) item 14), and DXC natively on Windows was filed and built for its tone-mapping
+goldens (item 16). The next row below that it pulls moves up here when it does.
 
 ## LATER: the rest of webgpu.h before 1.0
 
