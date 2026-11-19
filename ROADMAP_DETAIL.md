@@ -89,6 +89,27 @@ shaders), and this row follows its answer.
 - **The native handles a vendor upscaler needs** (the raw Vulkan or D3D12 device) are not in v29 or in #630, which adds
   Metal's only. They are one more C API addition, by the same path.
 
+<a id="format-capabilities"></a>
+## GPU-17: a texture format's capabilities natively
+
+`@kama/graphics`' 8x MSAA natively, its GFX-19, needs the sample counts an adapter takes for a format (kyoten's
+`docs/design/rendering.md` § Decided, GFX-1's part 5, step 4's question 3, the owner, 2026-11-19). WebGPU's core takes
+1 and 4 alone, and the web has no way past them, so this is native only.
+- **Rust's wgpu answers it** with `Adapter::get_texture_format_features(format)`, whose flags carry `MULTISAMPLE_X2` to
+  `MULTISAMPLE_X16`, behind the native feature `TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES`. Without that feature, a
+  device takes only what WebGPU's spec allows.
+- **wgpu-native v29.0.1.1 declares the feature,** `WGPUNativeFeature_TextureAdapterSpecificFormatFeatures`
+  (`wgpu.h:139`), which GPU-10 offers as a device feature, but has no call that asks a format's features (`wgpu.h` and
+  `webgpu.h`, read on 2026-11-19). A search found no issue or PR asking for one; the row reads wgpu-native's tracker
+  first.
+- **The route is decided at the row:**
+  - a PR to wgpu-native adding the call, as kyoten helps land PR #630, with a build of its branch pinned for the native
+    leg until it merges, then wgpu-native's release;
+  - or a probe, a small texture at each count made inside an error scope, the answer its error or none. That is a
+    stopgap: it reads a validation message where a call would answer, and it makes a texture to ask.
+- **It needs GPU-10's way of asking a device for a native feature,** since a device without the feature refuses any
+  count WebGPU's spec does not allow.
+
 <a id="platforms"></a>
 ## GPU-11: a surface on every platform
 
