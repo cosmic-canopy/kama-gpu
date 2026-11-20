@@ -31,7 +31,7 @@ import {
     gpu::RenderPipelineDescriptor, gpu::RenderPipeline,
     Verdicts, readOptions,
 };
-export { FallbackRun };
+export { FallbackRun, sameInfo };
 
 comptime int32 SETTLE = 120;   // the most ticks a read waits for its map
 comptime uint32 SIDE = 32;     // the target is SIDE by SIDE texels
@@ -74,6 +74,41 @@ unsafe fn string described(const ref Adapter a) {
     return "kind " + kind + ", vendor '" + vendor + "', architecture '" + architecture + "', description '" + description + "'";
 }
 
+fn string backendName(Backend b) {
+    return match (b) {
+        case Undefined: "Undefined";
+        case Null: "Null";
+        case WebGPU: "WebGPU";
+        case D3D11: "D3D11";
+        case D3D12: "D3D12";
+        case Metal: "Metal";
+        case Vulkan: "Vulkan";
+        case OpenGL: "OpenGL";
+        case OpenGLES: "OpenGLES";
+    };
+}
+
+// Every field of an adapter's info, in words: two infos are the same exactly when their words are.
+fn string infoWords(const ref AdapterInfo info) {
+    string kind = kindName(k: info.kind());
+    string backend = backendName(b: info.backend());
+    string vendor = info.vendor();
+    string architecture = info.architecture();
+    string device = info.device();
+    string description = info.description();
+    uint32 vendorId = info.vendorId();
+    uint32 deviceId = info.deviceId();
+    return "kind " + kind + ", backend " + backend + ", vendor '" + vendor + "' (${vendorId}), architecture '"
+        + architecture + "', device '" + device + "' (${deviceId}), description '" + description + "'";
+}
+
+// "" when a device's info is its adapter's, field by field (WebGPU's `GPUDevice.adapterInfo`); else both, in words.
+fn string sameInfo(const ref AdapterInfo device, const ref AdapterInfo adapter) {
+    string got = infoWords(info: device);
+    string want = infoWords(info: adapter);
+    return got == want ? "" : "the device says " + got + "; its adapter " + want;
+}
+
 type resource FallbackRun {
     int32 stage = 0;
     int32 waited = 0;
@@ -85,6 +120,7 @@ type resource FallbackRun {
     Optional<AdapterRequest> fallbackRequest = Optional::None;
     Optional<AdapterRequest> hardwareRequest = Optional::None;
     Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<AdapterInfo> fallbackInfo = Optional::None;   // what the fallback adapter said, for its device's answer
     Optional<Device> device = Optional::None;
     Optional<Queue> queue = Optional::None;
     Optional<RenderPipeline> pipeline = Optional::None;
@@ -236,6 +272,7 @@ type resource FallbackRun {
                 this.found.add(name: "an adapter asked for with forceFallbackAdapter is the fallback one (its kind is CPU)",
                                why: isCpu(k: info.kind()) ? "" : "it is not: " + said);
                 this.compilerCase(a: a);
+                this.fallbackInfo = Optional::Some(value: a.info());
                 this.deviceRequest = Optional::Some(value: a.requestDevice(options: readOptions()));
                 this.next(to: 3);
             }
@@ -271,6 +308,15 @@ type resource FallbackRun {
         this.deviceRequest = Optional::None;
         match (give s) {
             case Ready(device: d, queue: q): {
+                // The device says which adapter it came from: the fallback one, a software GPU, field by field.
+                AdapterInfo said = d.adapterInfo();
+                string why = isCpu(k: said.kind()) ? "" : "its kind is not CPU; ";
+                match (this.fallbackInfo) {
+                    case Some(value: info): { why = why + sameInfo(device: said, adapter: info); }
+                    case None: { why = why + "the fallback adapter's info was not kept"; }
+                };
+                this.found.add(name: "a device from the fallback adapter says it came from that adapter, a software GPU (adapterInfo())",
+                               why: give why);
                 ShaderModuleDescriptor m = ShaderModuleDescriptor.make(wgsl: fallbackWgsl());
                 m.label(text: "fallback scene");
                 ShaderModule stages = d.createShaderModule(descriptor: give m);

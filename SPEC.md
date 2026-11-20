@@ -98,6 +98,8 @@ frame, and nothing released by hand. `examples/clear` is the smallest program th
   implementation's own defaults stand for the rest, and it fails, in the implementation's words, when the adapter lacks
   what it asks for.
 - **A `Device`** holds its adapter, which a surface's `configure` asks again before each configure:
+  - `adapterInfo()`, WebGPU's `GPUDevice.adapterInfo`: the `AdapterInfo` of the adapter it came from, an adopted device's
+    the adapter it was adopted with, as that adapter's `info()` answers it, on every leg (AGENTS.gpu.md item 17);
   - `limits()` and `features()`;
   - `createBuffer(descriptor:)`, `createTexture(descriptor:)` and `createCommandEncoder()`;
   - `poll(wait:)`: natively it finishes what it can and fires the device's callbacks, `wait` blocking until its queue
@@ -627,7 +629,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 - `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 30 facts, natively, its asynchronous
   pipeline call's abort and its taking a colour target the fragment stage never writes among them;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 340 cases natively with a display, debug and release.
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 344 cases natively with a display, debug and release.
   Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock. On Windows the
   native legs run with `dxcompiler.dll` on the PATH (`tools/fetch-dxc.sh`, which the gate needs there), and the fallback
   adapter is held to DXC by its `ShaderF16`; one more run of the debug build has no DXC (`--no-dxc`) and is held to FXC,
@@ -649,7 +651,7 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
   `raw()`, `adopt`, `extern fn` or webgpu.h name, so nothing in it is released by hand;
 - the xfails: an encoder used after `finish()`, which must be refused for the move; and one flag set where another is
   wanted, held to its four refusals;
-- the web leg, headless, on the page's canvases: `tests/` (313 cases in Edge, 316 in Firefox and Chrome for Testing), `examples/clear` (60 frames on `#canvas`) and
+- the web leg, headless, on the page's canvases: `tests/` (315 cases in Edge, 319 in Firefox and Chrome for Testing), `examples/clear` (60 frames on `#canvas`) and
   `examples/triangle` (60 frames on `#canvas`, the last read back) under `kama run --target WASM --headless` in Edge,
   Chrome as installed and the pinned Firefox 160, each with the printErrors check and the read back's line. Firefox's run holds each of its differences, so the day one goes, its run fails:
   `maxImmediateSize` to 0 (`--no-immediates`); a WGSL warning to no message (`--no-shader-warnings`); a buffer of

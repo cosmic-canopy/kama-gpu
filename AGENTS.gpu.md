@@ -1690,7 +1690,28 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       on this machine answers on Direct3D 12, and the package's API cannot ask for another backend. It stays in the
       seam, since a Vulkan adapter answering on Windows needs no DXC.
 
-## Where the truth is
+17. **Built on 2026-11-19: `device.adapterInfo()`, WebGPU's `GPUDevice.adapterInfo`, brought forward** (kama 0.9.978),
+    pulled by `@kama/graphics`' `examples/cube`, whose renderer requests its own GPU and must say which one answered, so
+    a run naming a software GPU holds its adapter to it as the library's tests hold theirs. kyoten's
+    `docs/design/rendering.md` § Decided records the owner's (A) of 2026-11-19: `renderer.adapterInfo()` reads its
+    device's, so a renderer made on a program's own device answers too (Bevy hands `RenderAdapterInfo` over with such a
+    device, `RenderCreation::manual`).
+    - **It reads the adapter the device holds,** which every device has held since GPU-1, an adopted one the adapter it
+      was adopted with, since a surface's `configure` is checked against that adapter. So it answers as that adapter's
+      `info()` does, on every leg alike, and is never empty: WebGPU's meaning, the info of the adapter the device came
+      from. `wgpuDeviceGetAdapterInfo` stays uncalled (COVERAGE.md unchanged, 96 of 206): wgpu-native v29.0.1.1 exports
+      it and emdawnwebgpu answers it from the browser's `device.adapterInfo`, but Firefox 160's `device.adapterInfo` was
+      not measured, and the adapter already answers on every leg.
+    - **The cases:** a device says the adapter it came from, field by field, every field of `AdapterInfo` in its words
+      (`tests/src/main.kama`), and so does a copy of it; a device from the fallback adapter says that adapter, a CPU
+      (`tests/src/fallback.kama`); an adopted device says the adapter it was adopted with, natively, where the adopted
+      device's cases run. **Red first:** on a stub answering an empty `AdapterInfo` all four failed natively, the other
+      340 passing. Green: 344 natively, debug, release and without DXC; 315 in Edge, which offers no fallback adapter;
+      319 in Firefox and Chrome for Testing; each debug and release.
+    - **Mutations: 2 of 2 caught** natively (kyoten's `.scratch/s41/gpu/mutate.py`): the device's own handle read as its
+      adapter, and a copy of a device keeping no adapter, each ending the run as wgpu-native refuses the handle ("thread
+      caused non-unwinding panic. aborting"). A device that answered another adapter's info is held by the fallback
+      device's case, a CPU, beside the hardware device's.
 
 - **This package's own documents,** above: the SPEC, the ROADMAP and its detail, COVERAGE.md, and the CHANGELOG.
 - **The design started as kama's:** `../kama/docs/ROADMAP_DETAIL.md` § 8, at the anchor `s8-gpu-wrapper`. Read it

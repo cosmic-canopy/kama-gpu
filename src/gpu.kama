@@ -926,6 +926,7 @@ type resource AdapterInfo {
     uint32 deviceNumber = 0;
 
     friend Adapter::info[fromAdapter];
+    friend Device::adapterInfo[fromAdapter];
 
     unsafe ctor fromAdapter(UnsafePtr adapter) {
         InlineArray<uint8>#(512) buf = [0; 512];
@@ -1113,6 +1114,10 @@ type resource Device implements Copyable<This>(bare: give) {
     public unsafe const fn UnsafePtr raw() { return this.handle; }
     unsafe const fn UnsafePtr adapterHandle() { return this.adapter; }
     unsafe const fn UnsafePtr stateBlock() { return this.hold.raw(); }
+
+    // What the adapter it came from is (WebGPU's `GPUDevice.adapterInfo`): the adapter this device holds, an adopted
+    // one's the adapter it was adopted with, so it answers alike on every leg, as `Adapter.info()` does.
+    public unsafe const fn AdapterInfo adapterInfo() { return AdapterInfo.fromAdapter(adapter: this.adapter); }
 
     // The uncaptured errors reported since the last call, the oldest first, from the device's calls and from every
     // handle made from it, draining its channel; every copy of the device shares the one channel. Natively an error is

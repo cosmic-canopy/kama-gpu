@@ -33,7 +33,7 @@ import {
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::WindowOptions, window::Size, window::NativeWindow,
     addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly, readOptions, heapInUse,
-    ShaderRun, Verdicts, BindingRun, PipelineRun, PassRun, FallbackRun, LostRun, UploadRun,
+    ShaderRun, Verdicts, BindingRun, PipelineRun, PassRun, FallbackRun, LostRun, UploadRun, sameInfo,
 };
 
 comptime uint32 SIDE = 64;
@@ -925,8 +925,17 @@ type resource Check implements App {
                 case Ready(device: d, queue: q): {
                     this.open = this.open - 1;
                     this.verdict(name: "a device and its queue, from the adapter", why: "");
+                    // WebGPU's GPUDevice.adapterInfo: the device says which adapter it came from, and so does a copy.
+                    string infoWhy = "the adapter is gone";
+                    string copyWhy = "the adapter is gone";
                     match (this.adapter) {
                         case Some(value: a): {
+                            AdapterInfo own = a.info();
+                            AdapterInfo said = d.adapterInfo();
+                            infoWhy = sameInfo(device: said, adapter: own);
+                            Device held = copy d;
+                            AdapterInfo heldSaid = held.adapterInfo();
+                            copyWhy = sameInfo(device: heldSaid, adapter: own);
                             this.again = Optional::Some(value: a.requestDevice(options: readOptions()));
                             Adapter twin = copy a;
                             this.viaCopy = Optional::Some(value: twin.requestDevice(options: readOptions()));
@@ -934,6 +943,8 @@ type resource Check implements App {
                         }
                         case None: { }
                     };
+                    this.verdict(name: "a device says the adapter it came from, field by field (adapterInfo())", why: infoWhy);
+                    this.verdict(name: "...and so does a copy of it", why: copyWhy);
                     Limits got = d.limits();
                     Limits defaults = Limits.defaults();
                     string off = equal(have: got, want: defaults, lacked: noImmediates());
@@ -2728,6 +2739,10 @@ unsafe fn void errorCases(ref Check t, ref Instance instance) {
     else if (!unseen.isEmpty()) { adopt = "the adopted device's channel holds an error"; }
     else { adopt = holds(errs: maker, want: 1, kind: GpuErrorKind::Validation); }
     t.verdict(name: "an adopted device says its errors are not watched, and they reach its maker", why: adopt);
+    AdapterInfo adoptedSaid = adopted.adapterInfo();
+    AdapterInfo adoptedOwn = adapter.info();
+    t.verdict(name: "an adopted device says the adapter it was adopted with (adapterInfo())",
+              why: sameInfo(device: adoptedSaid, adapter: adoptedOwn));
 
     scopeCases(t: t, instance: instance);
     spoiledCases(t: t, instance: instance);

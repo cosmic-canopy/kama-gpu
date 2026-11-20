@@ -5,6 +5,9 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **New: `device.adapterInfo()`** (2026-11-19, kama 0.9.978; AGENTS.gpu.md item 17), WebGPU's `GPUDevice.adapterInfo`:
+  the `AdapterInfo` of the adapter a device came from, an adopted device's the adapter it was adopted with, as that
+  adapter's `info()` answers it, on every leg.
 - **New: DXC natively on Windows** (2026-11-18, kama 0.9.978; AGENTS.gpu.md item 16, GPU-16). On Direct3D 12,
   wgpu-native compiles a program's shaders with Microsoft's DXC when `dxcompiler.dll` is beside the program or on the
   PATH, and with FXC, Shader Model 5.1, otherwise. `tools/fetch-dxc.sh` fetches Microsoft's v1.9.2609 release, pinned,
