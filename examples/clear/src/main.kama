@@ -23,7 +23,7 @@ import {
     gpu::Surface, gpu::SurfaceTexture, gpu::SurfaceError, gpu::SurfaceCapabilities, gpu::SurfaceConfig,
     gpu::ConfigureError, gpu::TextureView, gpu::CommandEncoder, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment, gpu::CommandBuffer, gpu::Color,
     gpu::DeviceErrors,
-    window::Window, window::WindowOptions, window::WindowError, window::Event, window::Key,
+    window::Window, window::WindowOptions, window::WindowError, window::Event, window::TimedEvent, window::Key,
 };
 
 comptime int32 SETTLE_TICKS = 3;   // after the last frame, before the device's errors are read: the web's arrive a tick later
@@ -204,11 +204,11 @@ type resource Clear implements App {
                 w.pump();
                 bool polling = true;
                 while (polling) {
-                    Optional<Event> next = w.pollEvent();
+                    Optional<TimedEvent> next = w.pollEvent();
                     match (next) {
                         case None: { polling = false; }
                         case Some(value: e): {
-                            match (e) {
+                            match (e.event) {
                                 case CloseRequested: { running = false; }
                                 case KeyDown(key: k, mods: m, repeat: r): { if (k == Key::Escape) { running = false; } }
                                 case Resize(width: rw, height: rh): { reconfigure = true; }

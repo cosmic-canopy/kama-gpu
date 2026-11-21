@@ -39,7 +39,7 @@ import {
     gpu::FragmentState, gpu::ColorTargetState, gpu::CullMode, gpu::IndexFormat,
     gpu::CommandEncoder, gpu::RenderPass, gpu::RenderPassDescriptor, gpu::ColorAttachment, gpu::CommandBuffer,
     gpu::Color,
-    window::Window, window::WindowOptions, window::WindowError, window::Event, window::Key,
+    window::Window, window::WindowOptions, window::WindowError, window::Event, window::TimedEvent, window::Key,
     FrameRead, Verdict, copyOut, readable, clearColor,
 };
 
@@ -390,11 +390,11 @@ type resource Triangle implements App {
                 w.pump();
                 bool polling = true;
                 while (polling) {
-                    Optional<Event> next = w.pollEvent();
+                    Optional<TimedEvent> next = w.pollEvent();
                     match (next) {
                         case None: { polling = false; }
                         case Some(value: e): {
-                            match (e) {
+                            match (e.event) {
                                 case CloseRequested: { running = false; }
                                 case KeyDown(key: k, mods: m, repeat: r): { if (k == Key::Escape) { running = false; } }
                                 case Resize(width: rw, height: rh): { reconfigure = true; }
