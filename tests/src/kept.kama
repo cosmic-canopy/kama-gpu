@@ -1,0 +1,173 @@
+// GPU-19: a write each frame never piles up natively (AGENTS.gpu.md item 18). Before every submit the seam asks whether
+// the device can still take work (item 13), and wgpu-native v29.0.1.1 keeps every command buffer that is finished and
+// released unsubmitted, for good (wgpu-native #638): with a write pending, each one held about 2.6 MB on Vulkan and
+// 1.2 MB on Direct3D 12, until a submit panicked after about 2,500 frames. So a buffer is written every frame for 10,000
+// frames, each frame's work submitted and waited on, as a program draws, and held to:
+// - wgpu-native's registry keeping no command buffer more than before them (`wgpuGenerateReport`), an exact count;
+// - the process's private bytes growing less than 64 MB over them.
+// It looks every 1,000 frames and stops at the first look that finds either, so a seam that keeps one a frame fails
+// here, in words, rather than ending the process. Natively only: on the web the browser is handed nothing it is not
+// asked for, and keeps no registry a program can read.
+
+import {
+    core::println,
+    std::collections::DynamicArray,
+    gpu::Instance, gpu::AdapterOptions, gpu::AdapterRequest, gpu::AdapterStatus, gpu::PowerPreference,
+    gpu::Device, gpu::Queue, gpu::DeviceRequest, gpu::DeviceStatus, gpu::GpuError,
+    gpu::CommandEncoder, gpu::CommandBuffer, gpu::Buffer, gpu::BufferDescriptor, gpu::BufferUsage,
+    Verdicts, readOptions, commandBuffersKept, privateBytes,
+};
+export { KeptRun };
+
+comptime int32 FRAMES = 10000;
+comptime int32 LOOK = 1000;       // the frames between two looks at the registry and the memory
+comptime int64 GROWTH_MB = 64;    // the most the process may grow over the frames
+
+@compileFor(ARCH_WASM32)
+fn bool keptCasesHere() { return false; }
+@compileFor(!ARCH_WASM32)
+fn bool keptCasesHere() { return true; }
+
+type resource KeptRun {
+    int32 stage = 0;
+    bool optional;   // `--adapter-optional`: no adapter here is a skip
+    Verdicts found;
+    Optional<Instance> instance = Optional::None;
+    Optional<AdapterRequest> adapterRequest = Optional::None;
+    Optional<DeviceRequest> deviceRequest = Optional::None;
+    Optional<Device> device = Optional::None;
+    Optional<Queue> queue = Optional::None;
+
+    public ctor make(bool adapterOptional) {
+        this.optional = adapterOptional;
+        this.found = Verdicts.make();
+    }
+
+    public fn ref Verdicts verdicts() { return this.found; }
+
+    // One tick's step: true once every case has run.
+    public unsafe fn bool step() {
+        if (this.stage == 0) { this.open(); }
+        else if (this.stage == 1) { this.awaitAdapter(); }
+        else if (this.stage == 2) { this.awaitDevice(); }
+        else if (this.stage == 10) { this.writeEveryFrame(); }
+        if (this.stage == 999) {
+            this.queue = Optional::None;
+            this.device = Optional::None;
+            this.deviceRequest = Optional::None;
+            this.adapterRequest = Optional::None;
+            this.instance = Optional::None;
+            return true;
+        }
+        return false;
+    }
+
+    unsafe fn void open() {
+        if (!keptCasesHere()) {
+            println(s: "info the kept-memory cases run natively only: a browser keeps no registry a program can read");
+            this.stage = 999;
+            return;
+        }
+        Result<Instance, GpuError> made = Instance.make();
+        match (give made) {
+            case Ok(value: inst): {
+                this.adapterRequest = Optional::Some(value: inst.requestAdapter(options: AdapterOptions.make(power: PowerPreference::Default)));
+                this.instance = Optional::Some(value: give inst);
+                this.stage = 1;
+            }
+            case Err(error: e): { string why = e.message(); this.found.add(name: "an instance for the kept-memory cases", why: give why); this.stage = 999; }
+        };
+    }
+
+    unsafe fn void awaitAdapter() {
+        if (this.adapterRequest.isNone()) { this.stage = 999; return; }
+        AdapterStatus s = match (this.adapterRequest) {
+            case Some(value: r): r.poll();
+            case None: AdapterStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.adapterRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(adapter: a): {
+                this.deviceRequest = Optional::Some(value: a.requestDevice(options: readOptions()));
+                this.stage = 2;
+            }
+            case Failed(error: e): {
+                bool none = match (e) { case NoAdapter(words: w): true; case _: false; };
+                if (none && this.optional) {
+                    println(s: "skip the kept-memory cases: there is no WebGPU adapter here (--adapter-optional)");
+                } else {
+                    string why = e.message();
+                    this.found.add(name: "an adapter for the kept-memory cases", why: give why);
+                }
+                this.stage = 999;
+            }
+        };
+    }
+
+    unsafe fn void awaitDevice() {
+        if (this.deviceRequest.isNone()) { this.stage = 999; return; }
+        DeviceStatus s = match (this.deviceRequest) {
+            case Some(value: r): r.poll();
+            case None: DeviceStatus::Failed(error: GpuError::Taken);
+        };
+        bool pending = match (s) { case Pending: true; case _: false; };
+        if (!pending) { this.deviceRequest = Optional::None; }
+        match (give s) {
+            case Pending: { }
+            case Ready(device: d, queue: q): {
+                this.device = Optional::Some(value: give d);
+                this.queue = Optional::Some(value: give q);
+                this.stage = 10;
+            }
+            case Failed(error: e): { string why = e.message(); this.found.add(name: "a device for the kept-memory cases", why: give why); this.stage = 999; }
+        };
+    }
+
+    // 128 bytes written every frame for FRAMES frames, each frame's work submitted and waited on, in this one tick.
+    unsafe fn void writeEveryFrame() {
+        UnsafePtr raw = match (this.instance) { case Some(value: i): i.raw(); case None: null; };
+        int64 keptBefore = commandBuffersKept(instance: raw);
+        int64 bytesBefore = privateBytes();
+        string keptWhy = "";
+        string grownWhy = "";
+        if (keptBefore < 0) { keptWhy = "wgpu-native's registry could not be read"; }
+        if (bytesBefore < 0) { grownWhy = "the process's private bytes could not be read"; }
+        int32 f = 0;
+        int64 keptMore = 0;
+        int64 grownMb = 0;
+        match (this.device) {
+            case Some(value: d): {
+                match (this.queue) {
+                    case Some(value: q): {
+                        Buffer target = d.createBuffer(descriptor: BufferDescriptor.make(size: 128, usage: BufferUsage::Storage | BufferUsage::CopyDst));
+                        DynamicArray<uint8> record = DynamicArray.empty();
+                        for (isize i = 0; i < 128; i = i + 1) { record.add(item: 7); }
+                        while (f < FRAMES && keptWhy.isEmpty() && grownWhy.isEmpty()) {
+                            q.writeBuffer(buffer: target, offset: 0, data: record.view());
+                            CommandEncoder enc = d.createCommandEncoder();
+                            CommandBuffer cb = give enc.finish();
+                            q.submit(commands: give cb);
+                            d.poll(wait: true);
+                            f = f + 1;
+                            if (f % LOOK == 0 || f == FRAMES) {
+                                keptMore = commandBuffersKept(instance: raw) - keptBefore;
+                                grownMb = (privateBytes() - bytesBefore) / 1048576;
+                                if (keptMore != 0) { keptWhy = "after ${f} frames wgpu-native keeps ${keptMore} command buffers more than before them"; }
+                                if (grownMb >= GROWTH_MB) { grownWhy = "after ${f} frames the process grew ${grownMb} MB"; }
+                            }
+                        }
+                    }
+                    case None: { keptWhy = "no queue"; }
+                };
+            }
+            case None: { keptWhy = "no device"; }
+        };
+        if (f < FRAMES && grownWhy.isEmpty()) { grownWhy = "the frames stopped after ${f}, before it could be held"; }
+        println(s: "info the kept-memory cases: ${f} frames, wgpu-native keeping ${keptMore} command buffers more, the process grown ${grownMb} MB");
+        this.found.add(name: "a buffer written every frame for 10,000 frames, each frame's work submitted and waited on, leaves wgpu-native keeping no command buffer more", why: give keptWhy);
+        this.found.add(name: "and the process grows less than 64 MB over those frames", why: give grownWhy);
+        this.stage = 999;
+    }
+}

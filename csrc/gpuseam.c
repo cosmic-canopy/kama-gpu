@@ -810,10 +810,14 @@ void gpuseam_state_keep(gpuseam_state *s, WGPUDevice device, WGPUQueue queue) {
 // Natively, whether `s`'s device can still take work, asked before every submit. wgpu-native ends the process in a panic
 // at a submit to a lost or destroyed device ("Error in wgpuQueueSubmit … Parent device is lost"), a map's own empty
 // submit included, where a browser treats one as a no-op (kyoten's .scratch/warp-lost/: a read-only depth pass loses a
-// D3D12 device on wgpu-native v29). An empty encoder finished quietly answers: on a working device it never fails, and
-// on a lost or destroyed one it reports the loss inside the call (tests/facts, `lostfinish`). The first time it fails,
-// the loss is recorded in its words, as the lost callback records one, so `device.lost()` answers. An adopted device
-// has no device kept here, and is taken to work, as its maker vouches for it.
+// D3D12 device on wgpu-native v29). An encoder created quietly and released unfinished answers (GPU-19, item 18):
+// wgpu-core checks the device before it makes one, and on a lost or destroyed device wgpu-native reports the loss inside
+// the call, to the lost callback, which records it (tests/facts, `lostcreate`); on a working device it reports nothing.
+// It is never finished: wgpu-native keeps every command buffer released unsubmitted for good (wgpu-native #638, the
+// facts' `unsubmittedkept`), which with a write pending held about 2.6 MB a submit on Vulkan and 1.2 MB on Direct3D 12,
+// until a submit panicked; an encoder it always drops. An error the call reports another way records the loss in its
+// words, so `device.lost()` answers either way. An adopted device has no device kept here, and is taken to work, as its
+// maker vouches for it.
 static int32_t takes_work(gpuseam_state *s) {
     if (s == NULL || s->device == NULL) return 1;
     if (atomic_load_explicit(&s->lost, memory_order_acquire) != 0) return 0;
@@ -824,16 +828,16 @@ static int32_t takes_work(gpuseam_state *s) {
     t_probe_said.length = 0;
     t_quiet += 1;
     WGPUCommandEncoder e = wgpuDeviceCreateCommandEncoder(s->device, NULL);
-    WGPUCommandBuffer c = e != NULL ? wgpuCommandEncoderFinish(e, NULL) : NULL;
     t_quiet -= 1;
     gpuseam_report said = t_probe_said;
     t_probing = outer;
     t_probe_said = outer_said;
-    if (c != NULL) wgpuCommandBufferRelease(c);
     if (e != NULL) wgpuCommandEncoderRelease(e);
-    if (said.message == NULL && said.length == 0) return 1;
-    record_loss(s, GPUSEAM_LOSS_UNKNOWN, said);
-    return 0;
+    if (said.message != NULL || said.length != 0) {
+        record_loss(s, GPUSEAM_LOSS_UNKNOWN, said);
+        return 0;
+    }
+    return atomic_load_explicit(&s->lost, memory_order_acquire) == 0;
 }
 #endif
 

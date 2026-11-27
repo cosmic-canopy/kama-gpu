@@ -33,7 +33,7 @@ import {
     gpu::PresentMode, gpu::AlphaMode, gpu::ConfigureError,
     window::Window, window::WindowError, window::WindowOptions, window::Size, window::NativeWindow,
     addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, quietly, readOptions, heapInUse,
-    ShaderRun, Verdicts, BindingRun, PipelineRun, PassRun, FallbackRun, LostRun, UploadRun, sameInfo,
+    ShaderRun, Verdicts, BindingRun, PipelineRun, PassRun, FallbackRun, LostRun, UploadRun, KeptRun, sameInfo,
 };
 
 comptime uint32 SIDE = 64;
@@ -596,7 +596,7 @@ type resource Check implements App {
     Optional<Queue> queue = Optional::None;
     Optional<Buffer> readback = Optional::None;
     Optional<BufferRead> read = Optional::None;
-    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 the error cases, 5 the shader cases, 6 the binding cases, 7 the pipeline cases, 8 the pass cases, 9 the fallback cases, 10 the lost-device cases, 11 done
+    int32 stage = 0;     // 0 awaiting the adapters, 1 the devices, 2 the map, 3 the surface cases, 4 the error cases, 5 the shader cases, 6 the binding cases, 7 the pipeline cases, 8 the pass cases, 9 the fallback cases, 10 the lost-device cases, 11 the upload cases, 12 the kept-memory cases, 13 done
     Optional<SurfaceRun> surfaces = Optional::None;
     Optional<ErrorRun> errorRun = Optional::None;
     Optional<ShaderRun> shaderRun = Optional::None;
@@ -606,6 +606,7 @@ type resource Check implements App {
     Optional<FallbackRun> fallbackRun = Optional::None;
     Optional<LostRun> lostRun = Optional::None;
     Optional<UploadRun> uploadRun = Optional::None;
+    Optional<KeptRun> keptRun = Optional::None;
     Instant began = monotonicNow();
     int32 runs = 0;
     int32 failures = 0;
@@ -677,7 +678,8 @@ type resource Check implements App {
         if (this.stage == 9) { this.fallbackStep(); }
         if (this.stage == 10) { this.lostStep(); }
         if (this.stage == 11) { this.uploadStep(); }
-        if (this.stage == 12) { return this.finish(); }
+        if (this.stage == 12) { this.keptStep(); }
+        if (this.stage == 13) { return this.finish(); }
         return 1;
     }
 
@@ -818,6 +820,24 @@ type resource Check implements App {
         pending.verdicts().clear();
         this.uploadRun = Optional::Some(value: give pending);
         if (done) { this.uploadRun = Optional::None; this.stage = 12; }
+    }
+
+    // GPU-19's cases, a write every frame for 10,000 frames held to what natively piles up (tests/src/kept.kama), in one
+    // tick, their verdicts reported here.
+    unsafe fn void keptStep() {
+        Optional<KeptRun> taken = replace(place: this.keptRun, with: Optional::None);
+        KeptRun pending = match (give taken) { case Some(value: r): give r; case None: KeptRun.make(adapterOptional: adapterOptional()); };
+        bool done = pending.step();
+        isize i = 0;
+        while (i < pending.verdicts().count()) {
+            string name = pending.verdicts().nameAt(at: i);
+            string why = pending.verdicts().whyAt(at: i);
+            this.verdict(name: name, why: why);
+            i = i + 1;
+        }
+        pending.verdicts().clear();
+        this.keptRun = Optional::Some(value: give pending);
+        if (done) { this.keptRun = Optional::None; this.stage = 13; }
     }
 
     unsafe fn void awaitAdapter() {

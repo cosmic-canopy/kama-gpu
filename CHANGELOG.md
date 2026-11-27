@@ -5,6 +5,13 @@ package follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **Fixed: natively, a buffer written every frame piled up memory until the process ended** (2026-11-27, kama 0.9.1033;
+  AGENTS.gpu.md item 18). Before every submit and every map the package asks whether the device can still take work,
+  and it asked by finishing an empty encoder and releasing the command buffer unsubmitted, which wgpu-native v29.0.1.1
+  keeps until the process ends (wgpu-native #638). With a write pending, each one kept about 2.6 MB on Vulkan and
+  1.2 MB on Direct3D 12, and on Vulkan a submit ended the process after about 2,500 frames. It now asks by creating an
+  encoder it releases unfinished, which keeps nothing. A program needs no change, and should submit every command
+  buffer it finishes: natively one dropped unsubmitted is still kept.
 - **New: `device.adapterInfo()`** (2026-11-19, kama 0.9.978; AGENTS.gpu.md item 17), WebGPU's `GPUDevice.adapterInfo`:
   the `AdapterInfo` of the adapter a device came from, an adopted device's the adapter it was adopted with, as that
   adapter's `info()` answers it, on every leg.

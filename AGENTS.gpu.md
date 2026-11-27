@@ -1550,6 +1550,10 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       fails, the loss is recorded in wgpu-native's words, so `device.lost()` answers; the submit is skipped and the map
       fails at once. The state block keeps a reference on its device for it. A loss is recorded once, by the lost
       callback or the check, whichever sees it first. An adopted device is not asked, as its maker vouches for it.
+      **Since 2026-11-27 (item 18) the check creates an encoder and releases it unfinished,** rather than finishing one:
+      wgpu-native keeps every command buffer released unsubmitted, which piled up memory at every submit. On a lost or
+      destroyed device the creation reports the loss inside the call, to the lost callback, which records it (the facts'
+      `lostcreate`), and the check reads that record after the call.
     - **The cases** (`tests/src/lost.kama`, every leg): a device destroyed through its raw handle stands in for a loss,
       then a map of its buffer fails, a command buffer finished before the loss and submitted after it does not end the
       program, and the device says it is lost (natively at once, in a browser a tick or more later); and on the fallback
@@ -1712,6 +1716,69 @@ is recorded here with its reason, and the owner relays them to kama. **Kept** ma
       adapter, and a copy of a device keeping no adapter, each ending the run as wgpu-native refuses the handle ("thread
       caused non-unwinding panic. aborting"). A device that answered another adapter's info is held by the fallback
       device's case, a CPU, beside the hardware device's.
+18. **Built on 2026-11-27: natively, a write each frame never piles up (GPU-19)** (kama 0.9.1033), found by
+    `@kama/graphics`' GFX-21 measuring in kyoten's fifty-third session and taken first at kyoten's owner's word.
+    - **What held the memory,** measured and then read in wgpu-native's source, checked by curl (kyoten's
+      `.scratch/s54/gpu19/`, its `probe.c` a C repro on wgpu-native v29.0.1.1 and the AMD Radeon 880M):
+      - item 13's check finished an empty encoder before every submit and every map, and released the command buffer
+        unsubmitted;
+      - wgpu-native's `WGPUCommandBufferImpl::drop` drops a command buffer in wgpu-core only once `wgpuQueueSubmit` has
+        marked it (`open`), so each one released unsubmitted stays in wgpu-core's registry until the process ends,
+        holding its hal encoder. That is wgpu-native #638, open since 2026-10-22;
+      - with a write pending, the encoder each one kept was a used one. Over 2,000 frames the process grew 5,193 MB on
+        Vulkan (2.6 MB a frame) and 2,367 MB on Direct3D 12 (1.2 MB a frame), the registry keeping one command buffer
+        more a frame, until on Vulkan a submit panicked ("Not enough memory left") after about 2,500 frames;
+      - an encoder, wgpu-native drops in wgpu-core whatever its state (`WGPUCommandEncoderImpl::drop`, its #541 and
+        #542).
+    - **The decision** (kyoten's owner, 2026-11-27: "It sounds like we can take your recommendations"): the check creates
+      an encoder quietly and releases it unfinished. wgpu-core checks the device before it makes one (`check_is_valid`).
+      On a destroyed device wgpu-native reports the loss inside the call to the lost callback, not the uncaptured one
+      (its `handle_error` sends a `DeviceError::Lost` there), which records it, so the check reads the state's loss
+      after the call. An error the call reports another way still records the loss in its words, as before.
+      - **Measured the same way:** 20,000 frames grew 5 MB on Vulkan and 1 MB on Direct3D 12, as frames with no check
+        do, the registry keeping none.
+      - **Set aside:** submitting the probe's command buffer with the program's, which adds one to every submit; a
+        zero-length write to a buffer kept per device, which wgpu-core checks the device for before it ignores the
+        write; and no check, as friendly-fire-department and the-mallow-man run. Those games submit every command
+        buffer they finish, so #638 never reaches them, and survive no loss.
+    - **What it is, and is not** (the owner asked whether it is a stopgap):
+      - the check's new form is not: it stays right on a wgpu-native that fixes #638;
+      - the check itself stands in for wgpu-native reporting a submit's error rather than panicking, as a browser drops a
+        submit to a lost device. When #638's fix and wgpu-native's PR #641 ship in a release kama fetches, the package can
+        submit as its web leg does and drop the check, and the facts `unsubmittedkept` and `abort-lostsubmit` fail by
+        name to say so;
+      - until then two things stay wgpu-native's, since no check reaches them from C: a program's own command buffer
+        finished and dropped unsubmitted is kept (#638; the SPEC tells a program to submit each one), and a loss the
+        submit itself finds first ends the process (#641).
+
+      A comment for #638 with these numbers is drafted for the owner to post (kyoten's
+      `.scratch/s54/gpu19/wgpu-native-638-comment.md`).
+    - **The cases** (`tests/src/kept.kama`, natively):
+      - a buffer written every frame for 10,000 frames, each frame's work submitted and waited on, in one tick, leaves
+        wgpu-native keeping no command buffer more (`wgpuGenerateReport`, through the tests' C);
+      - and the process grows less than 64 MB over them: its private bytes, Windows' `PrivateUsage`, Linux's resident
+        set, macOS's physical footprint.
+
+      The case looks every 1,000 frames and at the last, and stops at the first look that finds either, so a seam
+      keeping one a frame fails in words. On the web it says it runs natively only, and the gate's `heldFlat` fails any
+      native leg whose output lacks either case.
+    - **Red first:** on the old check, at frame 1,000, 1,000 command buffers kept and 2,489 MB grown, the other 344
+      passing. Green: 346 natively, debug, release and without DXC, 0 kept and 0 MB grown; the web legs unchanged.
+    - **The facts** (`tests/facts/wgpufacts.c`, 40 in all):
+      - `lostcreate`: an encoder's creation reports nothing on a working device. On a destroyed one it reports the loss
+        inside the call, to the lost callback alone, and its unfinished release reports nothing more;
+      - `unsubmittedkept`: ten encoders released unfinished leave nothing in the registry, and ten command buffers
+        released unsubmitted are all kept. This pins #638.
+    - **Mutations: 6 of 8 caught** natively (kyoten's `.scratch/s54/gpu19/mutate.py`):
+      - the check finishing its encoder again, caught by both cases;
+      - its encoder never released, caught by the 64 MB bound alone, since the registry counts no encoder;
+      - the loss never read after the call, and the check skipped at a map or at a submit, each ending the process;
+      - the native cases skipped, caught only by the gate's `heldFlat`.
+
+      Two are not caught. One records as a loss an error the creation reports through the uncaptured callback. With
+      wgpu-native v29.0.1.1 only an out-of-memory makes one, which no case can, and the path stays because a submit after
+      one would end the process. The other is a known loss asked again, which is equivalent: the creation reports the
+      loss again, at the cost of one more encoder, as item 13's eighth was.
 
 - **This package's own documents,** above: the SPEC, the ROADMAP and its detail, COVERAGE.md, and the CHANGELOG.
 - **The design started as kama's:** `../kama/docs/ROADMAP_DETAIL.md` § 8, at the anchor `s8-gpu-wrapper`. Read it

@@ -12,4 +12,13 @@ int32_t gputests_minimise(void *hwnd, int32_t minimised);
 // natively, where the question is not asked.
 int64_t gputests_heap_in_use(void);
 
+// Natively, the command buffers wgpu-native's registry keeps for `instance`'s programs (`wgpuGenerateReport`'s
+// `hub.commandBuffers.numKeptFromUser`): one finished and released unsubmitted stays there for good (wgpu-native #638,
+// GPU-19). -1 on the web, which has no such registry.
+int64_t gputests_command_buffers_kept(void *instance);
+
+// The process's private bytes as the system counts them (Windows' PrivateUsage, Linux's resident set, macOS's physical
+// footprint): what a leak grows. -1 on the web.
+int64_t gputests_private_bytes(void);
+
 #endif

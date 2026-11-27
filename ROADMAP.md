@@ -18,15 +18,11 @@ sections in the order `@kama/graphics` pulls them.
 
 ## NOW: what `@kama/graphics`' first slice pulls
 
-The render pipeline set and the fallback adapter are built ([SPEC.md](SPEC.md); the git log has how), and
-`@kama/graphics`' GFX-1, the lit cube, is under way: `writeTexture` came forward from GPU-8 for its first texture
-([AGENTS.gpu.md](AGENTS.gpu.md) item 14), and DXC natively on Windows was filed and built for its tone-mapping goldens
-(item 16). GPU-19 comes first, at kyoten's owner's word (2026-11-27), before `@kama/graphics`' GFX-21 is measured. The
-next row below that it pulls moves up here when it does.
-
-| id | item | why |
-|---|---|---|
-| GPU-19 | **A write each frame never piles up natively**: each frame that calls `writeBuffer` keeps about 2.6 MB until a submit panics after about 2,500 frames, held by the seam's lost-device check (`takes_work`), an encoder dropped unsubmitted while a write is pending; fixed and held by a long run in the gate | [detail](ROADMAP_DETAIL.md#writes-kept) |
+Nothing here is under way. The render pipeline set and the fallback adapter are built ([SPEC.md](SPEC.md); the git log
+has how), and `@kama/graphics`' GFX-1, the lit cube, is under way: `writeTexture` came forward from GPU-8 for its first
+texture ([AGENTS.gpu.md](AGENTS.gpu.md) item 14), DXC natively on Windows was filed and built for its tone-mapping
+goldens (item 16), and the lost-device check that kept memory at every submit natively was fixed before its engine
+surface is measured (item 18). The next row below that it pulls moves up here when it does.
 
 ## LATER: the rest of webgpu.h before 1.0
 

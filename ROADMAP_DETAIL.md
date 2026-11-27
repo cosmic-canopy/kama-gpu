@@ -5,48 +5,6 @@ when it comes up, and their answers are recorded here or, for a departure from k
 [AGENTS.gpu.md](AGENTS.gpu.md). When a row ships, its section goes: what was built is the [SPEC](SPEC.md), and how it
 was decided is the git log. `tools/check-roadmap.sh` holds every section to a row.
 
-<a id="writes-kept"></a>
-## GPU-19: a write each frame never piles up natively
-
-**Found** by `@kama/graphics`' GFX-21 measuring, in kyoten's fifty-third session (2026-11-27), on kyoten's pin (kama
-0.9.1033), with wgpu-native v29.0.1.1 on Vulkan on an AMD Radeon 880M (Windows 11). The probes are kyoten's
-`.scratch/s53/gfx21/leak/` (one `writeBuffer` of `--bytes N` each frame for `--frames F`, each frame an empty command
-buffer submitted and `poll(wait: true)`) and `.scratch/s53/gfx21/upload/`.
-- **Each frame that calls `writeBuffer` keeps about 2.6 MB, whatever the size written.** With 128 bytes a frame,
-  private memory grows about 1.5 GB a second. After about 2,500 frames wgpu-native's `wgpuQueueSubmit` panics ("Validation
-  Error … Not enough memory left") and the process aborts: about 40 seconds at 60 frames a second.
-- **The same frames with no write stay flat** at about 300 MB, 4,000 frames in 2 seconds.
-- **The memory comes back only when the process ends.**
-- **`examples/triangle` shows it with a window:** run by hand for 16 seconds, 585 frames, it grew about 160 MB a second,
-  one spin uniform written a frame. No gate runs a window past 60 frames, so none has seen it.
-
-**The clue:** friendly-fire-department and the-mallow-man write buffers every frame (FFD's uniforms, `renderer.kama`;
-TMM's palettes, `gpuscene.kama`) and stay flat, on the same `wgpu_native.dll` (v29.0.1.1, the same SHA-256) and an
-instance made the same way (`wgpuCreateInstance(NULL)`). What differs:
-- the games poll once a frame without waiting (`wgpuDevicePoll(device, 0, NULL)`, FFD's `ffd_platform.c`);
-- this package asks before every submit whether the device takes work (`takes_work`, `csrc/gpuseam.c`), creating an
-  empty command encoder, finishing it and releasing the command buffer unsubmitted. A frame with no write does the same
-  and stays flat, so if this is the cause, it is the unsubmitted command buffer while a write is pending.
-
-**What holds the memory: `takes_work`, measured the same day.** With the seam's `gpuseam_queue_submit` patched to skip
-`takes_work` (a throwaway worktree), the same 128-byte frames stayed flat at 120 to 240 MB through 3,000 frames, in
-about 1.5 seconds. With `takes_work` kept and the poll made non-waiting, as the games poll, memory still grew to 5.8 GB.
-So the check that keeps a submit to a lost device from ending the process is what keeps about 2.6 MB a frame: an
-encoder finished and dropped unsubmitted while a write is pending. Whether wgpu-native should give that memory back on
-its own is the upstream report's question; the fix is this package's either way.
-
-**The row:**
-- **Test-first,** as the lost-device fix of 2026-11-14 was: a case writes a buffer each frame for 10,000 frames, held to memory
-  that stays bounded. How it is measured is settled at the row: wgpu-native's own `wgpuGenerateReport`, whose buffer
-  counts a kept staging buffer would raise, or the process's memory from the OS. It is red first.
-- **Ask whether a device takes work another way,** one that drops no command buffer while a write is pending, and that
-  still answers before a submit to a lost device, which wgpu-native ends the process at (the lost-device fix's reason).
-  Its candidates are measured and asked at the row.
-- **A pure C repro on wgpu-native** of an encoder dropped unsubmitted while a write is pending, and on Direct3D 12 if a
-  program can choose it (`WGPU_BACKEND` did not), for an upstream report to gfx-rs/wgpu-native, drafted for the owner
-  to post.
-- **Done:** a native program writing a buffer every frame runs indefinitely with flat memory, and the gate holds it.
-
 <a id="lost-surface"></a>
 ## GPU-18: a lost device's surface never ends the program
 

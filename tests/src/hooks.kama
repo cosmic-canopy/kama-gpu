@@ -5,7 +5,7 @@
 // also holds needs an `AddRef` the same way.
 
 export { addDeviceRef, addSurfaceRef, statesAlive, windowRecords, minimise, heapInUse, compileWorkersAlive,
-          pipelinesAlive, compilePause, destroyDevice };
+          pipelinesAlive, compilePause, destroyDevice, commandBuffersKept, privateBytes };
 
 extern "gpuseam.h";
 extern "winseam.h";
@@ -13,6 +13,8 @@ extern fn int32 winseam_live_records();
 extern "gputests.h";
 extern fn int32 gputests_minimise(UnsafePtr hwnd, int32 minimised);
 extern fn int64 gputests_heap_in_use();
+extern fn int64 gputests_command_buffers_kept(UnsafePtr instance);
+extern fn int64 gputests_private_bytes();
 
 extern fn void wgpuDeviceAddRef(UnsafePtr device);
 extern fn void wgpuDeviceDestroy(UnsafePtr device);
@@ -33,6 +35,11 @@ unsafe fn int32 windowRecords() { return winseam_live_records(); }
 unsafe fn int32 minimise(UnsafePtr hwnd, int32 minimised) { return gputests_minimise(hwnd: hwnd, minimised: minimised); }
 // The bytes the C heap holds in use on the web (-1 natively).
 unsafe fn int64 heapInUse() { return gputests_heap_in_use(); }
+// Natively, the command buffers wgpu-native's registry keeps for `instance`'s programs: one finished and released
+// unsubmitted stays there for good (wgpu-native #638, GPU-19). -1 on the web.
+unsafe fn int64 commandBuffersKept(UnsafePtr instance) { return gputests_command_buffers_kept(instance: instance); }
+// The process's private bytes as the system counts them, what a leak grows (-1 on the web).
+unsafe fn int64 privateBytes() { return gputests_private_bytes(); }
 // The compile isolates alive natively, across every device (0 on the web, where the browser compiles).
 unsafe fn int64 compileWorkersAlive() { return gpuseam_compile_workers_alive(); }
 // The asynchronous pipeline requests' slots and jobs alive.

@@ -28,6 +28,7 @@ typedef struct {
     int on_caller;        // how many arrived on the calling thread
     WGPUErrorType type;   // the last one's type
     int lost;             // lost callbacks seen
+    int lost_in_call;     // how many arrived inside the watched call
 } seen;
 
 static seen g_a, g_b;
@@ -49,6 +50,7 @@ static void on_error(WGPUDevice const *device, WGPUErrorType type, WGPUStringVie
 static void on_lost(WGPUDevice const *device, WGPUDeviceLostReason reason, WGPUStringView message, void *u1, void *u2) {
     (void)device; (void)reason; (void)message; (void)u2;
     ((seen *)u1)->lost += 1;
+    ((seen *)u1)->lost_in_call += g_in_call;
 }
 
 static void on_pop(WGPUPopErrorScopeStatus s, WGPUErrorType t, WGPUStringView m, void *u1, void *u2) {
@@ -409,6 +411,64 @@ static void lost_finish(void) {
     wgpuDeviceRelease(d);
 }
 
+// How the seam asks (GPU-19): an encoder's creation alone answers, and keeps nothing. On a working device it reports
+// nothing; on a destroyed one it reports the loss inside the call, to the lost callback and not the uncaptured one, and
+// releasing it unfinished reports nothing more.
+static void lost_create(void) {
+    WGPUDevice d = device_for(&g_a, 1);
+    g_in_call = 1;
+    WGPUCommandEncoder e = wgpuDeviceCreateCommandEncoder(d, NULL);
+    g_in_call = 0;
+    fact(g_a.count == 0 && g_a.lost == 0, "an encoder's creation reports nothing on a working device", "it reported");
+    wgpuCommandEncoderRelease(e);
+    wgpuDeviceDestroy(d);
+    g_in_call = 1;
+    e = wgpuDeviceCreateCommandEncoder(d, NULL);
+    g_in_call = 0;
+    fact(g_a.lost >= 1 && g_a.lost_in_call == g_a.lost,
+         "on a destroyed device it reports the loss inside the call, to the lost callback", "not reported there");
+    fact(g_a.count == 0, "and not to the uncaptured callback", g_words);
+    int lost = g_a.lost, count = g_a.count;
+    wgpuCommandEncoderRelease(e);
+    fact(g_a.lost == lost && g_a.count == count, "releasing it unfinished reports nothing more", "it reported");
+    wgpuDeviceRelease(d);
+}
+
+static size_t command_buffers_kept(void) {
+    WGPUGlobalReport r;
+    memset(&r, 0, sizeof r);
+    wgpuGenerateReport(g_instance, &r);
+    return r.hub.commandBuffers.numKeptFromUser;
+}
+
+// Why the seam never finishes the encoder it asks with (GPU-19): wgpu-native keeps every command buffer finished and
+// released unsubmitted, for good (its WGPUCommandBufferImpl drops one in wgpu-core only once a submit has marked it;
+// wgpu-native #638), and an encoder released unfinished it drops. With a write pending each kept one held about 2.6 MB on
+// Vulkan and 1.2 MB on Direct3D 12 (kyoten's .scratch/s54/gpu19/). The day this holds no more, #638 is fixed.
+static void unsubmitted_kept(void) {
+    WGPUDevice d = device_for(&g_a, 1);
+    size_t before = command_buffers_kept();
+    for (int i = 0; i < 10; i++) {
+        WGPUCommandEncoder e = wgpuDeviceCreateCommandEncoder(d, NULL);
+        wgpuCommandEncoderRelease(e);
+    }
+    wgpuDevicePoll(d, 1, NULL);
+    size_t created = command_buffers_kept();
+    fact(created == before, "ten encoders released unfinished leave nothing in the registry", "some were kept");
+    for (int i = 0; i < 10; i++) {
+        WGPUCommandEncoder e = wgpuDeviceCreateCommandEncoder(d, NULL);
+        WGPUCommandBuffer c = wgpuCommandEncoderFinish(e, NULL);
+        wgpuCommandBufferRelease(c);
+        wgpuCommandEncoderRelease(e);
+    }
+    wgpuDevicePoll(d, 1, NULL);
+    size_t finished = command_buffers_kept();
+    char why[96];
+    snprintf(why, sizeof why, "%zu more kept (wgpu-native #638 fixed?)", finished - created);
+    fact(finished == created + 10, "ten command buffers finished and released unsubmitted are all kept (wgpu-native #638)", why);
+    wgpuDeviceRelease(d);
+}
+
 // Why the seam asks: a submit to a device that can no longer take work ends the process, an empty one (a map's flush)
 // included, where a browser drops it.
 static void abort_lost_submit(void) {
@@ -493,6 +553,8 @@ static const entry CASES[] = {
     { "abort-waitany", abort_wait_any },
     { "abort-submit", abort_submit_failed },
     { "lostfinish", lost_finish },
+    { "lostcreate", lost_create },
+    { "unsubmittedkept", unsubmitted_kept },
     { "abort-lostsubmit", abort_lost_submit },
     { "abort-compilationinfo", abort_compilation_info },
     { "abort-pipelineasync", abort_render_pipeline_async },

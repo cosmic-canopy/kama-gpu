@@ -136,7 +136,12 @@ device, made with its request and handed to both of its callbacks.
 - **`device.lost() -> Optional<DeviceLoss>`,** with its `reason()` (a `LossReason`: `Unknown` or `Destroyed`) and its
   `message()`. A device whose instance went first is not lost. Natively wgpu-native reports no loss of a destroy or a
   release, and a real loss only at a later call; so the package also asks, before every submit and every map, whether
-  the device can still take work, and records the loss the first time it cannot, in wgpu-native's words.
+  the device can still take work, and records the loss the first time it cannot, in wgpu-native's words. It asks by
+  creating an encoder it releases unfinished, which keeps nothing, so a program writing a buffer and submitting every
+  frame runs with flat memory.
+- **Natively, a command buffer a program finishes is kept until it is submitted.** wgpu-native v29.0.1.1 keeps every
+  command buffer finished and released unsubmitted until the process ends (wgpu-native #638), about 2.6 MB each on
+  Vulkan with a write pending, so a program submits every command buffer it finishes. A browser drops one.
 - **A device that can no longer take work never ends the program.** Natively a submit to it, or a map of one of its
   buffers, would end the process inside wgpu-native, so the package skips the submit, as a browser drops one, and fails
   the map at once; `lost()` then answers. On the web the browser does the same.
@@ -176,6 +181,9 @@ wgpu-native that changes it fails the gate by name:
   in a `Shader` line;
 - an empty command encoder's finish reports nothing on a working device, and on a destroyed one reports the loss inside
   the call, in "Parent device is lost";
+- an encoder's creation reports nothing on a working device, and on a destroyed one reports the loss inside the call,
+  to the lost callback and not the uncaptured one; released unfinished, it reports nothing more and leaves nothing in
+  wgpu-native's registry, where ten command buffers finished and released unsubmitted are all kept (wgpu-native #638);
 - seven calls end the process, each matched by its panic's words: an error on a device with no uncaptured callback,
   an `Internal` error scope pushed, an error scope popped with none pushed, `wgpuInstanceWaitAny`, a command buffer
   whose `finish` failed submitted, an empty submit to a destroyed device, and `wgpuShaderModuleGetCompilationInfo`.
@@ -626,11 +634,14 @@ What each leg's surface answers, measured (natively 2026-11-10, on the web 2026-
 `tools/test.sh` is the gate. It runs:
 - `tools/check-bindings.sh`: the bindings, `TextureFormat` and `COVERAGE.md` against what the headers and the safe API
   make, the coverage rules on their fixture, and the constants;
-- `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 30 facts, natively, its asynchronous
+- `tools/check-facts.sh`: what wgpu-native does that the seam is built on, 40 facts, natively, its asynchronous
   pipeline call's abort and its taking a colour target the fragment stage never writes among them;
 - `kama check` on the package and its tests;
-- `tests/`, one program run as a `std::app` `App`, a step a tick: 344 cases natively with a display, debug and release.
-  Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock. On Windows the
+- `tests/`, one program run as a `std::app` `App`, a step a tick: 346 cases natively with a display, debug and release.
+  Natively a tick takes no time, so a case that waits for the GPU's own threads waits by the clock. Natively one tick
+  writes a buffer every frame for 10,000 frames, each frame's work submitted and waited on, held to wgpu-native's
+  registry keeping no command buffer more and the process growing less than 64 MB (`tests/src/kept.kama`); the gate
+  fails a native run whose output lacks either case. On Windows the
   native legs run with `dxcompiler.dll` on the PATH (`tools/fetch-dxc.sh`, which the gate needs there), and the fallback
   adapter is held to DXC by its `ShaderF16`; one more run of the debug build has no DXC (`--no-dxc`) and is held to FXC,
   `ShaderF16` offered failing it, and to the FXC line printed once, where the legs with DXC are held to never printing

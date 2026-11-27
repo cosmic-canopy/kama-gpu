@@ -89,6 +89,18 @@ readBack() {
         failed=1
     fi
 }
+# GPU-19's cases (tests/src/kept.kama, AGENTS.gpu.md item 18), the gate's long run of a write every frame, run natively
+# only: a native run that skipped them, or never reached them, fails here, whatever its exit status.
+heldFlat() {
+    local log="$1" leg="$2"
+    if grep -q '^ok   a buffer written every frame for 10,000 frames' "$log" \
+            && grep -q '^ok   and the process grows less than 64 MB over those frames' "$log"; then
+        echo "ok   a write every frame for 10,000 frames piled up nothing ($leg)"
+    else
+        echo "FAIL a write every frame for 10,000 frames was never held to piling up nothing ($leg)"
+        failed=1
+    fi
+}
 # A browser run, bounded where `timeout` exists: `kama run` has no time limit, and a browser that never asks for the page
 # waits for ever (kyoten's KY-53).
 bounded() { if command -v timeout >/dev/null 2>&1; then timeout 300 "$@"; else "$@"; fi; }
@@ -154,6 +166,7 @@ for mode in debug release; do
         "$out" "${nativeFlags[@]}" 2>&1 | tee "tests/out/run-$mode.log" || failed=1
         printed "tests/out/run-$mode.log" "native, $mode"
         builtAs "tests/out/run-$mode.log" "$mode" "native, $mode"
+        heldFlat "tests/out/run-$mode.log" "native, $mode"
         if [ -n "$DXC_DIR" ]; then fxcLine "tests/out/run-$mode.log" "native, $mode" 0; fi
     else
         tail -20 "tests/out/build-$mode.log"
@@ -168,6 +181,7 @@ if [ -n "$DXC_DIR" ]; then
         PATH="$NO_DXC_PATH" "$out" --no-dxc "${nativeFlags[@]}" 2>&1 | tee tests/out/run-fxc.log || failed=1
         printed tests/out/run-fxc.log "native, without DXC"
         builtAs tests/out/run-fxc.log debug "native, without DXC"
+        heldFlat tests/out/run-fxc.log "native, without DXC"
         fxcLine tests/out/run-fxc.log "native, without DXC" 1
     else
         echo "FAIL native, without DXC: the debug build is missing"
