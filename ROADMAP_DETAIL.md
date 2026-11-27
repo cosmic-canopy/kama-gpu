@@ -5,6 +5,25 @@ when it comes up, and their answers are recorded here or, for a departure from k
 [AGENTS.gpu.md](AGENTS.gpu.md). When a row ships, its section goes: what was built is the [SPEC](SPEC.md), and how it
 was decided is the git log. `tools/check-roadmap.sh` holds every section to a row.
 
+<a id="lost-surface"></a>
+## GPU-18: a lost device's surface never ends the program
+
+**Found** in kyoten's fifty-second session's start batch (2026-11-26), `@kama/graphics`' gate on kyoten's pin
+(0.9.1027) beside kyoten's gate and three mutation batches: `examples/cube` natively in debug on the GPU logged "cube:
+compiled, after 0 renders that drew nothing", and then wgpu-native panicked in `wgpuSurfaceGetCurrentTexture`
+("Validation Error ... Caused by: Parent device is lost") and the process aborted. The same gate alone was green, so
+the loss came from outside, but a device can always be lost (a driver reset, a GPU removed), and decision 9 says
+nothing ends the program.
+- **The lost-device fix of 2026-11-14 stops short of the surface** (AGENTS.gpu.md item 13): before every submit and
+  map the seam asks whether the device takes work (`takes_work`), but `gpuseam_surface_acquire` calls
+  `wgpuSurfaceGetCurrentTexture` unasked. A surface's configure aborts on wgpu-native for any invalid configure
+  (measured 2026-11-10), so a lost device's configure, acquire and present are each to be held.
+- **The row, as the owner took it** ("I'll take your rec", 2026-11-26, kyoten's FIRST-SLICE): test-first, as that
+  fix was. A case loses the device with a window's surface configured (destroyed through its raw handle, as
+  `tests/src/lost.kama` stands in for a loss), then acquires and presents. Red first natively, the process ending; then
+  each surface call answers, and the device says it is lost. What an acquire answers on a lost device (the surface's
+  `Lost`, or a status of its own), and what each browser does there, are measured and settled at the row.
+
 <a id="compute"></a>
 ## GPU-5: compute
 

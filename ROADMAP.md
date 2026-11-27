@@ -11,7 +11,7 @@ in the git log.
 > **`GPU-<n>` is a permanent id, not a position.** It is assigned once, from the counter below, which the same edit
 > bumps; it is never reused or renumbered, and a shipped row's id retires with it.
 
-**Next id: GPU-18**
+**Next id: GPU-19**
 
 **The goal before 1.0 is every call in webgpu.h** ([AGENTS.gpu.md](AGENTS.gpu.md#what-this-is)), grown by the spec's
 sections in the order `@kama/graphics` pulls them.
@@ -27,6 +27,7 @@ goldens (item 16). The next row below that it pulls moves up here when it does.
 
 | id | item | why |
 |---|---|---|
+| GPU-18 | **A lost device's surface never ends the program**: natively a frame acquired on a lost device reaches wgpu-native's panic, a gap the lost-device fix of 2026-11-14 left; each surface call after a loss answers instead | [detail](ROADMAP_DETAIL.md#lost-surface) |
 | GPU-5 | **Compute**: compute pipelines and passes, storage buffers and storage textures | [detail](ROADMAP_DETAIL.md#compute) |
 | GPU-6 | **Queries and timestamps**: query sets, occlusion queries, timestamps and their resolve | [detail](ROADMAP_DETAIL.md#queries) |
 | GPU-7 | **Indirect draws and dispatches, and render bundles** | [detail](ROADMAP_DETAIL.md#indirect) |
