@@ -28,15 +28,23 @@ instance made the same way (`wgpuCreateInstance(NULL)`). What differs:
   empty command encoder, finishing it and releasing the command buffer unsubmitted. A frame with no write does the same
   and stays flat, so if this is the cause, it is the unsubmitted command buffer while a write is pending.
 
+**What holds the memory: `takes_work`, measured the same day.** With the seam's `gpuseam_queue_submit` patched to skip
+`takes_work` (a throwaway worktree), the same 128-byte frames stayed flat at 120 to 240 MB through 3,000 frames, in
+about 1.5 seconds. With `takes_work` kept and the poll made non-waiting, as the games poll, memory still grew to 5.8 GB.
+So the check that keeps a submit to a lost device from ending the process is what keeps about 2.6 MB a frame: an
+encoder finished and dropped unsubmitted while a write is pending. Whether wgpu-native should give that memory back on
+its own is the upstream report's question; the fix is this package's either way.
+
 **The row:**
 - **Test-first,** as the lost-device fix of 2026-11-14 was: a case writes a buffer each frame for 10,000 frames, held to memory
   that stays bounded. How it is measured is settled at the row: wgpu-native's own `wgpuGenerateReport`, whose buffer
   counts a kept staging buffer would raise, or the process's memory from the OS. It is red first.
-- **Find what holds the memory:** the discriminating probes first (`takes_work` left out; a non-waiting poll; Direct3D
-  12, if a program can choose it, which `WGPU_BACKEND` did not); then a pure C repro on wgpu-native, so the cause is
-  wgpu-native's, the driver's or this package's.
-- **Fix it here** if it is this package's. If it is wgpu-native's, the stopgap is named and an upstream report to
-  gfx-rs/wgpu-native is drafted, which the owner posts.
+- **Ask whether a device takes work another way,** one that drops no command buffer while a write is pending, and that
+  still answers before a submit to a lost device, which wgpu-native ends the process at (the lost-device fix's reason).
+  Its candidates are measured and asked at the row.
+- **A pure C repro on wgpu-native** of an encoder dropped unsubmitted while a write is pending, and on Direct3D 12 if a
+  program can choose it (`WGPU_BACKEND` did not), for an upstream report to gfx-rs/wgpu-native, drafted for the owner
+  to post.
 - **Done:** a native program writing a buffer every frame runs indefinitely with flat memory, and the gate holds it.
 
 <a id="lost-surface"></a>

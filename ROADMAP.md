@@ -26,7 +26,7 @@ next row below that it pulls moves up here when it does.
 
 | id | item | why |
 |---|---|---|
-| GPU-19 | **A write each frame never piles up natively**: on wgpu-native v29 on Vulkan each frame that calls `writeBuffer` keeps about 2.6 MB until a submit panics after about 2,500 frames, where FFD and the-mallow-man stay flat on the same DLL; found, fixed and held by a long run in the gate | [detail](ROADMAP_DETAIL.md#writes-kept) |
+| GPU-19 | **A write each frame never piles up natively**: each frame that calls `writeBuffer` keeps about 2.6 MB until a submit panics after about 2,500 frames, held by the seam's lost-device check (`takes_work`), an encoder dropped unsubmitted while a write is pending; fixed and held by a long run in the gate | [detail](ROADMAP_DETAIL.md#writes-kept) |
 
 ## LATER: the rest of webgpu.h before 1.0
 
