@@ -13,7 +13,10 @@ was decided is the git log. `tools/check-roadmap.sh` holds every section to a ro
 compiled, after 0 renders that drew nothing", and then wgpu-native panicked in `wgpuSurfaceGetCurrentTexture`
 ("Validation Error ... Caused by: Parent device is lost") and the process aborted. The same gate alone was green, so
 the loss came from outside, but a device can always be lost (a driver reset, a GPU removed), and decision 9 says
-nothing ends the program.
+nothing ends the program. **A machine with no monitor attached reaches it every time** (kyoten's bump to kama 0.9.1033,
+that night): with Windows listing every monitor not present, its one screen the stand-in `WinDisc`, the cube natively
+on the GPU panics the same way at its first frame on every run, built by kama 0.9.1027 or 0.9.1033. That is a loss the
+row can measure without destroying the device by hand.
 - **The lost-device fix of 2026-11-14 stops short of the surface** (AGENTS.gpu.md item 13): before every submit and
   map the seam asks whether the device takes work (`takes_work`), but `gpuseam_surface_acquire` calls
   `wgpuSurfaceGetCurrentTexture` unasked. A surface's configure aborts on wgpu-native for any invalid configure
