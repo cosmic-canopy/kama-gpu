@@ -16,7 +16,13 @@ the loss came from outside, but a device can always be lost (a driver reset, a G
 nothing ends the program. **A machine with no monitor attached reaches it every time** (kyoten's bump to kama 0.9.1033,
 that night): with Windows listing every monitor not present, its one screen the stand-in `WinDisc`, the cube natively
 on the GPU panics the same way at its first frame on every run, built by kama 0.9.1027 or 0.9.1033. That is a loss the
-row can measure without destroying the device by hand.
+row can measure without destroying the device by hand. **So does a screen on a USB monitor's virtual display**
+(kyoten's fifty-third session's start, 2026-11-27): with two monitors present, both on the "USB Mobile Monitor Virtual
+Display" (Amyuni's indirect display driver, 2.0.0.1) and the AMD Radeon 880M driving none (no current resolution), the
+cube natively on the GPU panicked the same way at its first frame, in the gate and alone, built by 0.9.1027 or 0.9.1033,
+and its WARP run then waited without end. This package's own `clear` and `triangle` examples presented 60 frames natively
+on the same machine an hour later, the triangle read back as drawn, so what the cube's first frame does that theirs does
+not is part of the row's measuring.
 - **The lost-device fix of 2026-11-14 stops short of the surface** (AGENTS.gpu.md item 13): before every submit and
   map the seam asks whether the device takes work (`takes_work`), but `gpuseam_surface_acquire` calls
   `wgpuSurfaceGetCurrentTexture` unasked. A surface's configure aborts on wgpu-native for any invalid configure
