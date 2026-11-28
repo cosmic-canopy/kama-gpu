@@ -13,16 +13,61 @@ was decided is the git log. `tools/check-roadmap.sh` holds every section to a ro
 compiled, after 0 renders that drew nothing", and then wgpu-native panicked in `wgpuSurfaceGetCurrentTexture`
 ("Validation Error ... Caused by: Parent device is lost") and the process aborted. The same gate alone was green, so
 the loss came from outside, but a device can always be lost (a driver reset, a GPU removed), and decision 9 says
-nothing ends the program. **A machine with no monitor attached reaches it every time** (kyoten's bump to kama 0.9.1033,
-that night): with Windows listing every monitor not present, its one screen the stand-in `WinDisc`, the cube natively
-on the GPU panics the same way at its first frame on every run, built by kama 0.9.1027 or 0.9.1033. That is a loss the
-row can measure without destroying the device by hand. **So does a screen on a USB monitor's virtual display**
-(kyoten's fifty-third session's start, 2026-11-27): with two monitors present, both on the "USB Mobile Monitor Virtual
-Display" (Amyuni's indirect display driver, 2.0.0.1) and the AMD Radeon 880M driving none (no current resolution), the
-cube natively on the GPU panicked the same way at its first frame, in the gate and alone, built by 0.9.1027 or 0.9.1033,
-and its WARP run then waited without end. This package's own `clear` and `triangle` examples presented 60 frames natively
-on the same machine an hour later, the triangle read back as drawn, so what the cube's first frame does that theirs does
-not is part of the row's measuring.
+nothing ends the program. **A machine with no monitor attached reaches the same panic every time** (kyoten's bump to
+kama 0.9.1033, that night): with Windows listing every monitor not present, its one screen the stand-in `WinDisc`.
+At kyoten's fifty-third session's start it also failed with a screen on Amyuni's "USB Mobile Monitor Virtual Display"
+(RustDesk's), the AMD Radeon 880M driving none, while this package's `clear` and `triangle` examples drew.
+
+**That panic is not a lost device** (kyoten's fifty-fourth session, 2026-11-27 and 28, measured with nobody connected;
+`.scratch/s54/cubeloss/FINDINGS.md` in kyoten). It is an acquire that times out, which wgpu reports as a loss:
+- **The condition:** Windows has no display at all. Every run of the cube on Vulkan with Fifo in that state failed, 56
+  from 17:02 to 19:17, on the AMD Radeon 880M (driver 25.20.42.14) and wgpu-native v29.0.1.1. On RustDesk's
+  virtual display the cube drew every time this session, whether anyone was connected or not (19:29, 21:18 and 08:34),
+  and so did the gate's four native cube legs. Why the fifty-third session's run on that display failed is not known.
+- **The mechanism:** three frames are acquired, submitted and presented, each in about 1 ms, and none comes back. The
+  fourth `wgpuSurfaceGetCurrentTexture` blocks about 1.9 s, then aborts with "Parent device is lost":
+  - wgpu-hal's Vulkan `acquire` waits on the acquired image's fence and maps a `VK_TIMEOUT` there to
+    `DeviceError::Unexpected` (`swapchain/native.rs`);
+  - wgpu-core loses the device for an `Unexpected`;
+  - wgpu-native's acquire sends the error to `handle_error_fatal`, which aborts.
+
+  No TDR was logged, `poll(wait: true)` after each submit returned within 1 ms, and the package's lost state read alive
+  just before the call.
+- **Only Vulkan with Fifo fails:** with Immediate the cube drew all 60 frames, and on Direct3D 12 it presented all 61.
+  This package's triangle drew on Vulkan with Fifo in the same state, its frames coming back at about 13 Hz.
+- **What in the cube keeps its frames from coming back was not found.** Each change still failed:
+  - MSAA off and 4x;
+  - the DFG upload skipped, and the AgX upload skipped;
+  - the AgX table made before the first acquire;
+  - pipelines made synchronously;
+  - the triangle's surface configuration, and `CopySrc` added;
+  - the window halved, and moved;
+  - an empty scene, and no tone mapping;
+  - no depth prepass, no read-only depth, and no scene pass;
+  - all of these at once.
+
+  The triangle with the cube's exact surface configuration, an offscreen RGBA16Float pass, or a first frame held or
+  late still drew. With a display present, the cube drew even with its window moved off every screen or minimized. The
+  hunt stopped at kyoten's owner's word ("A, move on", 2026-11-28): the state needs a machine with no display, and a
+  remote connection ends it.
+- **Upstream already has it:**
+  - wgpu #9029 (open since 2026-02-09) reports the fence wait's timeout turned into a loss;
+  - PR #11000 (open, 2026-11-19, reproduced on an AMD Radeon iGPU on Vulkan with Fifo) returns
+    `SurfaceError::Timeout` instead and keeps the acquired image;
+  - wgpu's trunk still waits on that fence, for Fifo on Windows only (#10714);
+  - wgpu-native #641 (open) reports an acquire's error instead of aborting.
+
+  A comment for #9029 with this case is drafted for kyoten's owner to post (kyoten's
+  `.scratch/s54/cubeloss/upstream/wgpu-9029-comment.md`). wgpu-native's `wgpuSurfacePresent` drops the status
+  wgpu-core returns, but webgpu.h has it answer an error only when there is no current texture, and a refused present
+  shows at the next acquire, so that is not a bug.
+- **What it means for the row:** a machine with no display is not a lost device the row can measure, so its case
+  destroys the device by hand, as planned. The production answer for the timeout is upstream: #11000 in a wgpu release,
+  then in wgpu-native's, then kama's bump. The package then hands a program the surface's `Timeout`. Until then, a
+  native Vulkan program on a machine with no display can end at its fourth frame.
+- **Measured when the row starts:** with no display, on Direct3D 12 the cube's last frame's window read was still
+  pending after 30 s and the run hung. WARP's runs waited the same way in the fifty-second and fifty-third sessions.
+  Whether a map waits on a present that never retires is the row's to measure.
 - **The lost-device fix of 2026-11-14 stops short of the surface** (AGENTS.gpu.md item 13): before every submit and
   map the seam asks whether the device takes work (`takes_work`), but `gpuseam_surface_acquire` calls
   `wgpuSurfaceGetCurrentTexture` unasked. A surface's configure aborts on wgpu-native for any invalid configure
