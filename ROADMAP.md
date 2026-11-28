@@ -18,18 +18,22 @@ sections in the order `@kama/graphics` pulls them.
 
 ## NOW: what `@kama/graphics`' first slice pulls
 
-Nothing here is under way. The render pipeline set and the fallback adapter are built ([SPEC.md](SPEC.md); the git log
-has how), and `@kama/graphics`' GFX-1, the lit cube, is under way: `writeTexture` came forward from GPU-8 for its first
-texture ([AGENTS.gpu.md](AGENTS.gpu.md) item 14), DXC natively on Windows was filed and built for its tone-mapping
-goldens (item 16), and the lost-device check that kept memory at every submit natively was fixed before its engine
-surface is measured (item 18). The next row below that it pulls moves up here when it does.
+The render pipeline set and the fallback adapter are built ([SPEC.md](SPEC.md); the git log has how), and
+`@kama/graphics`' GFX-1, the lit cube, is under way: `writeTexture` came forward from GPU-8 for its first texture
+([AGENTS.gpu.md](AGENTS.gpu.md) item 14), DXC natively on Windows was filed and built for its tone-mapping goldens
+(item 16), and the lost-device check that kept memory at every submit natively was fixed (item 18). Compute comes
+next, at kyoten's owner's word (2026-11-27): `@kama/graphics`' engine surface, its GFX-21, uploads an engine's changed
+records through a compute scatter. The next row below that it pulls moves up here when it does.
+
+| id | item | why |
+|---|---|---|
+| GPU-5 | **Compute**: compute pipelines and passes, storage buffers and storage textures | [detail](ROADMAP_DETAIL.md#compute) |
 
 ## LATER: the rest of webgpu.h before 1.0
 
 | id | item | why |
 |---|---|---|
 | GPU-18 | **A lost device's surface never ends the program**: natively a frame acquired on a lost device reaches wgpu-native's panic, a gap the lost-device fix of 2026-11-14 left; each surface call after a loss answers instead | [detail](ROADMAP_DETAIL.md#lost-surface) |
-| GPU-5 | **Compute**: compute pipelines and passes, storage buffers and storage textures | [detail](ROADMAP_DETAIL.md#compute) |
 | GPU-6 | **Queries and timestamps**: query sets, occlusion queries, timestamps and their resolve | [detail](ROADMAP_DETAIL.md#queries) |
 | GPU-7 | **Indirect draws and dispatches, and render bundles** | [detail](ROADMAP_DETAIL.md#indirect) |
 | GPU-8 | **The rest of webgpu.h**, from COVERAGE.md's uncalled rows: the buffer and texture copies, mapped writes, labels and debug groups, external textures, WGSL language features | [detail](ROADMAP_DETAIL.md#the-rest) |

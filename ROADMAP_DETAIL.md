@@ -40,6 +40,13 @@ Compute pipelines and passes, dispatches, and storage buffers and textures. `@ka
 (particles, culling, post-processing), so its first use orders this row. Done: a dispatch whose output is read back
 exactly, on both legs.
 
+**Its first use, and why it comes now** (kyoten's owner, 2026-11-27, `@kama/graphics`' GFX-21, question 2, (A); kyoten's
+`docs/design/rendering.md` § Decided): an engine's changed instance records reach the GPU through a compute scatter.
+The changed records and their slots go up in one write, and a dispatch places each in the instance buffer, as Bevy's
+sparse upload and Unity's Entities Graphics `SparseUploader` do. So the scatter's case, records written into a storage
+buffer at the slots a second buffer names, read back exactly, is the row's first, beside its own coverage of WebGPU's
+compute surface. Its questions are laid out from WebGPU's description and asked when the row starts.
+
 <a id="queries"></a>
 ## GPU-6: queries and timestamps
 
